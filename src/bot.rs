@@ -1,4 +1,4 @@
-//! The live loop: I/O (feeds, Jev, klines, regime) around the shared decision path
+//! The news bot loop: I/O (feeds, Jev, Hyperliquid candles and funding, regime) around the shared decision path
 //! (`decide::decide` + `decide::execute`), then settlement. Per-stage telemetry for
 //! the dashboard, and dashboard controls (pause, flatten).
 
@@ -33,7 +33,7 @@ pub struct Ctx {
     pub http: reqwest::Client,
     pub jev: JevClient,
     pub paths: Paths,
-    /// Some = real orders on Binance (config `mode = "live"` and `run --live`).
+    /// Some = real orders on Hyperliquid (config `mode = "live"` and `run --live`).
     pub live: Option<crate::live::Live>,
 }
 
@@ -43,16 +43,16 @@ pub async fn run(ctx: Ctx, once: bool) -> Result<()> {
         Some(l) => {
             let s = crate::live::open_ledger(l, &ctx.cfg, &ctx.paths.state).await?;
             if ctx.cfg.exchange.is_testnet() {
-                info!(cash = s.cash, positions = s.positions.len(), "Binance TESTNET account loaded (fake money)");
+                info!(cash = s.cash, positions = s.positions.len(), "Hyperliquid TESTNET account loaded (fake money)");
             } else {
-                warn!(cash = s.cash, positions = s.positions.len(), "LIVE account loaded: orders are real");
+                warn!(cash = s.cash, positions = s.positions.len(), "LIVE Hyperliquid account loaded: orders are real");
             }
             s
         }
         None => {
             let s = State::load_or_new(&ctx.paths.state, ctx.cfg.paper.starting_cash)?;
             crate::live::refuse_live_ledger(&s)?;
-            info!(cash = s.cash, positions = s.positions.len(), "paper account loaded");
+            info!(cash = s.cash, positions = s.positions.len(), "paper account loaded (Hyperliquid prices and fees)");
             s
         }
     };
@@ -331,7 +331,7 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
     let mut live: HashMap<String, f64> = HashMap::new();
     for a in &cfg.assets {
         let mut inp = AssetInput { symbol: a.symbol.clone(), ..Default::default() };
-        match market::klines(&ctx.http, &cfg.market.base_url, &a.pair, &cfg.market.interval, limit).await {
+        match market::klines(&ctx.http, cfg.api(), &a.coin, &cfg.market.interval, limit).await {
             Ok(raw) => match crate::validate::candles(&raw) {
                 Ok(()) => {
                     let snap = market::split_closed(raw, now.timestamp_millis(), ims);
@@ -345,20 +345,36 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
                     }
                     if snap.stale {
                         inp.review = Some("stale candles".into());
-                        price_errs.push(format!("{}: stale", a.pair));
+                        price_errs.push(format!("{}: stale", a.coin));
                     }
                 }
                 Err(e) => {
                     inp.review = Some(format!("invalid candles: {e}"));
-                    price_errs.push(format!("{}: invalid", a.pair));
+                    price_errs.push(format!("{}: invalid", a.coin));
                 }
             },
             Err(e) => {
-                warn!("price fetch failed for {}: {e:#}", a.pair);
-                price_errs.push(a.pair.clone());
+                warn!("price fetch failed for {}: {e:#}", a.coin);
+                price_errs.push(a.coin.clone());
             }
         }
         inputs.push(inp);
+    }
+    // Perps funding on open longs, at Hyperliquid's current hourly rates.
+    let mut funding_note = String::new();
+    match crate::hyperliquid::perp_universe(&ctx.http, cfg.api()).await {
+        Ok(u) => {
+            let rates: HashMap<String, f64> =
+                cfg.assets.iter().filter_map(|a| u.iter().find(|p| p.coin == a.coin).map(|p| (a.symbol.clone(), p.funding_1h))).collect();
+            let amt = state.accrue_funding(&rates, &live, now);
+            if !state.positions.is_empty() {
+                funding_note = format!(" · funding {amt:+.4} (total {:+.2})", state.funding_usd);
+            }
+        }
+        Err(e) => {
+            warn!("funding rates unavailable: {e:#}");
+            funding_note = " · funding unavailable".into();
+        }
     }
     stages.push(stage(
         "Prices",
@@ -370,19 +386,19 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
             StageState::Degraded
         },
         if price_errs.is_empty() {
-            format!("{} pairs · {} closed candles", live.len(), cfg.market.interval)
+            format!("{} perps · {} closed candles{funding_note}", live.len(), cfg.market.interval)
         } else {
-            format!("failed: {}", price_errs.join(", "))
+            format!("failed: {}{funding_note}", price_errs.join(", "))
         },
         t0,
     ));
 
     // 3b. Live: the exchange must still hold what the ledger holds.
-    let mut balances: Option<HashMap<String, f64>> = None;
+    let mut account: Option<crate::hyperliquid::exchange::Account> = None;
     if let Some(l) = &ctx.live {
         let t0 = Instant::now();
-        match crate::live::reconcile(l, state).await {
-            Ok((bal, review)) => {
+        match crate::live::reconcile(l, state, cfg).await {
+            Ok((acct, review)) => {
                 for inp in inputs.iter_mut() {
                     if let Some(r) = review.get(&inp.symbol)
                         && inp.review.is_none()
@@ -390,12 +406,11 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
                         inp.review = Some(r.clone());
                     }
                 }
-                let q = bal.get(&l.quote).copied().unwrap_or(0.0);
                 stages.push(stage(
                     "Exchange",
                     if review.is_empty() { StageState::Ok } else { StageState::Degraded },
                     if review.is_empty() {
-                        format!("Binance in sync · {q:.2} {} free · ledger cash {:.2}", l.quote, state.cash)
+                        format!("Hyperliquid in sync · {:.2} USDC withdrawable · ledger cash {:.2}", acct.withdrawable, state.cash)
                     } else {
                         let mut v: Vec<_> = review.iter().map(|(k, r)| format!("{k}: {r}")).collect();
                         v.sort();
@@ -403,12 +418,12 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
                     },
                     t0,
                 ));
-                balances = Some(bal);
+                account = Some(acct);
             }
             Err(e) => {
-                warn!("Binance account check failed: {e:#}");
+                warn!("Hyperliquid account check failed: {e:#}");
                 for inp in inputs.iter_mut() {
-                    inp.review.get_or_insert_with(|| "Binance account unavailable".into());
+                    inp.review.get_or_insert_with(|| "Hyperliquid account unavailable".into());
                 }
                 stages.push(stage("Exchange", StageState::Error, format!("account check failed, no orders this tick: {e:#}"), t0));
             }
@@ -522,10 +537,10 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
 
     // 6. Execute.
     let t0 = Instant::now();
-    let (fills, exec_errors) = match (&ctx.live, balances.as_mut()) {
-        (Some(l), Some(bal)) => crate::live::execute(l, state, &mut d, cfg, now, bal).await,
+    let (fills, exec_errors) = match (&ctx.live, account.as_mut()) {
+        (Some(l), Some(acct)) => crate::live::execute(l, state, &mut d, cfg, now, acct).await,
         // Live but the account check failed: fail closed, no orders.
-        (Some(_), None) => (Vec::new(), vec!["Binance account unavailable".to_string()]),
+        (Some(_), None) => (Vec::new(), vec!["Hyperliquid account unavailable".to_string()]),
         (None, _) => (decide::execute(state, &mut d, cfg, now), Vec::new()),
     };
     let venue = match &ctx.live {
@@ -543,7 +558,7 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
         state.flatten_handled = control.flatten_requested_at;
         info!("flatten complete");
     }
-    let fill_word = if ctx.live.is_some() { "Binance fills" } else { "paper fills" };
+    let fill_word = if ctx.live.is_some() { "Hyperliquid fills" } else { "paper fills" };
     stages.push(stage(
         "Execution",
         if exec_errors.is_empty() { StageState::Ok } else { StageState::Degraded },

@@ -92,7 +92,15 @@ pub struct State {
     /// "live" when this ledger mirrors a real exchange account (never mixed with paper).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
-    /// Capital the ledger started with (live: the allotted USDT; paper: `starting_cash`).
+    /// Live: "hyperliquid" or "hyperliquid-testnet". A live ledger without it was made for Binance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub venue: Option<String>,
+    /// Perp funding received (+) or paid (−) since the ledger started, already in cash.
+    #[serde(default)]
+    pub funding_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding_at: Option<DateTime<Utc>>,
+    /// Capital the ledger started with (live: the allotted USDC; paper: `starting_cash`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starting_cash: Option<f64>,
     /// Live: an order whose outcome could not be confirmed. Blocks entries until cleared.
@@ -143,7 +151,7 @@ pub struct Fill {
     pub gates: Vec<GateResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<String>,
-    /// "binance" for real exchange fills; absent for paper fills.
+    /// "hyperliquid" / "hyperliquid-testnet" for real exchange fills; absent for paper fills.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub venue: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,6 +184,9 @@ impl State {
             last_dir: BTreeMap::new(),
             reaction: BTreeMap::new(),
             mode: None,
+            venue: None,
+            funding_usd: 0.0,
+            funding_at: None,
             starting_cash: Some(cash),
             live_hold: None,
             seen_index: HashSet::new(),
@@ -270,6 +281,26 @@ impl State {
                 .iter()
                 .map(|(a, p)| p.qty * prices.get(a).copied().unwrap_or(p.entry))
                 .sum::<f64>()
+    }
+
+    /// Perps: accrues funding on long positions since the last call, at each coin's
+    /// current hourly rate (positive rate = longs pay). Returns the amount booked.
+    /// Hyperliquid settles hourly; accruing per tick spreads the same total.
+    pub fn accrue_funding(&mut self, rates_1h: &HashMap<String, f64>, prices: &HashMap<String, f64>, now: DateTime<Utc>) -> f64 {
+        let Some(last) = self.funding_at.replace(now) else { return 0.0 };
+        let dt_h = ((now - last).num_milliseconds().max(0) as f64 / 3_600_000.0).min(2.0);
+        let mut total = 0.0;
+        for (a, p) in &self.positions {
+            if let (Some(r), Some(px)) = (rates_1h.get(a), prices.get(a))
+                && r.is_finite()
+                && px.is_finite()
+            {
+                total -= r * p.qty * px * dt_h;
+            }
+        }
+        self.cash += total;
+        self.funding_usd += total;
+        total
     }
 
     pub fn weight(&self, asset: &str, price: f64, equity: f64) -> f64 {

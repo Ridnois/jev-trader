@@ -1,6 +1,11 @@
-# Binance SPOT TESTNET config: same strategy, real order flow, fake money.
+# Scalper on Hyperliquid TESTNET: fake money, real order plumbing (signing, ALO
+# entries, reduce-only exits, fill reconciliation). Testnet books are thin, so this
+# tests the code, not the strategy. Testnet prices also feed the signals here.
+# Keys: put HL_ACCOUNT_ADDRESS / HL_AGENT_PRIVATE_KEY for a testnet account in .env.hl-testnet
+# Check: jev-trader --env-file .env.hl-testnet --config config.testnet.toml hl check
+# Run:   jev-trader --env-file .env.hl-testnet --config config.testnet.toml scalp --live
 loop_interval_secs = 60
-data_dir = "data-testnet"   # its own ledger, separate from paper and live
+data_dir = "data-hl-testnet"   # its own ledger: never shares state with paper
 
 [jev]
 model = "jev-latest"
@@ -12,8 +17,6 @@ timeout_ms = 3000
 # breaker_min_calls = 4
 
 [market]
-# Binance public market-data mirror (no API key needed).
-base_url = "https://data-api.binance.vision"
 interval = "1h"
 momentum_window = 20      # close vs 20-candle SMA
 
@@ -60,7 +63,7 @@ rebalance_band = 0.02     # ignore changes < 2% of equity
 
 [paper]
 starting_cash = 10000.0
-fee_rate = 0.001          # 0.1% taker
+fee_rate = 0.00045        # Hyperliquid taker
 slippage_rate = 0.0005    # 5 bps
 
 # [regime]                    # crypto market regime, refreshed hourly (keyless sources)
@@ -78,25 +81,91 @@ slippage_rate = 0.0005    # 5 bps
 # benchmark = "BTC"
 
 [exchange]
-# Testnet keys (from https://testnet.binance.vision) live in .env.test.
-# Run with: jev-trader --config config.testnet.toml --env-file .env.test run --live
-# Prices for signals still come from mainnet (testnet tracks it within ~0.02%).
-mode = "live"
-base_url = "https://testnet.binance.vision"
-quote = "USDT"
-max_capital_usd = 10000.0   # testnet money, mirrors the paper starting cash
+mode = "live"             # real orders; also needs `run --live`
+network = "testnet"
+account_env = "HL_ACCOUNT_ADDRESS"      # your main Hyperliquid address (public)
+agent_key_env = "HL_AGENT_PRIVATE_KEY"  # API agent wallet key: trades, cannot withdraw
+max_capital_usd = 0       # YOU choose this; 0 refuses to start
+max_slippage_bps = 30     # IOC limit at most 0.3% through the price
+leverage = 1              # cross 1× on each coin, matching the ledger's sizing
+
+[scalp]
+# Market microstructure decides; news tilts (news_tilt) and vetoes (hack alert,
+# Jev entry review). Every default is listed. Paper fills are charged real
+# Hyperliquid fees, and maker entries fill only when trades print through the price.
+eval_ms = 500
+flow_window_secs = 30
+vol_window_secs = 300
+baseline_secs = 1800
+warmup_secs = 600
+min_activity_ratio = 1.5
+min_flow_imbalance = 0.25
+min_book_imbalance = 0.10
+min_push_bps = 3.0
+max_chase_bps = 60.0
+max_spread_bps = 5.0
+hold_secs = 600
+# Costs: Hyperliquid perps tier 0 (no volume, no HYPE staked), checked 2026-11-06
+# against hyperliquid.gitbook.io/hyperliquid-docs/trading/fees.
+fee_bps = 4.5             # taker
+maker_fee_bps = 1.5       # post-only (ALO)
+slippage_bps = 1.0
+cost_mult = 2.0           # typical move over the hold must be ≥ 2× round-trip cost
+tp_vol_mult = 1.5
+tp_cost_mult = 1.5
+sl_vol_mult = 1.0
+sl_cost_mult = 1.0
+position_pct = 0.10
+max_positions = 2
+max_trades_per_hour = 6
+daily_loss_limit_pct = 0.02
+cooldown_after_loss_secs = 900
+news_tilt = 0.10
+jev_review = true
+jev_veto = 0.6
+jev_cache_secs = 120
+jev_headline_minutes = 180
+markouts = [60, 300, 600]
+shorts = true             # a short is a plain perp sell
+starting_cash = 10000.0   # paper dollars
+entry = "maker"           # post at the bid (long) / ask (short); filled only if trades print through it
+maker_timeout_secs = 20   # then cancelled and logged as a miss (scalp_orders.jsonl)
+trail_after_cost_mult = 1.5  # in profit by 1.5× cost → stop to break-even after fees, then trail
+
+# Universe (2026-11-06, `hl scan`, 72h): liquid perps (24h volume ≥ $18M, impact spread
+# ≤ 3.3 bps) whose 10-minute moves clear 2× the maker/taker round trip most often.
+# ZEC 75%, kPEPE 72%, ENA 71%, NEAR 70%, HYPE 61%, SOL 55%, XRP 48%, ETH 42%; at Binance
+# spot costs the same coins cleared 6–37%. Changing it is hypothesis H-C03.
+
 
 [[assets]]
-symbol = "BTC"
-name = "Bitcoin"
-pair = "BTCUSDT"
-
-[[assets]]
-symbol = "ETH"
-name = "Ethereum"
-pair = "ETHUSDT"
+symbol = "HYPE"
+name = "Hyperliquid"
+coin = "HYPE"
 
 [[assets]]
 symbol = "SOL"
 name = "Solana"
-pair = "SOLUSDT"
+coin = "SOL"
+
+[[assets]]
+symbol = "NEAR"
+name = "NEAR Protocol"
+coin = "NEAR"
+
+[[assets]]
+symbol = "ETH"
+name = "Ethereum"
+coin = "ETH"
+
+
+[[assets]]
+symbol = "PEPE"
+name = "Pepe (1000×, kPEPE)"
+coin = "kPEPE"
+
+# ZEC, XRP and ENA are not listed on testnet (2026-11-06).
+[[assets]]
+symbol = "BTC"
+name = "Bitcoin"
+coin = "BTC"

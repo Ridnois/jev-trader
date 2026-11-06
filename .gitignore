@@ -3,9 +3,13 @@ data/
 data-live/
 data-testnet/
 data-scalp/
+data-hl/
+data-hl-live/
+data-hl-testnet/
 .env
 .env.local
 .env.test
+.env.hl-*
 .env.*.local
 scripts/vol_scan.json
 

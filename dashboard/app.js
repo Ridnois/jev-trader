@@ -1,756 +1,715 @@
 "use strict";
-// Jev trader dashboard. Read-only except Pause / Flatten on the news bot.
-// Every number is turned into a plain sentence first; the raw readings sit beside it in mono.
-(() => {
-  const $ = (s) => document.querySelector(s);
-  const VIEWS = { today: "Today", trades: "Trades", decisions: "Decisions", news: "News bot", score: "Scorecard" };
+// Jev trader dashboard: one departure board for both bots.
+// Reads /api/snapshot (news bot) and /api/scalp (scalper). Writes only the news bot's pause/flatten controls.
 
-  // ---------- state ----------
-  let snap = null, scalp = null, skew = 0, conn = "connecting";
-  let view = "today";
-  let tradeFilter = "all", decFilter = "all", decShown = 50, headShown = 20;
-  const openTrades = new Set(), openTraces = new Set();
-  let flattenArmed = false, armTimer = null, busy = false, actionError = null;
+const S = { snap: null, scalp: null, etag: null, view: "board", open: new Set(), tab: {}, filter: "all", confirmFlatten: false, err: {} };
+const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const $ = (s, el = document) => el.querySelector(s);
 
-  // ---------- format ----------
-  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : null);
-  const usdF = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-  const usd = (n) => (n == null || !isFinite(n) ? "—" : usdF.format(n));
-  const susd = (n) => (n == null || !isFinite(n) ? "—" : (n > 0 ? "+" : n < 0 ? "−" : "") + usdF.format(Math.abs(n)));
-  const px = (n) => n == null ? "—" : n.toLocaleString("en-US", { minimumFractionDigits: n < 1 ? 4 : 2, maximumFractionDigits: n < 1 ? 4 : n < 10 ? 3 : 2 });
-  const qtyF = (n) => n.toLocaleString("en-US", { maximumFractionDigits: n < 1 ? 5 : 3 });
-  // Basis points are an insider unit; everything a reader sees is a percent.
-  const pc = (bps, d = 2) => (bps == null || !isFinite(bps) ? "—" : (Math.abs(bps) / 100).toFixed(d) + "%");
-  const spc = (bps, d = 2) => (bps == null || !isFinite(bps) ? "—" : (bps > 0 ? "+" : bps < 0 ? "−" : "") + pc(bps, d));
-  const cls = (x) => (x > 0 ? "pos" : x < 0 ? "neg" : "");
-  const hm = (iso) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const now = () => Date.now() + skew;
-  const ago = (iso) => {
-    const s = Math.max(0, Math.round((now() - Date.parse(iso)) / 1000));
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ago`;
+// ---------- formatting ----------
+const MINUS = "−";
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const num = (x, d = 2) => (x == null || !isFinite(x) ? "—" : Math.abs(x).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
+const usd = (x, d = 2) => (x == null || !isFinite(x) ? "—" : (x < 0 ? MINUS : "") + "$" + num(x, d));
+const susd = (x, d = 2) => (x == null || !isFinite(x) ? "—" : (x > 0 ? "+" : x < 0 ? MINUS : "") + "$" + num(x, d));
+const pct = (x, d = 1) => (x == null || !isFinite(x) ? "—" : (x < 0 ? MINUS : "") + num(x * 100, d) + "%");
+const spct = (x, d = 1) => (x == null || !isFinite(x) ? "—" : (x > 0 ? "+" : x < 0 ? MINUS : "") + num(x * 100, d) + "%");
+const sgn = (x, d = 2) => (x == null || !isFinite(x) ? "—" : (x > 0 ? "+" : x < 0 ? MINUS : "") + num(x, d));
+const cls = (x) => (x > 0.004 ? "pos" : x < -0.004 ? "neg" : "flat");
+const px = (x) => (x == null ? "—" : x >= 1000 ? num(x, 1) : x >= 1 ? num(x, x >= 100 ? 2 : 4) : num(x, 6));
+const t = (iso) => (iso ? new Date(iso) : null);
+const hm24 = (d) => (d ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "");
+const hm = (d) => (d ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "—");
+const hms = (d) => (d ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "—");
+const day = (d) => (d ? d.toLocaleDateString([], { month: "short", day: "numeric" }) : "");
+function ago(d) {
+  if (!d) return "never";
+  const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+  if (s < 5) return "just now";
+  if (s < 90) return Math.round(s) + " s ago";
+  if (s < 5400) return Math.round(s / 60) + " min ago";
+  if (s < 172800) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " days ago";
+}
+function dur(secs) {
+  if (secs == null) return "—";
+  secs = Math.max(0, Math.round(secs));
+  if (secs < 60) return secs + " s";
+  if (secs < 3600) return Math.floor(secs / 60) + " min " + String(secs % 60).padStart(2, "0") + " s";
+  return Math.floor(secs / 3600) + " h " + Math.floor((secs % 3600) / 60) + " min";
+}
+// bps per trade → dollars on a $1,000 trade (the scalper's usual size).
+const per1k = (bps) => (bps == null ? null : bps / 10);
+
+// ---------- icons (one stroke family) ----------
+const ICON = {
+  check: '<path d="M4 12.5l5 5L20 6.5"/>',
+  x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  dash: '<path d="M6 12h12"/>',
+  pause: '<path d="M9 5v14M15 5v14"/>',
+  play: '<path d="M7 5l12 7-12 7z"/>',
+  flat: '<path d="M4 12h16M12 3v5M9 5.5L12 8l3-2.5M12 21v-5M9 18.5l3-2.5 3 2.5"/>',
+  chev: '<path d="M9 6l6 6-6 6"/>',
+  warn: '<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.5v.01"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/>',
+};
+const icon = (n) => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]}</svg>`;
+
+// ---------- the scalper's checks, in the order it runs them ----------
+function scalpSettings() { return S.scalp?.status?.settings || {}; }
+const MARKET_GATES = ["warm-up", "feed", "spread", "burst", "flow", "book", "push", "no chase", "cost", "news"];
+const RISK_GATES = ["flat", "max positions", "cooldown", "trades/hour", "daily limit", "exchange", "cash", "jev review"];
+function gateInfo(g) {
+  const s = scalpSettings();
+  const m = {
+    "warm-up": ["Warm-up", `Needs ${Math.round((s.warmup_secs || 600) / 60)} minutes of trading history on the coin first.`, "WARMING UP"],
+    feed: ["Fresh prices", `The live order book must be under ${((s.feed_stale_ms || 3000) / 1000).toFixed(0)} s old.`, "FRESH PRICES"],
+    spread: ["A tight spread", `The gap between the best buy and sell price must be at most ${s.max_spread_bps ?? 5} bps (${((s.max_spread_bps ?? 5) / 100).toFixed(2)}%).`, "A TIGHT SPREAD"],
+    burst: ["A rush of trading", `Trading must be at least ${s.min_activity_ratio ?? 1.5}× busier than its usual pace.`, "A RUSH OF TRADING"],
+    flow: ["One-sided flow", `Over the last ${s.flow_window_secs ?? 30} s, trades must lean clearly to buyers (for a long) or sellers (for a short).`, "ONE-SIDED FLOW"],
+    book: ["Book support", "Resting orders waiting in the book must lean the same way as the trades.", "BOOK SUPPORT"],
+    push: ["Price moving", `Price must have moved at least ${s.min_push_bps ?? 3} bps that way in the last minute.`, "PRICE MOVING"],
+    "no chase": ["A calmer price", `It won't jump in after a move of more than ${s.max_chase_bps ?? 60} bps in 5 minutes.`, "A CALMER PRICE"],
+    cost: ["A big enough move", `The expected move must be at least ${s.cost_mult ?? 2}× the round-trip cost: fees, spread and funding.`, "A BIG ENOUGH MOVE"],
+    news: ["Calmer news", `News tone moves the bar by up to ${Math.round((s.news_tilt ?? 0.1) * 100)}%. A hack alert blocks longs.`, "CALMER NEWS"],
+    flat: ["Its open trade to end", "It holds at most one trade per coin.", "ITS TRADE TO END"],
+    "max positions": ["A free slot", `At most ${s.max_positions ?? 2} trades open at once.`, "A FREE SLOT"],
+    cooldown: ["Cooldown to end", `After a loss it leaves that coin alone for ${Math.round((s.cooldown_after_loss_secs ?? 900) / 60)} minutes.`, "COOLDOWN TO END"],
+    "trades/hour": ["Room in the hourly limit", `At most ${s.max_trades_per_hour ?? 6} trades in any hour.`, "ROOM THIS HOUR"],
+    "daily limit": ["Room in the daily loss limit", `Stops opening trades for the day after losing ${pct(s.daily_loss_limit_pct ?? 0.02, 0)} of capital.`, "TOMORROW"],
+    exchange: ["Exchange matching the books", "Live only: the exchange's positions must match the ledger.", "BOOKS TO MATCH"],
+    cash: ["Enough cash", `Needs at least $${s.min_trade_usd ?? 10} free.`, "MORE CASH"],
+    "jev review": ["Jev's OK on the news", `Jev reads the last ${Math.round((s.jev_headline_minutes ?? 180) / 60)} h of headlines about the coin. Adverse news at ${s.jev_veto ?? 0.6} or more vetoes; news against the move halves the size.`, "JEV'S OK"],
   };
-  const dur = (s) => { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m ? `${m} min ${String(s % 60).padStart(2, "0")} s` : `${s} s`; };
-  const clock = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
-  const plural = (n, w, p = w + "s") => `${n.toLocaleString()} ${n === 1 ? w : p}`;
-  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  return m[g] || [g, "", String(g || "").toUpperCase()];
+}
+const gateWait = (g) => gateInfo(g)[2];
+// What it means when a check stops a trade.
+const STOPPED = { "warm-up": "Still warming up", feed: "Prices were stale", spread: "Spread too wide", burst: "No rush of trading", flow: "Flow not one-sided", book: "Order book disagreed", push: "Price wasn't moving", "no chase": "Too late, already ran", cost: "Too small for fees", news: "News argued against it", flat: "Already in this coin", "max positions": "No free slot", cooldown: "Cooling down", "trades/hour": "Hourly limit full", "daily limit": "Daily loss limit hit", exchange: "Exchange mismatch", cash: "Not enough cash", "jev review": "Jev vetoed" };
+const stoppedBy = (g) => STOPPED[g] || g;
 
-  // ---------- vocabulary: one plain phrase per machine concept ----------
-  const S = () => scalp?.status?.settings || {};
-  const feeBps = () => S().fee_bps ?? 10;
-  const isPractice = () => scalp?.status?.venue !== "binance";
-  // Testnet fills come back with zero commission; real Binance spot charges fee_bps each way.
-  const realFees = (t) => (t.fees_usd > 0 || !isPractice() ? 0 : t.notional * 2 * feeBps() / 1e4);
-  const realPnl = (t) => t.pnl_usd - realFees(t);
-  const betWords = (side) => (side === "short" ? "Bet it would fall" : "Bet it would rise");
-  const pushers = (side) => (side === "short" ? "sellers" : "buyers");
+// ---------- data ----------
+async function getSnap() {
+  try {
+    const r = await fetch("/api/snapshot", { headers: S.etag ? { "If-None-Match": S.etag } : {} });
+    if (r.status === 304) { S.err.snap = null; return false; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    S.etag = r.headers.get("ETag");
+    S.snap = await r.json();
+    S.err.snap = null;
+    return true;
+  } catch (e) { S.err.snap = String(e.message || e); return true; }
+}
+async function getScalp() {
+  try {
+    const r = await fetch("/api/scalp");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    S.scalp = await r.json();
+    S.err.scalp = null;
+  } catch (e) { S.err.scalp = String(e.message || e); }
+  return true;
+}
 
-  const ENDS = {
-    "take profit": ["Hit the target", "Price reached the profit target it set when it entered."],
-    "trailing stop": ["Locked in a gain", "Price moved its way, so it raised the stop to protect the gain; when price pulled back to it, it got out."],
-    "flow reversed": ["Got out as the rush faded", "The traders who started the move stopped pushing, so it left early instead of waiting."],
-    "time stop": ["Ran out of time", "Neither the target nor the stop was hit within its 10-minute limit, so it closed."],
-    stop: ["Hit the stop loss", "Price went far enough against the bet to reach the stop it set at entry."],
-    "hack alert": ["Got out on a hack alert", "A fresh hack headline about this coin closed the bet immediately."],
-  };
-  const endOf = (r) => ENDS[r] || [r ? r[0].toUpperCase() + r.slice(1) : "Closed", ""];
-
-  const GATE_ORDER = ["warm-up", "feed", "spread", "burst", "flow", "book", "push", "no chase", "cost", "news", "flat", "max positions", "cooldown", "trades/hour", "daily limit", "exchange", "cash", "inventory", "jev review"];
-  const WAIT = {
-    "warm-up": "Still learning what normal trading looks like for this coin.",
-    feed: "Price data is lagging, so it won't act on it.",
-    spread: "The gap between buy and sell prices is too wide right now.",
-    burst: "Trading is quiet. There's no rush to ride.",
-    flow: "Neither buyers nor sellers are clearly in control.",
-    book: "The orders waiting in line don't back up the move.",
-    push: "Someone is pushing, but the price hasn't started moving yet.",
-    "no chase": "The move already happened. It doesn't chase.",
-    cost: "Price swings are too small right now to pay the fees.",
-    news: "A hack alert blocks buying this coin.",
-    flat: "Already in a trade on this coin.",
-    "max positions": "Already in as many trades as it allows at once.",
-    cooldown: "Taking a short break on this coin after a loss.",
-    "trades/hour": "Reached its limit of trades for this hour.",
-    "daily limit": "Stopped for the day after hitting its loss limit.",
-    exchange: "The exchange balance check failed, so it holds off.",
-    cash: "Not enough cash to buy.",
-    inventory: "Not enough of this coin on hand to sell short.",
-    "jev review": "Jev flagged news working against the bet.",
-  };
-
-  // News-bot gates and caps (0.6), in plain words.
-  const NGATE = {
-    flatten: "Sell-everything request", "flatten (dashboard)": "Sell-everything request", "flatten requested": "Sell-everything request",
-    "kill switch": "Daily loss limit", "stop loss": "Stop loss", "asset cooldown": "Rest after a stop on this coin",
-    inputs: "Prices and news were complete and sane", account: "Account records were consistent", breaker: "Weekly, monthly and losing-streak limits",
-    "jev health": "Jev was answering reliably", regime: "Whole-market mood", "regime unknown": "Whole-market mood", "regime ceiling": "Whole-market mood",
-    "news reaction": "Price has been following good news", challenge: "Jev's case against buying", pause: "Not paused by you", paused: "Not paused by you",
-  };
-  const BIND = {
-    signal: "nothing: the news signal alone set the size", asset_cap: "the per-coin limit", gross_cap: "the limit on total money invested",
-    heat_cap: "the cap on total risk at the stop losses", regime_ceiling: "the whole-market mood ceiling", rebalance_band: "the change being too small to bother trading",
-    min_trade: "the minimum trade size", cash: "the cash on hand",
-  };
-  const posture = () => snap?.status?.posture || null;
-  const untilWords = (iso) => (iso ? ` until ${new Date(iso).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : "");
-  function postureWords(p) {
-    if (p.kind === "ENTRIES_ALLOWED") return [`Can open new trades`, `It may put up to ${Math.round(p.ceiling * 100)}% of its money into coins.`];
-    if (p.kind === "EXITS_ONLY") return [`Selling only`, `It won't buy anything${untilWords(p.until)}${p.reason ? `: ${p.reason}` : ""}. Stop losses and sells keep working.`];
-    return [`On hold for review`, `Something it relies on looks wrong${p.reason ? ` (${p.reason})` : ""}, so it won't buy until that clears. Stop losses and sells keep working.`];
+// ---------- who's alive, whose money ----------
+function scalpLife() {
+  const sc = S.scalp;
+  if (S.err.scalp) return { k: "down", line: "Dashboard can't read it" };
+  if (!sc) return { k: "", line: "Connecting…" };
+  if (!sc.available) return { k: "down", line: "Not set up · no scalp_status.json" };
+  const ts = t(sc.status?.ts);
+  const age = ts ? (Date.now() - ts) / 1000 : 1e9;
+  if (sc.running === false) return { k: "down", line: "Stopped · last seen " + ago(ts) };
+  if (age > 15) return { k: "stale", line: "No update for " + dur(age) };
+  const n = sc.status?.assets?.length || 0;
+  const feed = sc.status?.feed;
+  if (feed && !feed.connected) return { k: "stale", line: "Feed reconnecting" };
+  return { k: "ok", line: `Watching ${n} coins · ${ago(ts)}` };
+}
+function newsLife() {
+  const sn = S.snap;
+  if (S.err.snap) return { k: "down", line: "Dashboard can't read it" };
+  if (!sn) return { k: "", line: "Connecting…" };
+  const st = sn.status;
+  if (!st) return { k: "down", line: "Never started here" };
+  if (sn.bot_pid_running === false) return { k: "down", line: "Stopped · last tick " + ago(t(st.last_tick_at)) };
+  const next = t(st.next_tick_at);
+  const late = next ? (Date.now() - next) / 1000 : 0;
+  if (late > (st.interval_secs || 60) * 2) return { k: "stale", line: "Tick overdue by " + dur(late) };
+  if (sn.control?.paused) return { k: "stale", line: "Paused from this page" };
+  const left = next ? Math.max(0, (next - Date.now()) / 1000) : null;
+  return { k: "ok", line: left != null ? `Next look in ${Math.round(left)} s` : "Running" };
+}
+function scalpMoney() {
+  const st = S.scalp?.status;
+  if (!st) return null;
+  const live = !!st.live, testnet = st.network === "testnet";
+  const kind = !live ? "paper" : testnet ? "testnet" : "live";
+  const capital = st.capital ?? st.starting_cash;
+  const say = kind === "paper" ? `${usd(capital, 0)} simulated · real Hyperliquid prices, fees and funding. No real money.`
+    : kind === "testnet" ? `Real orders on Hyperliquid testnet, with fake money. ${usd(capital, 0)} managed.`
+    : `Real money on Hyperliquid mainnet, capped at ${usd(capital, 0)}.` + (st.withdrawable != null ? ` ${usd(st.withdrawable, 0)} withdrawable on the account.` : "");
+  return { kind, label: kind === "paper" ? "Paper" : kind === "testnet" ? "Testnet" : "Live", say, capital };
+}
+function newsMoney() {
+  const sn = S.snap;
+  if (!sn) return null;
+  const st = sn.status || {};
+  const kind = st.live ? (st.testnet ? "testnet" : "live") : "paper";
+  const start = sn.account?.starting_cash;
+  const say = kind === "paper" ? `${usd(start, 0)} simulated · Hyperliquid prices and fees. No real money.`
+    : kind === "testnet" ? "Real orders on Hyperliquid testnet, with fake money."
+    : "Real money on Hyperliquid mainnet.";
+  return { kind, label: kind === "paper" ? "Paper" : kind === "testnet" ? "Testnet" : "Live", say, start };
+}
+function renderRail() {
+  for (const [id, f] of [["beat-scalp", scalpLife], ["beat-news", newsLife]]) {
+    const el = document.getElementById(id), l = f();
+    el.className = "beat " + l.k;
+    $("small", el).textContent = l.line;
   }
-  const zoneWords = { RISK_ON: "broadly rising", NEUTRAL: "mixed", RISK_OFF: "broadly falling", UNKNOWN: "unclear (too few readings)" };
-
-  // ---------- liveness ----------
-  function scalpLive() {
-    if (!scalp) return "connecting";
-    if (!scalp.available) return "never";
-    if (scalp.running === false) return "stopped";
-    return (now() - Date.parse(scalp.status.ts)) / 1000 > 15 ? "stale" : "alive";
+  const a = scalpMoney(), b = newsMoney();
+  const row = (name, m) => m ? `<div class="w"><b>${name}<span class="venue ${m.kind}">${m.label}</span></b><small>${esc(m.say)}</small></div>` : `<div class="w"><b>${name}</b><small>No data yet.</small></div>`;
+  const anyLive = a?.kind === "live" || b?.kind === "live";
+  $("#whose").innerHTML = `<h2>Whose money</h2>${row("Scalper", a)}${row("News bot", b)}<div class="w"><small>${anyLive ? "Real money is armed. Stops run inside the bot: if the process dies, open positions wait until it restarts." : "Nothing is trading real money. Going live needs mode = \"live\" in the config and --live on the command."}</small></div>`;
+  for (const a of document.querySelectorAll(".nav a")) {
+    if (a.dataset.view === S.view) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   }
-  function newsLive() {
-    if (!snap) return "connecting";
-    if (!snap.status) return "never";
-    if (snap.bot_pid_running === false) return "stopped";
-    const last = snap.status.last_tick_at;
-    const lim = Math.max(180, 3 * (snap.status.interval_secs || 60));
-    return last && (now() - Date.parse(last)) / 1000 > lim ? "stale" : "alive";
-  }
+}
 
-  // ---------- rail ----------
-  function renderRail() {
-    document.querySelectorAll(".nav a").forEach((a) => (a.dataset.view === view ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
-    const sl = scalpLive(), st = scalp?.status;
-    const ps = $("#pulse-scalp");
-    ps.dataset.s = sl;
-    const inTrade = st?.assets?.filter((a) => a.position).length || 0;
-    ps.querySelector("span").textContent =
-      sl === "connecting" ? "Connecting…" : sl === "never" ? "Not started" : sl === "stopped" ? `Stopped ${ago(st.ts)}` : sl === "stale" ? `No update since ${ago(st.ts)}` :
-      inTrade ? `In ${plural(inTrade, "trade")} right now` : `Watching ${plural(st.assets?.length || 0, "coin")}`;
-    const nl = newsLive(), ns = snap?.status;
-    const pn = $("#pulse-news");
-    pn.dataset.s = nl;
-    let line = "Connecting…";
-    if (nl === "never") line = "Not started";
-    else if (nl === "stopped") line = `Stopped ${ago(ns.last_tick_at)}`;
-    else if (nl === "stale") line = `No update since ${ago(ns.last_tick_at)}`;
-    else if (ns) {
-      const next = ns.next_tick_at ? (Date.parse(ns.next_tick_at) - now()) / 1000 : null;
-      const p = posture();
-      line = ns.paused ? "Paused by you" : p && p.kind !== "ENTRIES_ALLOWED" ? postureWords(p)[0] : next > 0 ? `Next read in ${clock(next)}` : "Reading the news…";
-    }
-    pn.querySelector("span").textContent = line;
-    const m = $("#money-note");
-    const v = st?.venue;
-    m.classList.toggle("real", v === "binance" || !!ns?.live && !ns?.testnet);
-    m.innerHTML = v === "binance" ? "<b>Real money.</b> The scalp bot trades on Binance with your funds."
-      : `<b>Practice money only.</b> The scalp bot uses Binance's testnet; the news bot is ${ns?.testnet ? "on testnet too" : "simulated"}.`;
-  }
+// ---------- notices ----------
+function renderNotices() {
+  const out = [];
+  const sn = S.snap, st = S.scalp?.status;
+  if (sn?.synthetic) out.push(["bad", "warn", "<b>Demo data.</b> The news bot's folder holds synthetic data: headlines are real, readings, prices and fills are invented."]);
+  if (st?.live_hold) out.push(["bad", "warn", `<b>Scalper on hold:</b> ${esc(st.live_hold)}. It won't open trades until you check Hyperliquid and run <code>jev-trader hl clear-hold</code>.`]);
+  if (st?.halted_today) out.push(["warn", "warn", "<b>Scalper hit its daily loss limit.</b> No new trades until tomorrow (UTC). Open trades still close normally."]);
+  if (sn?.account?.halted_on) out.push(["warn", "warn", "<b>News bot hit its daily loss limit.</b> Exits only until tomorrow."]);
+  if (sn?.account?.flatten_pending) out.push(["warn", "info", "<b>Flatten requested.</b> The news bot sells everything on its next look, then stays paused."]);
+  if (S.err.snap) out.push(["bad", "warn", `<b>Can't read the news bot's files:</b> ${esc(S.err.snap)}. Showing the last data received.`]);
+  if (S.err.scalp) out.push(["bad", "warn", `<b>Can't read the scalper's files:</b> ${esc(S.err.scalp)}.`]);
+  $("#notices").innerHTML = out.map(([k, i, h]) => `<div class="notice ${k}">${icon(i)}<p>${h}</p></div>`).join("");
+}
 
-  function renderNotices() {
-    const out = [];
-    if (conn === "lost") out.push(["", "<b>The dashboard server isn't answering.</b> What you see may be out of date; it keeps retrying."]);
-    if (actionError) out.push(["", `<b>That didn't go through.</b> ${esc(actionError)} Nothing was changed. <button class="btn quiet" data-act="dismiss">Dismiss</button>`]);
-    const sl = scalpLive();
-    if (sl === "stopped" || sl === "stale") out.push(["", `<b>The scalp bot ${sl === "stopped" ? "has stopped" : "has gone quiet"}.</b> Its last update was ${ago(scalp.status.ts)}. Numbers below are from then.`]);
-    if (scalp?.status?.halted_today) out.push(["warn", "<b>The scalp bot hit its daily loss limit.</b> It won't open trades again until tomorrow (UTC)."]);
-    if (scalp?.status?.feed && !scalp.status.feed.connected) out.push(["warn", "<b>The scalp bot lost its live price feed.</b> It won't trade until the feed reconnects."]);
-    const nl = newsLive();
-    if ((view === "news" || view === "score") && (nl === "stopped" || nl === "stale")) out.push(["", `<b>The news bot ${nl === "stopped" ? "has stopped" : "has gone quiet"}.</b> Last read ${ago(snap.status.last_tick_at)}.`]);
-    const p = posture();
-    if (p && p.kind !== "ENTRIES_ALLOWED" && nl === "alive" && !snap.status.paused) { const [h, t] = postureWords(p); out.push(["warn", `<b>News bot: ${esc(h.toLowerCase())}.</b> ${esc(t)}`]); }
-    if (snap?.synthetic) out.push(["", "<b>Demo data.</b> The news bot's headlines, prices and fills here are synthetic, not real."]);
-    $("#notices").innerHTML = out.map(([k, h]) => `<div class="notice ${k}" role="status">${h}</div>`).join("");
-  }
-
-  // ---------- shared drawings ----------
-  // One bet, drawn on a line measured in the bet's favour: stop on the left, target on the right.
-  function ruler(t, { labels = true, h = 46 } = {}) {
-    const dir = t.side === "short" ? -1 : 1;
-    const move = ((t.exit_px - t.entry_px) / t.entry_px) * 1e4 * dir;
-    const tp = Math.abs(t.tp_px - t.entry_px) / t.entry_px * 1e4;
-    const sl = ((t.init_sl_px ?? t.sl_px) - t.entry_px) / t.entry_px * 1e4 * dir;
-    const fee = isPractice() && !(t.fees_usd > 0) ? 2 * feeBps() : 0;
-    const lo = Math.min(sl, move) * 1.08, hi = Math.max(tp, move, fee) * 1.08;
-    const W = 300, y = labels ? 20 : 12;
-    const x = (b) => ((b - lo) / (hi - lo)) * W;
-    const col = t.pnl_usd >= 0 ? "var(--gain)" : "var(--loss)";
-    const ex = x(move);
-    const anchor = ex < 40 ? "start" : ex > W - 40 ? "end" : "middle";
-    return `<svg class="ruler" viewBox="0 0 ${W} ${h}" preserveAspectRatio="none" role="img" aria-label="Stop ${spc(sl)}, target ${spc(tp)}, got out at ${spc(move)}">
-      <defs><pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1.6" height="4" fill="#B9C0B9"/></pattern></defs>
-      <rect x="${x(sl)}" y="${y - 3}" width="${x(0) - x(sl)}" height="6" fill="var(--loss-wash)"/>
-      <rect x="${x(0)}" y="${y - 3}" width="${x(tp) - x(0)}" height="6" fill="var(--gain-wash)"/>
-      ${fee ? `<rect x="${x(0)}" y="${y - 3}" width="${x(fee) - x(0)}" height="6" fill="url(#hatch)"/>` : ""}
-      <line x1="${x(sl)}" x2="${x(sl)}" y1="${y - 7}" y2="${y + 7}" stroke="var(--loss)" stroke-width="2" vector-effect="non-scaling-stroke"/>
-      <line x1="${x(tp)}" x2="${x(tp)}" y1="${y - 7}" y2="${y + 7}" stroke="var(--gain)" stroke-width="2" vector-effect="non-scaling-stroke"/>
-      <line x1="${x(0)}" x2="${x(0)}" y1="${y - 7}" y2="${y + 7}" stroke="var(--ink)" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
-      <line x1="${x(0)}" x2="${ex}" y1="${y}" y2="${y}" stroke="${col}" stroke-width="2.5" vector-effect="non-scaling-stroke"/>
-      <circle cx="${ex}" cy="${y}" r="5" fill="${col}" stroke="#fff" stroke-width="1.5"/>
-      ${labels ? `<text x="${ex}" y="${y - 10}" text-anchor="${anchor}" style="fill:${col};font-weight:700">out ${spc(move)}</text>
-      <text x="${x(sl)}" y="${y + 20}" text-anchor="start">stop</text>
-      <text x="${x(tp)}" y="${y + 20}" text-anchor="end">target</text>` : ""}
-    </svg>`;
-  }
-
-  function pnlChart(trades) {
-    const T = [...trades].sort((a, b) => Date.parse(a.closed) - Date.parse(b.closed));
-    if (T.length < 2) return `<p class="small">The chart starts after the second trade.</p>`;
-    let g = 0, r = 0;
-    const pts = [{ ts: Date.parse(T[0].opened), g: 0, r: 0 }, ...T.map((t) => ({ ts: Date.parse(t.closed), g: (g += t.pnl_usd), r: (r += realPnl(t)) }))];
-    const W = 520, H = 210, padL = 52, padR = 70, padT = 10, padB = 24;
-    const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
-    const vals = pts.flatMap((p) => [p.g, p.r, 0]);
-    let lo = Math.min(...vals), hi = Math.max(...vals);
-    const span = Math.max(1, hi - lo); lo -= span * 0.08; hi += span * 0.08;
-    const x = (ts) => padL + ((ts - t0) / Math.max(1, t1 - t0)) * (W - padL - padR);
-    const y = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
-    const step = (k) => pts.map((p, i) => (i ? `H${x(p.ts).toFixed(1)}V${y(p[k]).toFixed(1)}` : `M${x(p.ts).toFixed(1)},${y(p[k]).toFixed(1)}`)).join("");
-    const last = pts[pts.length - 1];
-    const showReal = isPractice();
-    let ly1 = y(last.g), ly2 = y(last.r);
-    if (Math.abs(ly1 - ly2) < 16) { const mid = (ly1 + ly2) / 2; ly1 = mid - (last.g >= last.r ? 9 : -9); ly2 = mid + (last.g >= last.r ? 9 : -9); }
-    return `<svg class="pnl" viewBox="0 0 ${W} ${H}" role="img" aria-label="Running total of trade results: ${susd(last.g)} on testnet${showReal ? `, ${susd(last.r)} with real fees` : ""}">
-      <line x1="${padL}" x2="${W - padR}" y1="${y(0)}" y2="${y(0)}" stroke="var(--rule)" />
-      <text x="${padL - 8}" y="${y(0) + 4}" text-anchor="end" font-size="12" fill="var(--mute)">$0</text>
-      <text x="${padL - 8}" y="${y(hi) + 12}" text-anchor="end" font-size="12" fill="var(--mute)">${susd(hi)}</text>
-      <text x="${padL - 8}" y="${y(lo)}" text-anchor="end" font-size="12" fill="var(--mute)">${susd(lo)}</text>
-      ${showReal ? `<path d="${step("r")}" fill="none" stroke="var(--loss)" stroke-width="2" stroke-dasharray="5 4"/>` : ""}
-      <path d="${step("g")}" fill="none" stroke="var(--ink)" stroke-width="2.4"/>
-      <text x="${W - padR + 8}" y="${ly1 + 4}" font-size="13" font-weight="700" fill="var(--ink)">${susd(last.g)}</text>
-      ${showReal ? `<text x="${W - padR + 8}" y="${ly2 + 4}" font-size="13" font-weight="700" fill="var(--loss)">${susd(last.r)}</text>` : ""}
-      <text x="${padL}" y="${H - 4}" font-size="12" fill="var(--mute)">${hm(new Date(t0).toISOString())}</text>
-      <text x="${W - padR}" y="${H - 4}" text-anchor="end" font-size="12" fill="var(--mute)">${hm(new Date(t1).toISOString())}</text>
-    </svg>
-    <div class="legend"><span><i style="background:var(--ink)"></i>What it made on the testnet (no fees charged)</span>${showReal ? `<span><i style="background:repeating-linear-gradient(90deg,var(--loss) 0 5px,transparent 5px 8px)"></i>The same trades if real Binance fees applied</span>` : ""}</div>`;
-  }
-
-  // ---------- today ----------
-  const SIEVE = [
-    { title: "Spotted a rush", text: "Trading suddenly got busier than normal, one side (buyers or sellers) took control, and the price started moving their way." },
-    { title: "Could read the market", text: "The price feed was fresh and buy/sell prices were close together.", drops: ["feed", "spread"], why: "price feed lagging or prices too far apart" },
-    { title: "Wasn't too late", text: "The price hadn't already run far in that direction. Late entries tend to catch the end of a move.", drops: ["no chase"], why: "the move had already happened" },
-    { title: "Could pay the fees", text: "Typical price swings were big enough to beat fees and spread with room to spare.", drops: ["cost"], why: "swings too small to pay the fees" },
-    { title: "Within its own limits", text: "Not already in that coin, under its caps on open trades and trades per hour, no recent loss on it.", drops: ["flat", "max positions", "cooldown", "trades/hour", "daily limit", "exchange", "cash", "inventory"], why: null },
-    { title: "Jev saw no news against it", text: "Jev, the AI that reads headlines, checked recent news on the coin. It can block a trade or halve it, never start one.", drops: ["jev review"], why: "Jev saw news working against the bet" },
-  ];
-  const LIMIT_WORDS = { flat: "already in that coin", "max positions": "too many trades open", cooldown: "resting after a loss", "trades/hour": "hourly trade limit", "daily limit": "daily loss limit", exchange: "exchange check", cash: "not enough cash", inventory: "not enough coin to sell" };
-
-  function sieveHtml(sum) {
-    const by = { ...(sum.blocked_by || {}) };
-    const total = sum.candidates || 0;
-    const known = new Set(SIEVE.flatMap((s) => s.drops || []).concat(["taken"]));
-    // Anything unexpected is counted with the limits so the arithmetic always adds up.
-    const extra = Object.keys(by).filter((k) => !known.has(k));
-    let left = total;
-    const rows = SIEVE.map((s, i) => {
-      if (!s.drops) return { ...s, left, dropped: 0, parts: [] };
-      const keys = i === 4 ? [...s.drops, ...extra] : s.drops;
-      const parts = keys.map((k) => [k, by[k] || 0]).filter(([, n]) => n > 0);
-      const dropped = parts.reduce((a, [, n]) => a + n, 0);
-      const before = left; left -= dropped;
-      return { ...s, before, left, dropped, parts };
-    });
-    const pct = (n) => (total ? (n / total) * 100 : 0);
-    const T = scalp.trades || [];
-    const won = T.filter((t) => t.pnl_usd > 0).length;
-    return `<ol class="sieve">${rows.map((r, i) => {
-      const note = r.dropped ? `<p class="dropnote"><b>−${r.dropped.toLocaleString()}</b> ${r.why ? esc(r.why) : r.parts.sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${esc(LIMIT_WORDS[k] || k)}`).join(", ")}</p>` : "";
-      return `<li><span class="n">${i + 1}</span><div class="what"><h3>${r.title}</h3><p>${r.text}</p></div><span class="count">${r.left.toLocaleString()}</span>
-        <div class="bar" aria-hidden="true"><span class="keep" style="width:${pct(r.left)}%"></span><span class="drop" style="width:${pct(r.dropped)}%"></span></div>${note}</li>`;
-    }).join("")}
-      <li class="final"><span class="n">${rows.length + 1}</span><div class="what"><h3>Traded</h3><p>Bought or sold right away, with a profit target, a stop loss and a 10-minute time limit.</p></div><span class="count">${(by.taken || 0).toLocaleString()}</span>
-        <div class="bar" aria-hidden="true"><span class="keep" style="width:${Math.max(0.6, pct(by.taken || 0))}%"></span></div></li>
-    </ol>
-    ${T.length ? `<div class="outcome"><span class="w">${won} made money</span><span class="l">${T.length - won} lost money</span></div>` : ""}`;
-  }
-
-  function coinCard(a) {
-    const f = a.features || {}, p = a.position;
-    const name = a.symbol;
-    let line;
-    if (p) {
-      const dir = p.side === "short" ? -1 : 1;
-      const mv = f.mid ? ((f.mid - p.entry_px) / p.entry_px) * 1e4 * dir : null;
-      const left = p.deadline_ms ? (p.deadline_ms - now()) / 1000 : null;
-      line = `<p><mark>In a trade.</mark> ${betWords(p.side)} from ${px(p.entry_px)}. ${mv != null ? `Now <b class="${cls(mv)}">${spc(mv)}</b> in its favour.` : ""} ${left > 0 ? `Closes within ${clock(left)} at most.` : ""}</p>`;
-    } else if (a.inventory_note && !a.long_block) {
-      line = `<p>${esc(a.inventory_note)}</p>`;
-    } else {
-      const lb = a.long_block, sb = a.short_block;
-      const rank = (g) => (g == null ? 99 : GATE_ORDER.indexOf(g));
-      const g = rank(lb) >= rank(sb) ? lb : sb;
-      const side = rank(lb) >= rank(sb) ? "long" : "short";
-      line = !lb || !sb ? `<p><mark>Ready.</mark> Every check passes for a bet that it will ${(!lb ? "rise" : "fall")}; a trade can open any second.</p>`
-        : `<p>${esc(WAIT[g] || g)}${rank(g) >= GATE_ORDER.indexOf("no chase") ? ` <span class="small">(closest to a ${side === "long" ? "rise" : "fall"} bet)</span>` : ""}</p>`;
-    }
-    const act = f.activity ?? 0, need = S().min_activity_ratio ?? 1.5;
-    const buyShare = f.flow != null ? (1 + f.flow) / 2 : 0.5;
-    return `<article class="coin${p ? " intrade" : ""}">
-      <header><b>${esc(name)}</b><span>${px(f.mid)}</span></header>
-      ${line}
-      <div class="meters">
-        <div class="meter"><small>Busy: ${act.toFixed(1)}× normal</small><div class="track"><span class="fill" style="left:0;width:${clamp(act / 4, 0, 1) * 100}%"></span><span class="tick" style="left:${(need / 4) * 100}%"></span></div></div>
-        <div class="meter"><small>Buyers ${Math.round(buyShare * 100)}% · sellers ${Math.round((1 - buyShare) * 100)}%</small><div class="track"><span class="fill" style="${buyShare >= 0.5 ? `left:50%;width:${(buyShare - 0.5) * 100}%` : `left:${buyShare * 100}%;width:${(0.5 - buyShare) * 100}%`}"></span><span class="tick" style="left:50%"></span></div></div>
-      </div>
-    </article>`;
-  }
-
-  function renderToday(el) {
-    if (!scalp) { el.innerHTML = `<p class="small">Loading…</p>`; return; }
-    if (!scalp.available) {
-      el.innerHTML = `<h1 class="hero">The scalp bot hasn't run yet.</h1><p class="lede">Start it with <code>jev-trader --config config.scalp.toml scalp</code>. This page fills in as soon as it writes its first status.</p>`;
-      return;
-    }
-    const st = scalp.status, sum = scalp.summary, T = scalp.trades || [];
-    const coins = st.assets.map((a) => a.symbol);
-    const gross = T.reduce((a, t) => a + t.pnl_usd, 0);
-    const real = T.reduce((a, t) => a + realPnl(t), 0);
-    const feesEst = T.reduce((a, t) => a + realFees(t), 0);
-    const won = T.filter((t) => t.pnl_usd > 0).length;
-    const since = sum.session_start ? hm(sum.session_start) : null;
-    const venue = st.venue === "binance" ? `<span class="venue-tag live">real money</span>` : `<span class="venue-tag">practice money</span>`;
-    const endings = Object.entries(T.reduce((m, t) => ((m[t.reason] = (m[t.reason] || 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
-    const showReal = isPractice() && feesEst > 0;
-
-    el.innerHTML = `
-      <p class="kicker">Scalp bot ${venue}</p>
-      <h1 class="hero">It waits for sudden rushes of buying or selling, rides them for a few minutes, then gets out.</h1>
-      <p class="lede">It watches ${coins.length} coins on Binance (${esc(coins.join(", "))}) second by second. It can bet a price will rise (buy, then sell) or fall (sell coins it keeps on hand, then buy them back). Before every trade it runs the same checks, in order, and most chances fail one of them.</p>
-
-      <p class="day">${since ? `Since ${since}` : "So far"} it spotted <b>${sum.candidates.toLocaleString()}</b> possible trades and took <b>${T.length}</b>${T.length ? `; <b>${won}</b> of them made money` : ""}.
-      ${T.length ? `In practice money that's <b class="${cls(gross)}">${susd(gross)}</b>${showReal ? `, but the testnet charges no fees. With Binance's real fees (${(feeBps() / 100).toFixed(1)}% each way, about ${usd(feesEst)} in total) the same trades would be at <span class="money-real ${cls(real)}">${susd(real)}</span>.` : "."}` : "No trade has passed every check yet."}</p>
-
-      <div class="grid2">
-        <section class="panel" aria-labelledby="h-sieve">
-          <h2 id="h-sieve">How it decides</h2>
-          <p class="sub">Every chance it spotted, run through its checks in order. The number on the right is how many were still in the running after that check.</p>
-          ${sieveHtml(sum)}
-        </section>
-        <section class="panel" aria-labelledby="h-money">
-          <h2 id="h-money">Is it making money?</h2>
-          <p class="sub">${T.length ? (showReal ? (real < 0 && gross > 0 ? "On the testnet, yes. With real fees, not yet: most wins are smaller than the fee on the round trip." : real >= 0 ? "Yes, even after counting real fees." : "No, not even before fees.") : gross >= 0 ? "Yes, so far." : "Not so far.") : "Nothing to judge yet: no trades have closed."}</p>
-          ${T.length ? pnlChart(T) : ""}
-          ${T.length ? `<dl class="figures">
-            <dt>Trades won / lost</dt><dd>${won} / ${T.length - won}</dd>
-            <dt>Average result per trade</dt><dd class="${cls(gross)}">${susd(gross / T.length)}</dd>
-            <dt>Result on the testnet</dt><dd class="${cls(gross)}">${susd(gross)}</dd>
-            ${showReal ? `<dt>Real fees it didn't pay</dt><dd class="neg">−${usd(feesEst)}</dd><dt class="total">With real fees</dt><dd class="total ${cls(real)}">${susd(real)}</dd>` : ""}
-          </dl>
-          <ul class="endings" aria-label="How trades ended">${endings.map(([r, n]) => `<li><b>${n}</b><span>${esc(endOf(r)[0])}</span></li>`).join("")}</ul>` : ""}
-          ${st.inventory_drift != null && Math.abs(st.inventory_drift) > 0.5 ? `<p class="aside">Separate from its trades: to bet on falls it holds some of each coin. Market moves changed that stock's value by <b class="${cls(st.inventory_drift)}">${susd(st.inventory_drift)}</b>. That comes from the market, not from any decision it made.</p>` : ""}
-        </section>
-      </div>
-
-      <section class="block" aria-labelledby="h-now">
-        <h2 id="h-now">What it's doing right now</h2>
-        <p class="sub">Each coin with the reason it isn't trading, or the trade it's in. "Busy" compares trading speed with the last 30 minutes; it needs ${(S().min_activity_ratio ?? 1.5).toFixed(1)}× (the black tick) before it looks closer.</p>
-        <div class="coins">${st.assets.map(coinCard).join("")}</div>
-      </section>`;
-  }
-
-  // ---------- trades ----------
-  function gateDetail(c, name) { return [...(c?.eval?.gates || []), ...(c?.risk || [])].find((g) => g.gate === name)?.detail || ""; }
-
-  function storyHtml(t) {
-    const c = t.candidate, f = c?.features || {}, e = c?.eval || {}, rv = t.review || c?.review;
-    const coin = esc(t.asset), side = t.side;
-    const who = pushers(side);
-    const share = f.flow != null ? Math.round(((1 + Math.abs(f.flow)) / 2) * 100) : null;
-    const dir = side === "short" ? -1 : 1;
-    const r60 = f.ret_60s_bps, r300 = f.ret_300s_bps;
-    const steps = [];
-    if (c) {
-      steps.push(["Spotted a rush", `${who[0].toUpperCase() + who.slice(1)} took over ${coin}. Trading was <b>${(f.activity ?? 0).toFixed(1)}×</b> busier than usual${share ? ` and <b>${share}%</b> of the volume came from ${who}` : ""}. The price had ${r60 * dir >= 0 ? (side === "short" ? "dropped" : "risen") : "barely moved"} ${pc(Math.abs(r60))} in the last minute.`,
-        ["burst", "flow", "book", "push"].map((g) => `${g}: <b>${esc(gateDetail(c, g))}</b>`).join("<br>")]);
-      steps.push(["Checked it wasn't late", (r300 * dir > 0 ? `Over the last 5 minutes the price had already moved ${pc(r300)} in the bet's direction, under the ${pc(S().max_chase_bps ?? 60)} it allows before calling a move finished.` : `Over the last 5 minutes the price had moved ${pc(r300)} the other way, so the move was just starting.`), `no chase: <b>${esc(gateDetail(c, "no chase"))}</b>`]);
-      steps.push(["Checked it could pay the fees", `Typical swings for ${coin} over the next 10 minutes were about <b>${pc(f.exp_move_bps)}</b>. A round trip costs about <b>${pc(e.cost_bps)}</b> in fees and spread. It wants at least ${S().cost_mult ?? 2}× the cost, so this passed.`, `cost: <b>${esc(gateDetail(c, "cost"))}</b><br>spread: <b>${esc(gateDetail(c, "spread"))}</b>`]);
-      steps.push(["Asked Jev about the news", rv
-        ? `Jev read ${plural(rv.headlines, "recent headline")} about ${coin}. It put the chance that the news works against this bet at <b>${Math.round(rv.adverse * 100)}%</b> and the chance of a market-moving event at <b>${Math.round(rv.event_risk * 100)}%</b>. ${t.size_mult < 1 ? "That was enough to <b>cut the size in half</b>." : "No reason to object, so full size."}`
-        : c.review_error ? `Jev couldn't be reached (${esc(c.review_error)}), so the trade went ahead on market data alone.` : `There were no recent headlines about ${coin}, so Jev had nothing to object to.`,
-        `news mood: <b>${(c.news?.score ?? 0).toFixed(2)}</b> from ${c.news?.n_events ?? 0} headlines${rv ? `<br>jev review: <b>${esc(gateDetail(c, "jev review"))}</b>` : ""}`]);
-      steps.push(["Checked its own limits", `${gateDetail(c, "max positions") ? `Trades open: ${esc(gateDetail(c, "max positions"))}. ` : ""}${gateDetail(c, "trades/hour") ? `Trades this hour: ${esc(gateDetail(c, "trades/hour"))}. ` : ""}No recent loss on ${coin} and the daily loss limit wasn't hit.`, (c.risk || []).map((g) => `${esc(g.gate)}: <b>${g.passed ? "ok" : "blocked"}</b>`).join(" · ")]);
-    } else {
-      steps.push(["Why it entered", "The decision record for this trade is older than the last 20,000 decisions kept, so only the trade itself is shown.", ""]);
-    }
-    const tpPct = Math.abs(t.tp_px - t.entry_px) / t.entry_px * 1e4, slPct = Math.abs((t.init_sl_px ?? t.sl_px) - t.entry_px) / t.entry_px * 1e4;
-    steps.push(["Placed the trade", `${side === "short" ? "Sold" : "Bought"} <b>${qtyF(t.qty)} ${coin}</b> at <b>${px(t.entry_px)}</b> (${usd(t.notional)}) at ${hm(t.opened)}. Target ${px(t.tp_px)} (${pc(tpPct)} away), stop ${px(t.init_sl_px ?? t.sl_px)} (${pc(slPct)} away).`, `order ${esc(t.entry_order)}`, true]);
-    const [endT, endX] = endOf(t.reason);
-    steps.push([endT, `${endX} ${side === "short" ? "Bought back" : "Sold"} at <b>${px(t.exit_px)}</b> after ${dur(t.hold_secs)}.`, `exit: <b>${esc(t.reason)}</b><br>order ${esc(t.exit_order)}`, true]);
-    const showReal = realFees(t) > 0;
-    const res = `<div class="big"><div><small>On the testnet</small><b class="${cls(t.pnl_usd)}">${susd(t.pnl_usd)}</b></div>${showReal ? `<div><small>With real fees (${usd(realFees(t))})</small><b class="${cls(realPnl(t))}">${susd(realPnl(t))}</b></div>` : ""}</div>`;
-    return `<div class="story"><ol>${steps.map(([h, p, raw, did]) => `<li class="${did ? "did" : ""}"><h4>${h}</h4><p>${p}</p>${raw ? `<div class="raw">${raw}</div>` : ""}</li>`).join("")}
-      <li class="did"><h4>Result</h4>${res}</li></ol></div>`;
-  }
-
-  function renderTrades(el) {
-    if (!scalp?.available) { el.innerHTML = `<p class="small">${scalp ? "The scalp bot hasn't run yet." : "Loading…"}</p>`; return; }
-    const T = scalp.trades || [];
-    const won = T.filter((t) => t.pnl_usd > 0), lost = T.filter((t) => t.pnl_usd <= 0);
-    const list = tradeFilter === "won" ? won : tradeFilter === "lost" ? lost : T;
-    const fee = isPractice();
-    el.innerHTML = `
-      <p class="kicker">Scalp bot</p>
-      <h1 class="hero">Every trade, from the moment it spotted the chance to the money it made.</h1>
-      <p class="lede">Open a trade to read its story. The line on each row is the bet: <b class="neg">stop loss</b> on the left, <b class="pos">profit target</b> on the right, the dot is where it got out.${fee ? ` The hatched part is what real fees would take, so a dot inside it only wins on the testnet.` : ""}</p>
-      <div class="toolbar" role="group" aria-label="Filter trades" style="margin-top:28px">
-        ${[["all", "All", T.length], ["won", "Made money", won.length], ["lost", "Lost money", lost.length]].map(([k, l, n]) => `<button class="chip" data-tf="${k}" aria-pressed="${tradeFilter === k}">${l}<span class="c">${n}</span></button>`).join("")}
-      </div>
-      ${list.length ? `<ul class="ledger">${list.map((t) => {
-        const id = t.candidate_id || t.opened;
-        return `<li><details class="trade" data-id="${esc(id)}"${openTrades.has(id) ? " open" : ""}>
-          <summary>
-            <span class="when"><b>${hm(t.opened)}</b>${clock(t.hold_secs)} held</span>
-            <span class="bet"><b>${esc(t.asset)}: ${betWords(t.side).toLowerCase()}</b><span>${esc(endOf(t.reason)[0])}</span></span>
-            <span class="rulerwrap">${ruler(t)}</span>
-            <span class="res"><b class="${cls(t.pnl_usd)}">${susd(t.pnl_usd)}</b>${realFees(t) > 0 ? `<span>${susd(realPnl(t))} with real fees</span>` : ""}</span>
-            <span class="chev" aria-hidden="true"></span>
-          </summary>
-          ${openTrades.has(id) ? storyHtml(t) : ""}
-        </details></li>`;
-      }).join("")}</ul>` : `<div class="empty">${T.length ? "No trades match this filter." : "<b>No trades yet.</b> The bot only trades when a chance passes every check; the Today page shows where they're failing."}</div>`}`;
-  }
-
-  // ---------- decisions ----------
-  function reasonSentence(c) {
-    const f = c.features || {}, e = c.eval || {}, g = c.blocked_by;
-    const dir = c.side === "short" ? -1 : 1;
-    if (c.taken) return `Took it: ${pushers(c.side)} pushing, ${(f.activity ?? 0).toFixed(1)}× normal activity, likely swing ${pc(f.exp_move_bps)} vs ${pc(e.cost_bps)} cost.${c.size_mult < 1 ? " Jev halved the size." : ""}`;
-    switch (g) {
-      case "cost": return `Likely swing of ${pc(f.exp_move_bps)} wasn't ${S().cost_mult ?? 2}× the ${pc(e.cost_bps)} cost of a round trip.`;
-      case "no chase": return `Too late: price had already moved ${pc(Math.abs((f.ret_300s_bps ?? 0) * dir))} its way in 5 minutes.`;
-      case "trades/hour": return `Already made ${esc(gateDetail(c, "trades/hour"))} trades this hour.`;
-      case "max positions": return `Already in ${esc(gateDetail(c, "max positions"))} trades, its maximum.`;
-      case "jev review": return c.review ? `Jev vetoed it: ${Math.round(c.review.adverse * 100)}% chance the news works against this bet (${plural(c.review.headlines, "headline")}).` : "Jev vetoed it on the news.";
-      default: return WAIT[g] || g || "Skipped.";
-    }
-  }
-  function afterSentence(c, h) {
-    const a = c.after?.[String(h)];
-    if (!a) return (now() - Date.parse(c.ts)) / 1000 < h + 30 ? `Too recent to check yet.` : "";
-    const m = h / 60;
-    if (c.taken) return `${m} min later the price was ${spc(a.ret_bps)} in its favour.`;
-    return a.net_bps > 0 ? `${m} min later: ${spc(a.ret_bps)} its way. That would have beaten the costs; a missed chance.`
-      : `${m} min later: ${spc(a.ret_bps)} its way. Not enough to beat costs, so skipping saved money.`;
-  }
-
-  function renderDecisions(el) {
-    if (!scalp?.available) { el.innerHTML = `<p class="small">${scalp ? "The scalp bot hasn't run yet." : "Loading…"}</p>`; return; }
-    const sum = scalp.summary, C = scalp.candidates || [];
-    const hs = S().markouts || [60, 300, 600];
-    const H = hs.includes(300) ? 300 : hs[Math.floor(hs.length / 2)];
-    const mk = (g) => (sum.markouts || []).find((m) => m.group === g && m.h === H);
-    const groups = [["taken", "Trades it took", "were ahead by more than the cost"], ["cost", "Skipped as too small", "would have beaten the costs"], ["jev_veto", "Vetoed by Jev", "would have beaten the costs"], ["other", "Skipped for timing or limits", "would have beaten the costs"]];
-    const list = C.filter((c) => (decFilter === "took" ? c.taken : decFilter === "skipped" ? !c.taken : true));
-    el.innerHTML = `
-      <p class="kicker">Scalp bot</p>
-      <h1 class="hero">Every chance it considered, why it acted or passed, and what the price did next.</h1>
-      <p class="lede">It writes down every possible trade it spots, whether it takes it or not, then checks the price ${H / 60} minutes later. That's how you can tell if its rules are skipping the right ones.</p>
-      <h2 style="margin-top:36px">Were its calls right?</h2>
-      <p class="sub">Share of each group that would have made money ${H / 60} minutes after the decision, counting real fees. If skipped chances score as well as taken ones, the rule doing the skipping isn't helping.</p>
-      <div class="verdicts">${groups.map(([g, t, w]) => {
-        const m = mk(g);
-        return `<div class="verdict"><h3>${t}</h3>${m ? `<p class="score">${Math.round(m.hit * 100)}%</p><p>${w}, out of ${m.n.toLocaleString()}. Average move ${spc(m.mean_ret_bps)}.</p>` : `<p class="small">No data yet.</p>`}</div>`;
-      }).join("")}</div>
-      <h2>Latest decisions</h2>
-      <div class="toolbar" role="group" aria-label="Filter decisions">
-        ${[["all", "All"], ["took", "Took"], ["skipped", "Skipped"]].map(([k, l]) => `<button class="chip" data-df="${k}" aria-pressed="${decFilter === k}">${l}</button>`).join("")}
-      </div>
-      ${list.length ? `<ul class="dlist">${list.slice(0, decShown).map((c) => `<li class="${c.taken ? "took" : ""}">
-        <span class="tm">${hm(c.ts)}</span>
-        <span class="who"><b>${esc(c.asset)}</b><span>${c.side === "short" ? "might fall" : "might rise"}</span></span>
-        <span><span class="tag${c.taken ? " took" : ""}">${c.taken ? "Took" : "Skipped"}</span>${reasonSentence(c)}</span>
-        <span class="after">${afterSentence(c, H)}</span></li>`).join("")}</ul>
-        ${list.length > decShown ? `<button class="btn more" data-act="more-dec">Show more decisions</button>` : ""}` : `<div class="empty">Nothing here yet.</div>`}`;
-  }
-
-  // ---------- news bot ----------
-  function moodWord(s) { return s > 0.5 ? "clearly good" : s > 0.15 ? "mildly good" : s >= -0.15 ? "neutral" : s >= -0.5 ? "mildly bad" : "clearly bad"; }
-  function scaleSvg(score, entry, exit) {
-    const W = 600, y = 18, x = (s) => ((clamp(s, -1, 1) + 1) / 2) * W;
-    return `<svg viewBox="0 0 ${W} 46" preserveAspectRatio="none" role="img" aria-label="News score ${score.toFixed(2)} on a scale from −1 to +1; buys above +${entry}, sells below −${exit}">
-      <rect x="0" y="${y - 4}" width="${x(-exit)}" height="8" fill="var(--loss-wash)"/>
-      <rect x="${x(entry)}" y="${y - 4}" width="${W - x(entry)}" height="8" fill="var(--gain-wash)"/>
-      <rect x="${x(-exit)}" y="${y - 1}" width="${x(entry) - x(-exit)}" height="2" fill="var(--rule)"/>
-      <line x1="${x(score)}" x2="${x(score)}" y1="${y - 12}" y2="${y + 12}" stroke="var(--ink)" stroke-width="3" vector-effect="non-scaling-stroke"/>
-      <text x="0" y="44">−1 very bad</text><text x="${x(-exit)}" y="44" text-anchor="middle">sell below −${exit}</text>
-      <text x="${x(entry)}" y="44" text-anchor="middle">buy above +${entry}</text><text x="${W}" y="44" text-anchor="end">+1 very good</text>
-    </svg>`;
-  }
-
-  function traceHtml(L, sym) {
-    if (!L?.gates?.length) return "";
-    const failed = L.gates.filter((g) => !g.passed);
-    const sum = failed.length ? `Why: ${failed.map((g) => esc(NGATE[g.gate] || g.gate).toLowerCase()).join(", ")} stopped it` : `Why this decision: every check passed`;
-    return `<details class="trace" data-sym="${esc(sym)}"${openTraces.has(sym) ? " open" : ""}><summary>${sum}</summary><ol>${L.gates.map((g) => `<li class="${g.passed ? "ok" : "no"}"><span>${esc(NGATE[g.gate] || g.gate)}</span>${g.detail ? `<code>${esc(g.detail)}</code>` : ""}</li>`).join("")}</ol>
-      <p class="small">Size was limited by <b>${esc(BIND[L.binding] || L.binding || "—")}</b>; it ended at ${(L.final_weight * 100).toFixed(1)}% of its money.</p></details>`;
-  }
-  function stanceWords(n) {
-    if (!n || n.n_clusters == null || !n.n_clusters) return "";
-    return ` ${plural(n.n_clusters, "separate story", "separate stories")}: <b class="pos">${n.pos} good</b>, <b class="neg">${n.neg} bad</b>, ${n.neutral} neutral.`;
-  }
-  function regimeHtml() {
-    const r = snap.regime;
-    if (!r) return `<p class="sub">Not measured yet. It refreshes every hour from free public data.</p>`;
-    const mode = snap.settings.regime_mode;
-    return `<p class="sub">Right now the crypto market looks <b>${esc(zoneWords[r.zone] || r.zone)}</b>${r.score == null ? "" : `, a score of <b>${r.score.toFixed(0)}</b> out of 100 (below 40 is falling, 80 and up is rising)`}. Updated ${ago(r.ts)}. ${mode === "off" ? "For now it's only written down next to each decision; it doesn't change what the bot does." : `It ${mode === "block" ? "blocks new buys when the market is falling" : "lowers how much it may invest when the market is weak"}.`}</p>
-      <ul class="regime">${r.components.map((c) => `<li class="${c.score == null ? "off" : ""}"><span>${esc(c.name)}</span><span class="bar" aria-hidden="true"><i style="width:${c.score == null ? 0 : clamp(c.score, 0, 100)}%"></i></span><b>${c.score == null ? "—" : c.score.toFixed(0)}</b><code>${esc(c.detail)}</code></li>`).join("")}</ul>
-      <p class="small">Readings that are missing don't count; with fewer than 4 of the 6, it calls the market unclear.</p>`;
-  }
-  function jevHealth() {
-    const st = snap.status; if (!st) return "";
-    const [failed, total] = st.jev_window || [0, 0];
-    const bits = [];
-    bits.push(total ? `Jev answered ${total - failed} of its last ${total} questions.` : "Jev hasn't been asked anything recently.");
-    if (st.jev_pending) bits.push(`${plural(st.jev_pending, "headline")} waiting for another try.`);
-    if (snap.spiked) bits.push(`${plural(snap.spiked, "headline")} given up on after ${snap.settings.jev_max_attempts} failed tries.`);
-    if (st.tokens_today?.[0]) bits.push(`${plural(st.tokens_today[0], "question")} today (${st.tokens_today[1].toLocaleString()} tokens in, ${st.tokens_today[2].toLocaleString()} out).`);
-    return `<p class="small">${bits.join(" ")}</p>`;
-  }
-
-  function renderNews(el) {
-    if (!snap) { el.innerHTML = `<p class="small">Loading…</p>`; return; }
-    const set = snap.settings, acc = snap.account, ev = snap.events || [];
-    const syms = new Set(snap.assets.map((a) => a.symbol));
-    const counts = (e) => syms.has(e.asset) || e.asset === "market";
-    const relevant = ev.filter(counts).length;
-    const best = snap.assets.reduce((m, a) => Math.max(m, a.latest?.news?.score ?? -1), -1);
-    const venue = snap.status?.live && !snap.status?.testnet ? "real money" : snap.status?.testnet ? "testnet" : "simulated money";
-    const positions = acc?.positions || [];
-    const paused = !!snap.control?.paused;
-    el.innerHTML = `
-      <p class="kicker">News bot <span class="venue-tag${venue === "real money" ? " live" : ""}">${venue}</span></p>
-      <h1 class="hero">It reads crypto headlines and buys only when the news is clearly good and the price agrees.</h1>
-      <p class="lede">A separate, slower bot. It has read <b>${ev.length}</b> headlines in the last ${set.retain_hours} hours, <b>${relevant}</b> of them about ${esc([...syms].join(", "))} or the whole market. ${snap.trades.length ? `It has made <b>${snap.trades.length}</b> trades.` : `It hasn't traded yet: no coin's news has been good enough. The best score right now is <b>${best.toFixed(2)}</b>; it needs <b>+${set.news_entry}</b>.`}</p>
-      ${(() => { const p = posture(); if (!p) return ""; const [h, t] = postureWords(p); return `<div class="posture ${p.kind.toLowerCase()}" role="status"><b>${esc(h)}</b><span>${esc(t)}</span></div>`; })()}
-      <ol class="rules">
-        <li><b>Reads the news</b>Every ${set.interval_secs / 60 === 1 ? "minute" : `${set.interval_secs / 60} minutes`}, from ${set.feeds.length} crypto news sites.</li>
-        <li><b>Jev reads each headline</b>Which coin is it about, what kind of event, good or bad for the price, and is it a new fact or opinion?</li>
-        <li><b>Scores each coin</b>Recent headlines add up to a score from −1 to +1. Each one counts half as much after ${set.half_life_hours} hours.</li>
-        <li><b>Decides</b>Buys when the score is above +${set.news_entry} and the price is above its 20-hour average. Sells below −${set.news_exit}, on a hack, or at a ${(set.stop_loss_pct * 100).toFixed(0)}% loss.</li>
-      </ol>
-
-      <section class="block" aria-labelledby="h-scores">
-        <h2 id="h-scores">Where each coin stands</h2>
-        <p class="sub">The black mark is the coin's news score right now. It only buys once the mark is inside the green zone, the price trend agrees, and every safety check passes. Open "Why" under a coin to see each check.</p>
-        <div class="scales">${snap.assets.map((a) => {
-          const L = a.latest; if (!L) return "";
-          const s = L.news.score, mom = L.momentum;
-          const held = positions.find((p) => p.asset === a.symbol);
-          const review = snap.status?.review?.[a.symbol] || L.review;
-          const reviewTxt = review ? `<span class="review">On hold for review: ${esc(review)}.</span> It won't buy ${esc(a.symbol)} until that clears. ` : "";
-          const state = held ? `<mark>Holding ${qtyF(held.qty)} ${esc(a.symbol)}.</mark>` : review ? "" : L.news.hack_alert ? "Blocked: fresh hack alert." : s > set.news_entry && mom > 0 ? "<mark>Buy signal.</mark>" : s > set.news_entry ? "News is good enough, but the price is below its recent average, so it waits." : `News is ${moodWord(s)} (${s.toFixed(2)}), not strong enough to buy.`;
-          const momTxt = mom == null ? "There isn't enough recent price history to judge the trend." : `Price is ${pc(Math.abs(mom) * 1e4, 1)} ${mom >= 0 ? "above" : "below"} its 20-hour average.`;
-          return `<div class="scale"><div class="nm"><b>${esc(a.symbol)}</b><span>${px(L.price)}</span></div>${scaleSvg(s, set.news_entry, set.news_exit)}
-            <p>${reviewTxt}${state} ${momTxt} ${plural(L.news.n_events, "headline")} counted.${stanceWords(L.news)}</p>${traceHtml(L, a.symbol)}</div>`;
-        }).join("")}</div>
-      </section>
-
-      <section class="block" aria-labelledby="h-regime">
-        <h2 id="h-regime">The market as a whole</h2>
-        ${regimeHtml()}
-      </section>
-
-      <section class="block" aria-labelledby="h-acct">
-        <h2 id="h-acct">Its money</h2>
-        <p class="sub">${usd(acc.equity)} in total, ${usd(acc.cash)} of it cash, from ${usd(acc.starting_cash)} at the start (${susd(acc.equity - acc.starting_cash)}). ${positions.length ? `Holding ${positions.map((p) => `${qtyF(p.qty)} ${esc(p.asset)}`).join(", ")}.` : "Holding no coins."}</p>
-        <div class="controls">
-          <button class="btn" data-act="pause" ${busy ? "disabled" : ""}>${paused ? "Resume the news bot" : "Pause the news bot"}</button>
-          <button class="btn ${flattenArmed ? "danger" : "ink"}" data-act="flatten" ${busy || !positions.length || acc.flatten_pending ? "disabled" : ""} title="${positions.length ? "Sell everything the news bot holds and pause it" : "The news bot holds nothing to sell"}">${acc.flatten_pending ? "Selling everything…" : flattenArmed ? `Confirm: sell ${plural(positions.length, "position")}` : "Sell everything and pause"}</button>
-          ${flattenArmed ? `<button class="btn quiet" data-act="disarm">Cancel</button>` : ""}
-        </div>
-        <p class="small" style="margin-top:8px">${paused ? "Paused: it won't buy. Stop losses and selling still work." : "Pausing stops new buys; stop losses and selling keep working. These buttons only affect the news bot."}</p>
-        ${snap.status?.stages ? `<ul class="health" aria-label="Last run, step by step">${snap.status.stages.map((s) => `<li class="${esc(s.state)}" title="${esc(s.detail)}">${esc(s.name)}</li>`).join("")}</ul>` : ""}
-        ${jevHealth()}
-      </section>
-
-      <section class="block" aria-labelledby="h-heads">
-        <h2 id="h-heads">Latest headlines and what Jev made of them</h2>
-        <p class="sub">Greyed headlines are about other coins or topics, so they don't affect any score.</p>
-        <ul class="heads">${(() => { const oc = new Map(); for (const e of ev) { const k = e.cluster_id || e.id; oc.set(k, (oc.get(k) || 0) + 1); } return ev.slice(0, headShown).map((e) => { const outlets = oc.get(e.cluster_id || e.id) || 1;
-          const u = safeUrl(e.id);
-          const about = e.asset === "market" ? "the whole market" : e.asset === "other" ? "something it doesn't trade" : e.asset;
-          return `<li class="${counts(e) ? "counts" : "off"}"><span class="tm">${hm(e.published || e.analyzed_at)}</span>
-            ${u ? `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(e.title)}</a>` : `<span>${esc(e.title)}</span>`}
-            <p>${esc(e.source)}${outlets > 1 ? ` <span class="outlets">same story at ${outlets} outlets${snap.settings.dedupe_clusters ? ", counted once" : ""}</span>` : ""}. About <b>${esc(about)}</b>; Jev reads it as ${moodWord(e.sentiment)} ${esc(e.event)} news${counts(e) ? ` (${e.sentiment >= 0 ? "+" : ""}${e.sentiment.toFixed(2)}), ${Math.round(e.new_info * 100)}% likely a new fact` : ""}.</p></li>`;
-        }).join(""); })()}</ul>
-        ${ev.length > headShown ? `<button class="btn more" data-act="more-heads">Show more headlines</button>` : ""}
-      </section>`;
-  }
-
-  // ---------- scorecard ----------
-  const pct0 = (x) => (x == null || !isFinite(x) ? "—" : `${Math.round(x * 100)}%`);
-  const spct = (x, d = 1) => (x == null || !isFinite(x) ? "—" : `${x > 0 ? "+" : x < 0 ? "−" : ""}${(Math.abs(x) * 100).toFixed(d)}%`);
-  const sig = (x, d = 2) => (x == null || !isFinite(x) ? "—" : `${x > 0 ? "+" : x < 0 ? "−" : ""}${Math.abs(x).toFixed(d)}`);
-  // The null test is the honest part: say "could be luck" whenever it is.
-  function luck(p, lowN) {
-    if (lowN) return `<span class="verdict-tag thin">too few to tell</span>`;
-    if (p == null) return `<span class="verdict-tag thin">not tested</span>`;
-    return p > 0.1 ? `<span class="verdict-tag luck">could be luck</span>` : `<span class="verdict-tag real">unlikely to be luck</span>`;
-  }
-  const TAGS = { WORKED: "Worked", FAILED_STOP: "Hit the stop", FAILED_FADE: "Rose, then gave it back", CHOPPY: "Went nowhere, choppily", NEUTRAL: "Barely moved" };
-  const DIMS = { event: "Kind of news", source: "News site", asset: "Coin", regime: "Market mood" };
-
-  function renderScore(el) {
-    if (!snap) { el.innerHTML = `<p class="small">Loading…</p>`; return; }
-    const sc = snap.scorecard;
-    const head = `<p class="kicker">News bot</p>
-      <h1 class="hero">Is reading the news actually helping?</h1>
-      <p class="lede">Every headline, every decision and every trade a safety check blocked is checked again 1, 4 and 24 hours later, against what the price really did. Stories that overlap in time are merged first, so one busy morning can't count as twenty proofs. Each result is then compared with shuffled data: if shuffling does about as well, it says <b>could be luck</b>.</p>`;
-    if (!sc) {
-      el.innerHTML = head + `<div class="empty"><b>Nothing checked yet.</b> The first results appear about a day after the news bot starts reading headlines${snap.status ? ` (it's on read ${snap.status.tick.toLocaleString()})` : ""}. For the long write-up run <code>jev-trader report</code>.</div>`;
-      return;
-    }
-    const d = sc.decisions, st = sc.stop;
-    const best = sc.headlines.filter((r) => !r.low_n && r.p != null && r.p <= 0.1).sort((a, b) => (b.ic ?? 0) - (a.ic ?? 0))[0];
-    const verdict = best ? `So far, the news scores line up with the price ${best.h} hours later better than chance would explain.`
-      : sc.headlines.some((r) => !r.low_n) ? "So far, nothing here beats chance. The news scores don't yet predict the price better than shuffled data."
-      : "There aren't enough separate stories yet to judge anything. Treat every number below as a first glimpse.";
-    const total = d.tags ? Object.values(d.tags).reduce((a, b) => a + b, 0) : 0;
-    el.innerHTML = head + `
-      <p class="day"><span class="venue-tag">${esc(sc.label)}</span> ${plural(sc.n_settled, "record")} checked${sc.n_failed ? `, ${sc.n_failed} couldn't be checked` : ""}. ${verdict}</p>
-
-      <section class="block" aria-labelledby="h-sc-heads">
-        <h2 id="h-sc-heads">Do good headlines come before rising prices?</h2>
-        <p class="sub">"Agreement" runs from −1 to +1: 0 means Jev's reading of the news says nothing about where the price goes next, +1 would mean it ranks every move perfectly. In markets, even +0.05 that holds up is worth having. Greyed rows have fewer than 30 separate stories.</p>
-        <table class="sc"><thead><tr><th>After</th><th class="num">Separate stories</th><th class="num">Agreement</th><th class="num">Right direction</th><th>Verdict</th></tr></thead><tbody>
-        ${sc.headlines.map((r) => `<tr class="${r.low_n ? "low" : ""}"><td>${r.h} hour${r.h === 1 ? "" : "s"}</td><td class="num">${r.n_clusters.toLocaleString()} <small>of ${r.n_raw.toLocaleString()} headlines</small></td><td class="num">${sig(r.ic, 3)}</td><td class="num">${pct0(r.hit_rate)}</td><td>${luck(r.p, r.low_n)}${r.null_pct != null ? ` <small>beats ${r.null_pct.toFixed(0)}% of shuffles</small>` : ""}</td></tr>`).join("")}
-        </tbody></table>
-      </section>
-
-      <div class="grid2">
-        <section class="panel" aria-labelledby="h-sc-dec">
-          <h2 id="h-sc-dec">How its decisions turned out</h2>
-          <p class="sub">${d.n ? `${plural(d.n, "decision")} to buy or sell, in ${plural(d.n_clusters, "separate episode")}. ${d.hit_rate != null ? `<b>${pct0(d.hit_rate)}</b> went the way it bet` : "No hit rate yet"}${d.expectancy != null ? `, an average of <b class="${cls(d.expectancy)}">${spct(d.expectancy, 2)}</b> per decision after 24 hours` : ""}.${d.low_n ? " Still too few to trust." : ""}` : "No decision has been checked yet."}</p>
-          ${total ? `<ul class="tags">${Object.entries(d.tags).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<li><span class="bar" aria-hidden="true"><i style="width:${(v / total) * 100}%"></i></span><b>${v}</b><span>${esc(TAGS[k] || k)}</span></li>`).join("")}</ul>` : ""}
-          ${d.regime_mismatch ? `<p class="small">${plural(d.regime_mismatch, "failure")} happened after the whole market's mood changed between buying and selling.</p>` : ""}
-        </section>
-        <section class="panel" aria-labelledby="h-sc-stop">
-          <h2 id="h-sc-stop">Is the stop loss in the right place?</h2>
-          ${st.n_winners ? `<p class="sub">Of <b>${st.n_winners}</b> buys that were up after 24 hours, <b>${pct0(st.share_below_stop)}</b> first dipped past the ${(st.stop_pct * 100).toFixed(1)}% stop on the way. ${st.share_below_stop > 0.2 ? "That's a lot of good trades the stop would have cut short; it may be too tight." : "Few good trades dipped that far, so the stop isn't cutting many winners short."}${st.low_n ? " Too few to act on yet." : ""}</p>
-          <dl class="figures"><dt>Typical dip before winning</dt><dd>${spct(st.mae_q50, 2)}</dd><dt>Deep dip (1 in 10 winners)</dt><dd>${spct(st.mae_q90, 2)}</dd><dt>Stop loss today</dt><dd>−${(st.stop_pct * 100).toFixed(1)}%</dd></dl>` : `<p class="sub">No winning buys have been checked yet.</p>`}
-        </section>
-      </div>
-
-      <section class="block" aria-labelledby="h-sc-gates">
-        <h2 id="h-sc-gates">What each safety check cost or saved</h2>
-        <p class="sub">When a check stopped a buy, the buy is followed anyway as if it had happened. "Missed" means it would have made money; "saved" means it would have lost.</p>
-        ${sc.gates.length ? `<table class="sc"><thead><tr><th>Check</th><th class="num">Buys stopped</th><th class="num">Missed</th><th class="num">Saved</th><th class="num">Average move of stopped buys</th></tr></thead><tbody>
-          ${sc.gates.map((g) => `<tr class="${g.low_n ? "low" : ""}"><td>${esc(NGATE[g.gate] || g.gate)}</td><td class="num">${g.n}</td><td class="num">${g.missed}</td><td class="num">${g.correctly_blocked}</td><td class="num ${cls(g.mean_ret)}">${spct(g.mean_ret, 2)}</td></tr>`).join("")}
-        </tbody></table>` : `<div class="empty">No stopped buys have been checked yet.</div>`}
-      </section>
-
-      ${sc.cohorts.length ? `<section class="block" aria-labelledby="h-sc-coh">
-        <h2 id="h-sc-coh">Which kinds of news work</h2>
-        <p class="sub">The same 4-hour check, split up. Groups with fewer than 5 separate stories are hidden; fewer than 30 are greyed.</p>
-        <table class="sc"><thead><tr><th>Group</th><th class="num">Separate stories</th><th class="num">Agreement</th><th class="num">Right direction</th><th>Verdict</th></tr></thead><tbody>
-          ${sc.cohorts.map((c) => `<tr class="${c.low_n ? "low" : ""}"><td>${esc(DIMS[c.dim] || c.dim)}: <b>${esc(c.key)}</b></td><td class="num">${c.n_clusters}</td><td class="num">${sig(c.ic, 3)}</td><td class="num">${pct0(c.hit_rate)}</td><td>${luck(c.p, c.low_n)}</td></tr>`).join("")}
-        </tbody></table></section>` : ""}
-
-      <p class="small" style="margin-top:28px">These are suggestions, never automatic changes. Only you edit the config, and <code>jev-trader backtest --compare</code> checks a change before you make it.</p>`;
-  }
-
-  // ---------- render ----------
-  function render() {
-    renderRail();
-    renderNotices();
-    document.title = `${VIEWS[view]} · Jev trader`;
-    const el = $("#view");
-    ({ today: renderToday, trades: renderTrades, decisions: renderDecisions, news: renderNews, score: renderScore })[view](el);
-  }
-
-  // ---------- actions ----------
-  async function post(path, body) {
-    busy = true; actionError = null; render();
-    try {
-      const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
-      if (!r.ok) throw new Error((await r.text()) || `The server answered ${r.status}.`);
-      const control = await r.json();
-      if (snap) { snap.control = control; if (path.endsWith("flatten") && snap.account) snap.account.flatten_pending = true; }
-    } catch (e) {
-      actionError = e.message === "Failed to fetch" ? "The dashboard server isn't reachable." : e.message;
-    } finally { busy = false; render(); pollSnap(); }
-  }
-  const disarm = () => { flattenArmed = false; clearTimeout(armTimer); };
-
-  document.addEventListener("click", (e) => {
-    const b = e.target.closest("[data-act],[data-tf],[data-df]");
-    if (!b) return;
-    if (b.dataset.tf) tradeFilter = b.dataset.tf;
-    else if (b.dataset.df) { decFilter = b.dataset.df; decShown = 50; }
-    else {
-      const a = b.dataset.act;
-      if (a === "more-dec") decShown += 50;
-      if (a === "more-heads") headShown += 20;
-      if (a === "dismiss") actionError = null;
-      if (a === "disarm") disarm();
-      if (a === "pause") return post("/api/control/pause", { paused: !snap?.control?.paused });
-      if (a === "flatten") {
-        if (!flattenArmed) { flattenArmed = true; armTimer = setTimeout(() => { disarm(); render(); }, 6000); }
-        else { disarm(); return post("/api/control/flatten"); }
-      }
-    }
-    render();
+// ---------- flaps ----------
+const cellHTML = (c) => { const v = c === " " ? "&nbsp;" : esc(c); return `<span class="c" aria-hidden="true"><span class="h t">${v}</span><span class="h b">${v}</span></span>`; };
+function flapHTML(text, n, tone = "") {
+  const s = String(text ?? "").toUpperCase().padEnd(n).slice(0, n);
+  return `<span class="fl ${tone}" data-n="${n}" data-v="${esc(s)}" role="text" aria-label="${esc(String(text ?? "").trim())}">${[...s].map(cellHTML).join("")}</span>`;
+}
+const FLAPS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+-$.";
+// One flap turn: the top leaf (old character) folds down over the hairline, then the bottom leaf (new character) lands.
+function fold(cell, to) {
+  const [top, bot] = cell.children;
+  const from = top.textContent;
+  top.textContent = to;
+  const lt = document.createElement("span"); lt.className = "h t leaf lt"; lt.textContent = from;
+  const lb = document.createElement("span"); lb.className = "h b leaf lb"; lb.textContent = to;
+  lt.addEventListener("animationend", () => lt.remove(), { once: true });
+  lb.addEventListener("animationend", () => { bot.textContent = to; lb.remove(); }, { once: true });
+  cell.append(lt, lb);
+}
+function setFlap(el, text, tone = "") {
+  const n = +el.dataset.n;
+  const s = String(text ?? "").toUpperCase().padEnd(n).slice(0, n);
+  el.className = "fl " + tone;
+  el.setAttribute("aria-label", String(text ?? "").trim());
+  if (el.dataset.v === s) return;
+  const old = el.dataset.v || "";
+  el.dataset.v = s;
+  const cells = el.children;
+  [...s].forEach((ch, i) => {
+    const cell = cells[i];
+    if (!cell || old[i] === ch) return;
+    const final = ch === " " ? "\u00a0" : ch;
+    if (REDUCED) { cell.children[0].textContent = final; cell.children[1].textContent = final; return; }
+    let k = 0;
+    const steps = 1 + (i % 3);
+    setTimeout(function step() {
+      for (const l of cell.querySelectorAll(".leaf")) l.remove();
+      fold(cell, k < steps ? FLAPS[(Math.random() * FLAPS.length) | 0] : final);
+      if (k++ < steps) setTimeout(step, 120);
+    }, i * 24);
   });
-  // Story bodies are built on demand and the open set survives every refresh.
-  document.addEventListener("toggle", (e) => {
-    const d = e.target;
-    if (d.classList?.contains("trace")) { d.open ? openTraces.add(d.dataset.sym) : openTraces.delete(d.dataset.sym); return; }
-    if (!d.classList?.contains("trade")) return;
-    const id = d.dataset.id;
-    if (d.open) {
-      openTrades.add(id);
-      if (!d.querySelector(".story")) {
-        const t = (scalp?.trades || []).find((x) => (x.candidate_id || x.opened) === id);
-        if (t) d.insertAdjacentHTML("beforeend", storyHtml(t));
-      }
-    } else openTrades.delete(id);
-  }, true);
+}
 
-  // ---------- routing + data ----------
-  function route() {
-    const v = (location.hash || "#today").slice(1);
-    view = VIEWS[v] ? v : "today";
-    window.scrollTo(0, 0);
-    render();
-  }
-  window.addEventListener("hashchange", route);
+// ---------- board rows ----------
+function scalpRows() {
+  const st = S.scalp?.status;
+  if (!st?.assets) return [];
+  const trades = S.scalp.trades || [];
+  return st.assets.map((a) => {
+    const sym = a.symbol || a.coin;
+    const last = trades.find((x) => x.asset === sym);
+    const f = a.features || {};
+    let side = a.position ? a.position.side : a.resting ? a.resting.side : a.leaning || "";
+    let status = "WATCHING", tone = "", wait = "", wtone = "dim", res = "", rtone = "dim";
+    if (a.position) {
+      const p = a.position;
+      const dir = p.side === "short" ? -1 : 1;
+      const mid = f.mid;
+      const u = mid ? dir * (mid - p.entry_px) * p.qty - (p.entry_fee || 0) + (p.funding_usd || 0) : null;
+      status = "IN TRADE"; tone = "green"; wait = "TARGET OR STOP"; wtone = "";
+      res = u == null ? "OPEN" : `${susd(u)} OPEN`; rtone = u == null ? "" : u >= 0 ? "green" : "red";
+    } else if (a.resting) {
+      status = "ORDER WAITING"; tone = "amber"; wait = "A SELLER TO FILL".replace("SELLER", a.resting.side === "short" ? "BUYER" : "SELLER"); wtone = "";
+    } else if (a.exchange_review) {
+      status = "REVIEW"; tone = "amber"; wait = "BOOKS TO MATCH"; wtone = "amber";
+    } else if (st.live_hold) {
+      status = "ON HOLD"; tone = "red"; wait = "YOU TO CHECK"; wtone = "red";
+    } else if (a.blocked_by === "warm-up") {
+      status = "WARMING UP"; tone = "amber"; wait = `${Math.max(0, Math.ceil(((st.settings?.warmup_secs || 600) - (f.history_secs || 0)) / 60))} MIN MORE`;
+    } else {
+      wait = a.blocked_by ? gateWait(a.blocked_by) : "READY";
+      if (["cooldown", "trades/hour", "daily limit", "max positions"].includes(a.blocked_by)) { status = "HELD"; tone = "amber"; wtone = "amber"; }
+    }
+    if (!res && last) {
+      res = `${susd(last.pnl_usd)} AT ${hm24(t(last.closed))}`;
+      rtone = last.pnl_usd > 0 ? "green" : last.pnl_usd < 0 ? "red" : "dim";
+    }
+    if (!res) res = "NO TRADES YET";
+    const s = st.settings || {};
+    const sd = side === "short" ? -1 : 1;
+    const cost = f.spread_bps == null ? null : (s.entry === "taker" ? 2 * s.fee_bps + 2 * s.slippage_bps + f.spread_bps : (s.maker_fee_bps ?? 1.5) + (s.fee_bps ?? 4.5) + (s.slippage_bps ?? 1) + 0.5 * f.spread_bps) + Math.max(0, sd * (f.funding_bps_1h || 0)) * (s.hold_secs || 600) / 3600;
+    const need = cost == null ? null : cost * (s.cost_mult || 2);
+    const costTxt = cost == null ? "—" : `${num(cost, 1)}/${num(f.exp_move_bps, 0)}`;
+    const ctone = cost == null || f.exp_move_bps == null ? "dim" : f.exp_move_bps >= need ? "" : "dim";
+    return { key: "s:" + sym, coin: sym, side: side ? side.toUpperCase() : "—", status, tone, wait, wtone, cost: costTxt, ctone, res, rtone, a };
+  });
+}
+function newsRows() {
+  const sn = S.snap;
+  if (!sn?.assets) return [];
+  const pos = new Map((sn.account?.positions || []).map((p) => [p.asset, p]));
+  const set = sn.settings || {};
+  const review = sn.status?.review || {};
+  return sn.assets.map((a) => {
+    const L = a.latest || {}, ns = L.news || {};
+    const p = pos.get(a.symbol);
+    let status = "WATCHING", tone = "", wait = "", wtone = "dim", res = "", rtone = "dim";
+    const failed = (L.gates || []).find((g) => !g.passed);
+    if (p) { status = "HOLDING"; tone = "green"; wait = `NEWS BELOW ${MINUS}${num(set.news_exit, 2)}`; res = `${spct(p.pnl_pct)} OPEN`; rtone = p.pnl_pct >= 0 ? "green" : "red"; }
+    else if (review[a.symbol]) { status = "REVIEW"; tone = "amber"; wait = "TRUSTED DATA"; wtone = "amber"; }
+    else if (sn.control?.paused) { status = "PAUSED"; tone = "amber"; wait = "YOU TO RESUME"; wtone = "amber"; }
+    else if (a.cooldown_until) { status = "HELD"; tone = "amber"; wait = "COOLDOWN"; wtone = "amber"; }
+    else if (failed) { status = "HELD"; tone = "amber"; wait = NEWS_WAIT[failed.gate] || failed.gate.toUpperCase(); wtone = "amber"; }
+    else if ((ns.score ?? 0) <= set.news_entry) wait = `NEWS ABOVE +${num(set.news_entry, 2)}`;
+    else if ((L.momentum ?? 0) <= 0) wait = "AN UPTREND";
+    else wait = "NEXT LOOK";
+    if (!res) {
+      const last = (sn.trades || []).find((f) => f.asset === a.symbol && (f.round_trip_pnl != null || f.realized_pnl != null));
+      if (last) { const v = last.round_trip_pnl ?? last.realized_pnl; res = `${susd(v)} ${day(t(last.ts))}`; rtone = v > 0 ? "green" : v < 0 ? "red" : "dim"; }
+      else res = "NO TRADES YET";
+    }
+    const rc = set.round_trip_cost_bps;
+    const costTxt = rc == null ? "—" : `${num(rc, 0)}/${L.atr_pct != null ? num(L.atr_pct * 1e4, 0) : "—"}`;
+    return { key: "n:" + a.symbol, coin: a.symbol, side: "LONG", status, tone, wait, wtone, cost: costTxt, ctone: "dim", res, rtone, a };
+  });
+}
+const COLS = [6, 5, 13, 18, 7, 15];
+function rowHTML(r) {
+  const open = S.open.has(r.key);
+  return `<button class="brow" data-key="${r.key}" data-lamp="${r.tone}" aria-expanded="${open}"><span class="lamp" aria-hidden="true"></span>${flapHTML(r.coin, COLS[0])}${flapHTML(r.side, COLS[1], r.side === "LONG" || r.side === "SHORT" ? "" : "dim")}${flapHTML(r.status, COLS[2], r.tone)}${flapHTML(r.wait, COLS[3], r.wtone)}${flapHTML(r.cost, COLS[4], r.ctone)}${flapHTML(r.res, COLS[5], r.rtone)}</button><div class="trace" data-trace="${r.key}" ${open ? "" : "hidden"}></div>`;
+}
+function updateRow(r) {
+  const b = document.querySelector(`.brow[data-key="${r.key}"]`);
+  if (!b) return false;
+  const f = b.querySelectorAll(":scope > .fl");
+  setFlap(f[0], r.coin); setFlap(f[1], r.side, r.side === "LONG" || r.side === "SHORT" ? "" : "dim");
+  setFlap(f[2], r.status, r.tone); setFlap(f[3], r.wait, r.wtone); setFlap(f[4], r.cost, r.ctone); setFlap(f[5], r.res, r.rtone);
+  b.dataset.lamp = r.tone;
+  const tr = document.querySelector(`[data-trace="${r.key}"]`);
+  if (tr && !tr.hidden) tr.innerHTML = r.key[0] === "s" ? scalpCoinWhy(r.a) : newsCoinWhy(r.a);
+  return true;
+}
 
-  let etag = null;
-  async function pollSnap() {
-    try {
-      const r = await fetch("/api/snapshot", { headers: etag ? { "If-None-Match": etag } : {}, cache: "no-store" });
-      if (r.status === 304) { conn = "live"; return false; }
-      if (!r.ok) throw new Error(String(r.status));
-      etag = r.headers.get("ETag");
-      const s = await r.json();
-      snap = s; skew = Date.parse(s.now) - Date.now(); conn = "live";
-      if (flattenArmed && !s.account?.positions?.length) disarm();
-      return true;
-    } catch { conn = "lost"; return true; }
+// ---------- per-coin "why" ----------
+function scalpCoinWhy(a) {
+  const st = S.scalp.status, f = a.features || {}, sym = a.symbol || a.coin, s = st.settings || {};
+  const side = a.leaning || "long";
+  const block = a.position || a.resting ? null : (side === "short" ? a.short_block : a.long_block) || a.blocked_by;
+  const idx = block ? [...MARKET_GATES, ...RISK_GATES].indexOf(block) : -1;
+  const list = [...MARKET_GATES, ...RISK_GATES].map((g, i) => {
+    const [name, say] = gateInfo(g);
+    const state = idx < 0 ? (a.position || a.resting ? "ok" : "skip") : i < idx ? "ok" : i === idx ? "no" : "skip";
+    return `<li class="${state}"><span class="mk">${icon(state === "ok" ? "check" : state === "no" ? "x" : "dash")}</span><span><b>${esc(name)}</b><br><small class="low">${esc(say)}</small></span><span class="raw"></span></li>`;
+  });
+  let head, sub;
+  if (a.position) {
+    const p = a.position, dir = p.side === "short" ? "short" : "long";
+    head = `${sym}: in a ${dir} trade since ${hm(new Date(p.opened_ms))}.`;
+    sub = `Entered at ${px(p.entry_px)}. It sells at ${px(p.tp_px)} (target) or ${px(p.sl_px)} (stop, trails once in profit), or after ${Math.round((s.hold_secs || 600) / 60)} minutes at the latest.`;
+  } else if (a.resting) {
+    head = `${sym}: a ${a.resting.side} order is waiting at ${px(a.resting.px)}.`;
+    sub = `It only counts as filled when someone trades through that price. Cancelled after ${s.maker_timeout_secs ?? 20} s if nobody does.`;
+  } else if (block === "warm-up") {
+    head = `${sym}: still learning what normal trading looks like.`;
+    sub = `It has ${dur(f.history_secs)} of history and needs ${dur(s.warmup_secs)}.`;
+  } else if (block) {
+    const [name] = gateInfo(block);
+    head = ["cooldown", "trades/hour", "daily limit", "max positions", "flat"].includes(block) ? `${sym}: held, waiting for ${name.toLowerCase()}.` : `${sym}: watching, waiting for ${name.toLowerCase()}.`;
+    sub = `Leaning ${side}. Every check above it passed for a ${side}; the first one that didn't is marked.`;
+  } else { head = `${sym}: every check passes.`; sub = "An entry is about to be placed or was just placed."; }
+  const dir = side === "short" ? -1 : 1;
+  const readings = [
+    [`${num(f.activity, 2)}×`, `trading pace vs normal (needs ${s.min_activity_ratio ?? 1.5}×)`],
+    [sgn(f.flow, 2), `trade flow, −1 all sellers … +1 all buyers`],
+    [sgn(f.obi, 2), `order book lean, same scale`],
+    [`${sgn(f.ret_60s_bps, 1)} bps`, "price move in the last minute"],
+    [`${sgn(f.ret_300s_bps, 1)} bps`, "price move in 5 minutes"],
+    [`${num(f.exp_move_bps, 1)} bps`, "typical move over a hold"],
+    [`${num(f.spread_bps, 2)} bps`, "spread now"],
+    [`${sgn(f.funding_bps_1h, 3)} bps/h`, dir > 0 ? "funding (longs pay when +)" : "funding (shorts pay when −)"],
+    [sgn(a.news?.score, 2), `news tone, ${a.news?.n_events ?? 0} headlines${a.news?.hack_alert ? " · HACK ALERT" : ""}`],
+  ];
+  return `<div class="why"><h3>${esc(head)}</h3><p class="sub">${esc(sub)} 100 bps = 1%.</p>
+  <div class="cols"><div><span class="lbl">Checks, in order</span><ul class="checks">${list.join("")}</ul></div>
+  <div><span class="lbl">Readings now · mid ${px(f.mid)}</span><div class="readings">${readings.map(([v, l]) => `<div class="reading"><b>${esc(v)}</b><small>${esc(l)}</small></div>`).join("")}</div>
+  <p class="sub" style="margin-top:14px"><a href="#scalper">Every decision and trade for ${esc(sym)} →</a></p></div></div></div>`;
+}
+function newsHeadlines(ids) {
+  const ev = new Map((S.snap.events || []).map((e) => [e.id, e]));
+  return (ids || []).map((id) => ev.get(id)).filter(Boolean);
+}
+function newsCoinWhy(a) {
+  const sn = S.snap, set = sn.settings || {}, L = a.latest || {}, ns = L.news || {};
+  const p = (sn.account?.positions || []).find((x) => x.asset === a.symbol);
+  let head;
+  if (!a.latest) head = `${a.symbol}: no reading yet.`;
+  else if (p) head = `${a.symbol}: holding ${pct(p.weight, 0)} of the account since its last buy.`;
+  else if ((ns.score ?? 0) <= set.news_entry) head = `${a.symbol}: news isn't positive enough to buy.`;
+  else if ((L.momentum ?? 0) <= 0) head = `${a.symbol}: the news is good but price isn't rising yet.`;
+  else head = `${a.symbol}: ready, ${L.reason || ""}.`;
+  const gates = (L.gates || []).map((g) => `<li class="${g.passed ? "ok" : "no"}"><span class="mk">${icon(g.passed ? "check" : "x")}</span><span>${esc(newsGateName(g.gate))}</span><span class="raw">${esc(g.detail || "")}</span></li>`).join("");
+  const heads = newsHeadlines(L.drivers).slice(0, 5).map((e) => `<li><a href="${esc(e.id)}" target="_blank" rel="noopener">${esc(e.title)}</a><small>${esc(e.source)} · ${ago(t(e.published))} · Jev: ${sentWord(e.sentiment)} (${sgn(e.sentiment, 2)}), new information ${pct(e.new_info, 0)}</small></li>`).join("");
+  return `<div class="why"><h3>${esc(head)}</h3>
+  <p class="sub">It buys when the news score is above +${num(set.news_entry, 2)} <i>and</i> the hourly price trend is up. It sells when the score falls below ${MINUS}${num(set.news_exit, 2)}, on a hack alert, or at the ${pct(set.stop_loss_pct, 0)} stop. Each headline's weight halves every ${set.half_life_hours} h.</p>
+  <div class="cols"><div><span class="lbl">News score now</span>${gauge(ns.score, set.news_entry, set.news_exit)}
+  <div class="readings"><div class="reading"><b>${sgn(ns.score, 2)}</b><small>score from ${ns.n_events ?? 0} headlines (${ns.pos ?? 0} positive, ${ns.neg ?? 0} negative, ${ns.neutral ?? 0} neutral)</small></div>
+  <div class="reading"><b>${spct(L.momentum, 2)}</b><small>hourly trend vs its 20-hour average</small></div>
+  <div class="reading"><b>${px(L.price)}</b><small>last price</small></div></div>
+  <span class="lbl" style="display:block;margin-top:14px">Headlines driving it</span><ul class="heads">${heads || '<li class="low">None in the window.</li>'}</ul></div>
+  <div><span class="lbl">Safety checks</span><ul class="checks">${gates || '<li class="skip"><span class="mk"></span><span>No checks recorded yet.</span><span></span></li>'}</ul></div></div></div>`;
+}
+function newsGateName(g) {
+  return ({ flatten: "No flatten requested", "kill switch": "Daily loss limit not hit", "stop loss": "Stop loss not hit", "asset cooldown": "Coin not cooling down", inputs: "Prices and candles can be trusted", account: "Account value can be trusted", breaker: "No weekly/monthly halt or losing streak", "jev health": "Jev is answering", regime: "Market regime allows it", "news reaction": "Price reacted to the news", pause: "Not paused", challenge: "Survives the counter-argument" })[g] || g;
+}
+const NEWS_WAIT = { flatten: "FLATTEN TO FINISH", "kill switch": "TOMORROW", "stop loss": "STOP TO CLEAR", "asset cooldown": "COOLDOWN TO END", inputs: "TRUSTED PRICES", account: "TRUSTED ACCOUNT", breaker: "THE HALT TO END", "jev health": "JEV TO RECOVER", regime: "A BETTER MARKET", "news reaction": "PRICE TO REACT", pause: "YOU TO RESUME", challenge: "A STRONGER CASE" };
+const sentWord = (x) => (x == null ? "unclear" : x > 0.25 ? "positive" : x < -0.25 ? "negative" : "neutral");
+function gauge(score, entry, exit) {
+  const X = (v) => ((Math.max(-1, Math.min(1, v)) + 1) / 2) * 100;
+  return `<div class="gauge" role="img" aria-label="news score ${sgn(score, 2)}, buy above ${num(entry, 2)}, sell below ${MINUS}${num(exit, 2)}"><span class="track"></span><span class="zone sell" style="left:0;width:${X(-exit)}%"></span><span class="zone buy" style="left:${X(entry)}%;right:0"></span><span class="mid"></span><span class="needle" style="left:${X(score ?? 0)}%"></span></div>`;
+}
+
+// ---------- money sheets ----------
+function meter(used, cap) {
+  const r = cap > 0 ? Math.min(1, Math.max(0, used / cap)) : 0;
+  return `<div class="meter ${r >= 1 ? "full" : r >= 0.75 ? "warn" : ""}"><i style="width:${(r * 100).toFixed(1)}%"></i></div>`;
+}
+const budget = (txt, used, cap) => `<div class="budget"><span>${txt}</span>${meter(used, cap)}</div>`;
+function sheetFrame(name, m, big, sub, risk, budgets, link) {
+  return `<section class="sheet bot"><div class="sh-top"><h2><a href="${link}">${name}</a>${m ? `<span class="venue ${m.kind}">${m.label}</span>` : ""}</h2><p class="num ${big[1]}">${big[0]}</p></div>
+  <p class="sh-sub">${sub}</p><p class="atrisk"><span class="lbl">At risk</span> ${risk}</p><div class="budgets">${budgets}</div></section>`;
+}
+function scalpSheet() {
+  const sc = S.scalp, st = sc?.status;
+  if (!st) return `<section class="sheet bot"><h2>Scalper</h2><p class="sh-sub">${sc && !sc.available ? "No data in " + esc(sc.dir || "data-hl") + ". Start it with <code>jev-trader --config config.scalp.toml scalp</code>." : "Loading…"}</p></section>`;
+  const s = st.settings || {}, m = scalpMoney();
+  const open = st.assets.filter((a) => a.position);
+  const risk = open.length ? open.map((a) => { const p = a.position; const loss = Math.abs(p.entry_px - p.sl_px) * p.qty + (p.entry_fee || 0) * 2; return `<b>${esc(a.symbol)} ${p.side}</b>, about ${usd(loss)} if its stop hits`; }).join("; ") + "." : `nothing open, ${usd(st.cash, 0)} in cash.`;
+  const hourN = (sc.trades || []).filter((x) => Date.now() - t(x.opened) < 3600e3).length;
+  const lossCap = (s.daily_loss_limit_pct || 0.02) * (st.capital || st.starting_cash || 0);
+  const dayLoss = Math.max(0, -(st.day_trade_pnl || 0));
+  return sheetFrame("Scalper", m, [susd(st.realized), cls(st.realized)], `after fees · ${st.wins ?? 0} won, ${st.losses ?? 0} lost`, risk,
+    budget(`<b>${hourN}</b>/${s.max_trades_per_hour ?? 6} trades this hour`, hourN, s.max_trades_per_hour ?? 6) + budget(`<b>${usd(dayLoss)}</b>/${usd(lossCap, 0)} day loss`, dayLoss, lossCap) + budget(`<b>${open.length}</b>/${s.max_positions ?? 2} open`, open.length, s.max_positions ?? 2), "#scalper");
+}
+function newsSheet() {
+  const sn = S.snap;
+  if (!sn) return `<section class="sheet bot"><h2>News bot</h2><p class="sh-sub">Loading…</p></section>`;
+  const acc = sn.account, set = sn.settings || {}, m = newsMoney();
+  if (!acc) return `<section class="sheet bot"><h2>News bot</h2><p class="sh-sub">No account yet. Start it with <code>jev-trader run</code>.</p></section>`;
+  const pnl = acc.equity - acc.starting_cash;
+  const gross = acc.positions.reduce((x, p) => x + p.weight, 0);
+  const dayLoss = Math.max(0, acc.day_start_equity - acc.equity), lossCap = set.daily_loss_limit_pct * acc.day_start_equity;
+  const risk = acc.positions.length ? acc.positions.map((p) => `<b>${esc(p.asset)}</b> ${usd(p.value, 0)}, about ${usd(p.value * set.stop_loss_pct)} at the ${pct(set.stop_loss_pct, 0)} stop`).join("; ") + "." : `nothing open, ${usd(acc.cash, 0)} in cash.`;
+  return sheetFrame("News bot", m, [susd(pnl), cls(pnl)], `since start, after fees · ${(sn.trades || []).length} fills`, risk,
+    budget(`<b>${pct(gross, 0)}</b>/${pct(set.max_gross, 0)} invested`, gross, set.max_gross) + budget(`<b>${usd(dayLoss)}</b>/${usd(lossCap, 0)} day loss`, dayLoss, lossCap) + budget(`<b>${acc.positions.length}</b>/${sn.assets.length} coins held`, acc.positions.length, sn.assets.length), "#news");
+}
+function markout(group, h) { return (S.scalp?.summary?.markouts || []).find((m) => m.group === group && m.h === h); }
+function workingSheet() {
+  const sc = S.scalp, sn = S.snap;
+  const tk = markout("taken", 600) || markout("taken", 300), vt = markout("jev_veto", 600);
+  const need = 150, lines = [];
+  if (sc?.summary) {
+    const n = tk?.n || 0;
+    lines.push(`<p><span class="lbl">Scalper</span> ${n < need ? `<b>Too early to tell:</b> ${n} of ${need} trades.` : tk.mean_net_bps > 0 ? "<b>Positive so far.</b>" : "<b>Not beating its fees.</b>"}${tk ? ` A $1,000 trade made <b class="${cls(per1k(tk.mean_net_bps))}">${susd(per1k(tk.mean_net_bps))}</b> after fees.` : ""}</p>`);
+    if (vt && tk) lines.push(`<p class="${vt.n < 30 ? "lown" : ""}"><span class="lbl">Jev vetoes</span> blocked trades would have made ${susd(per1k(vt.mean_net_bps))} (n=${vt.n}), ${vt.mean_net_bps < tk.mean_net_bps ? "worse than allowed ones." : "not worse than allowed ones."}</p>`);
   }
-  let scalpKey = "";
-  async function pollScalp() {
-    try {
-      const r = await fetch("/api/scalp", { cache: "no-store" });
-      if (!r.ok) throw new Error(String(r.status));
-      scalp = await r.json();
-      // Re-render only when something a reader would notice has changed.
-      const st = scalp.status || {};
-      const key = [scalp.summary?.candidates, scalp.trades?.length, st.assets?.map((a) => `${a.symbol}${a.long_block}${a.short_block}${!!a.position}${(a.features?.activity ?? 0).toFixed(1)}${(a.features?.flow ?? 0).toFixed(1)}`).join(), Math.floor(Date.parse(st.ts || 0) / 10000)].join("|");
-      const changed = key !== scalpKey; scalpKey = key;
-      return changed;
-    } catch { return false; }
+  if (sn) { const d = sn.scorecard?.decisions; lines.push(`<p class="${!d || d.low_n ? "lown" : ""}"><span class="lbl">News bot</span> ${d ? `${d.n} decisions scored, ${pct(d.hit_rate, 0)} right${d.low_n ? ": too few to judge." : "."}` : "nothing scored yet."}</p>`); }
+  return `<section class="sheet bot verdict"><div class="sh-top"><h2><a href="#evidence">Is it working?</a></h2></div>${lines.join("") || '<p class="sh-sub">Loading…</p>'}</section>`;
+}
+
+// ---------- views ----------
+function controlsHTML() {
+  const sn = S.snap;
+  if (!sn?.status) return "";
+  const paused = !!sn.control?.paused;
+  const fl = S.confirmFlatten
+    ? `<button class="btn danger" data-act="flatten-yes">${icon("flat")}Yes, sell everything</button><button class="btn quiet" data-act="flatten-no">Cancel</button>`
+    : `<button class="btn red" data-act="flatten">${icon("flat")}Flatten news bot</button>`;
+  return `<div class="controls"><div class="ctlrow"><button class="btn" data-act="pause">${icon(paused ? "play" : "pause")}${paused ? "Resume news bot" : "Pause news bot"}</button>${fl}</div><span class="ctlnote">News bot only. The scalper has no browser controls: Ctrl+C stops it.</span></div>`;
+}
+function postureLine() {
+  const st = S.scalp?.status, sn = S.snap;
+  const a = st ? (st.live_hold ? "scalper on hold" : st.halted_today ? "scalper done for today" : `scalper ${st.assets.filter((x) => x.position).length} open`) : "";
+  const pk = sn?.status?.posture;
+  const b = pk ? ({ ENTRIES_ALLOWED: "news bot taking entries", EXITS_ONLY: "news bot exits only", REVIEW: "news bot in review" })[pk.kind] + (pk.reason ? ` (${pk.reason})` : "") : "";
+  return [a, b].filter(Boolean).join(" · ");
+}
+function boardView() {
+  const v = $("#view");
+  const rowsS = scalpRows(), rowsN = newsRows();
+  const sig = rowsS.map((r) => r.key).join() + "|" + rowsN.map((r) => r.key).join();
+  if (v.dataset.view !== "board" || v.dataset.sig !== sig) {
+    v.dataset.view = "board"; v.dataset.sig = sig;
+    const st = S.scalp?.status;
+    v.innerHTML = `<header class="head"><div class="title"><h1>Departures</h1><span class="posture" id="posture"></span><p class="moneymini" id="moneymini"></p></div><div id="ctl"></div></header>
+    <div class="sheets" id="sheets"></div>
+    <section class="board" aria-label="Every coin both bots watch">
+      <div class="board-top"><h2>${flapHTML("Departures", 10)}</h2><p>One row per coin. Select a row to see why.</p></div>
+      <div class="bhead"><span></span><span>Coin</span><span>Side</span><span>Status</span><span>Waiting for</span><span title="Round-trip cost in bps / typical move in bps (scalper: over a hold; news bot: one hour)">Cost/move</span><span>Last result</span></div>
+      <div class="bsec">Scalper <small>${rowsS.length} coins · checks every ${((st?.settings?.eval_ms || 500) / 1000).toFixed(1)} s · trades last minutes</small></div>
+      ${rowsS.map(rowHTML).join("") || '<p class="board-foot">No scalper data.</p>'}
+      <div class="bsec">News bot <small>${rowsN.length} coins · looks every ${S.snap?.settings?.interval_secs ?? 60} s · trades last hours to days</small></div>
+      ${rowsN.map(rowHTML).join("") || '<p class="board-foot">No news bot data.</p>'}
+      <div class="board-foot"><span class="key white"><i></i><span>watching</span></span><span class="key amber"><i></i><span>waiting, held by a limit, or needs review</span></span><span class="key green"><i></i><span>in a trade or a profit</span></span><span class="key red"><i></i><span>stopped or a loss</span></span><span>Side: which way it leans now. Cost/move: round-trip cost vs typical move, in bps (100 bps = 1%); the scalper needs the move to be ${scalpSettings().cost_mult ?? 2}× the cost.</span></div>
+    </section>`;
+    for (const r of [...rowsS, ...rowsN]) { const tr = v.querySelector(`[data-trace="${r.key}"]`); if (tr && !tr.hidden) tr.innerHTML = r.key[0] === "s" ? scalpCoinWhy(r.a) : newsCoinWhy(r.a); }
+  } else {
+    for (const r of [...rowsS, ...rowsN]) updateRow(r);
   }
-  (async function loop() {
-    const [a, b] = await Promise.all([pollSnap(), pollScalp()]);
-    // Don't redraw under the reader's pointer while they're selecting text.
-    const newsy = view === "news" || view === "score";
-    if ((a && newsy) || (b && !newsy) || conn === "lost") { if (!String(getSelection())) render(); }
-    else renderRail();
-    setTimeout(loop, document.hidden ? 15000 : 4000);
-  })();
-  setInterval(() => { if (snap || scalp) renderRail(); }, 1000);
-  route();
-})();
+  $("#posture").textContent = postureLine();
+  const ma = scalpMoney(), mb = newsMoney();
+  $("#moneymini").textContent = [ma && `Scalper: ${ma.label.toLowerCase()}, ${ma.kind === "paper" ? usd(ma.capital, 0) + " simulated" : ma.kind === "testnet" ? "fake money" : "REAL money, cap " + usd(ma.capital, 0)}`, mb && `News bot: ${mb.label.toLowerCase()}, ${mb.kind === "paper" ? usd(mb.start, 0) + " simulated" : mb.kind === "testnet" ? "fake money" : "REAL money"}`].filter(Boolean).join(" · ") + (ma?.kind !== "live" && mb?.kind !== "live" ? " · no real money" : "");
+  $("#ctl").innerHTML = controlsHTML();
+  $("#sheets").innerHTML = scalpSheet() + newsSheet() + workingSheet();
+}
+
+function tabsHTML(page, tabs) {
+  const cur = S.tab[page] || tabs[0][0];
+  return `<div class="tabs" role="tablist">${tabs.map(([id, label, n]) => `<button class="tab" role="tab" data-tab="${page}:${id}" aria-selected="${cur === id}">${label}${n != null ? `<small>${n}</small>` : ""}</button>`).join("")}</div>`;
+}
+function outcomeOf(c) {
+  if (c.taken) return ["ok", "Taken"];
+  const g = c.blocked_by;
+  return [g === "jev review" ? "no" : "wait", stoppedBy(g)];
+}
+function afterCells(c) {
+  return [60, 300, 600].map((h) => {
+    const a = c.after?.[h];
+    if (!a) return `<td class="n low">—</td>`;
+    const v = per1k(a.net_bps);
+    return `<td class="n ${cls(v)}">${susd(v)}</td>`;
+  }).join("");
+}
+function candidateTrace(c) {
+  const g = [...(c.eval?.gates || []), ...(c.risk || [])];
+  const stopIdx = g.findIndex((x) => !x.passed);
+  const li = g.map((x, i) => {
+    const state = x.passed ? "ok" : i === stopIdx ? "no" : "skip";
+    return `<li class="${state}"><span class="mk">${icon(state === "ok" ? "check" : state === "no" ? "x" : "dash")}</span><span>${esc(gateInfo(x.gate)[0])}</span><span class="raw">${esc(x.detail || "")}</span></li>`;
+  }).join("");
+  const r = c.review;
+  const rv = r ? `<div class="readings"><div class="reading"><b>${num(r.adverse, 2)}</b><small>adverse news (vetoes at ${scalpSettings().jev_veto ?? 0.6})</small></div><div class="reading"><b>${num(r.support, 2)}</b><small>news supports the move</small></div><div class="reading"><b>${num(r.event_risk, 2)}</b><small>chance of a big scheduled event</small></div><div class="reading"><b>${r.headlines}</b><small>headlines read</small></div></div>` : c.review_error ? `<p class="sub">Jev review failed: ${esc(c.review_error)}</p>` : `<p class="sub">Jev wasn't asked: an earlier check stopped it.</p>`;
+  const [, word] = outcomeOf(c);
+  const sl = c.eval?.sl_bps, tp = c.eval?.tp_bps;
+  return `<div class="why"><h3>${esc(c.asset)} ${esc(c.side)} at ${hms(t(c.ts))}: ${esc(word.toLowerCase())}.</h3>
+  <p class="sub">${c.taken ? `Planned stop ${num(sl, 1)} bps away, target ${num(tp, 1)} bps away; size ×${c.size_mult ?? 1}.` : "Nothing was bought. The columns on the right show what would have happened."} Round-trip cost was ${num(c.eval?.cost_bps, 1)} bps (${usd((c.eval?.cost_bps || 0) / 10)} on $1,000).</p>
+  <div class="cols"><div><span class="lbl">Checks</span><ul class="checks">${li}</ul></div><div><span class="lbl">Jev's review</span>${rv}</div></div></div>`;
+}
+function scalperView() {
+  const v = $("#view"), sc = S.scalp;
+  v.dataset.view = "scalper"; v.dataset.sig = "";
+  if (!sc?.available) { v.innerHTML = `<header class="head"><h1>Scalper</h1></header><div class="sheet empty">${sc ? "No scalper data yet. Start it with <code>jev-trader --config config.scalp.toml scalp</code>." : "Loading…"}</div>`; return; }
+  const st = sc.status, s = st.settings || {}, sum = sc.summary || {};
+  const cands = sc.candidates || [], trades = sc.trades || [];
+  const tab = S.tab.scalper || "decisions";
+  const open = st.assets.filter((a) => a.position);
+  const openHTML = open.map((a) => {
+    const p = a.position, mid = a.features?.mid, dir = p.side === "short" ? -1 : 1;
+    const lo = Math.min(p.sl_px, p.tp_px, mid ?? p.entry_px), hi = Math.max(p.sl_px, p.tp_px, mid ?? p.entry_px);
+    const X = (x) => ((x - lo) / Math.max(1e-12, hi - lo)) * 100;
+    const u = mid ? dir * (mid - p.entry_px) * p.qty - (p.entry_fee || 0) + (p.funding_usd || 0) : null;
+    const left = (p.deadline_ms - Date.now()) / 1000;
+    return `<section class="sheet"><h2>${esc(a.symbol)} <span class="side ${p.side}">${p.side}</span> <span class="tag ok">open</span></h2>
+    <p class="big ${cls(u)}">${susd(u)}<small>so far, after the entry fee · ${dur(left)} left at most</small></p>
+    <div class="ruler" style="--e:${X(p.entry_px)}%"><span class="bar"></span><span class="tick stop" style="left:${X(p.sl_px)}%"></span><span class="tick" style="left:${X(p.entry_px)}%"></span><span class="tick tp" style="left:${X(p.tp_px)}%"></span>${mid ? `<span class="now" style="left:${X(mid)}%"></span>` : ""}</div>
+    <div class="ruler-l"><span>stop <b>${px(p.sl_px)}</b></span><span>entry <b>${px(p.entry_px)}</b> · now <b>${px(mid)}</b></span><span>target <b>${px(p.tp_px)}</b></span></div>
+    <p class="say" style="margin-top:10px">${usd(Math.abs(p.entry_cash ?? p.qty * p.entry_px), 0)} ${p.side === "short" ? "sold short" : "bought"} at ${hm(new Date(p.opened_ms))}. Jev: adverse ${num(p.review?.adverse, 2)}, support ${num(p.review?.support, 2)}.</p></section>`;
+  }).join("");
+  let body = "";
+  if (tab === "decisions") {
+    const F = { all: () => true, taken: (c) => c.taken, veto: (c) => c.blocked_by === "jev review", cost: (c) => c.blocked_by === "cost", limits: (c) => ["cooldown", "trades/hour", "max positions", "daily limit", "flat"].includes(c.blocked_by) };
+    const list = cands.filter(F[S.filter] || F.all);
+    const chips = [["all", "All"], ["taken", "Taken"], ["veto", "Jev vetoed"], ["cost", "Too small for fees"], ["limits", "Held by limits"]].map(([k, l]) => `<button class="chip" data-filter="${k}" aria-pressed="${S.filter === k}">${l}</button>`).join("");
+    const rows = list.map((c) => {
+      const [k, word] = outcomeOf(c), open = S.open.has("c:" + c.id);
+      return `<tr class="click ${open ? "open" : ""}" data-row="c:${esc(c.id)}" tabindex="0" aria-expanded="${open}"><td>${hms(t(c.ts))}</td><td><b>${esc(c.asset)}</b></td><td><span class="side ${c.side}">${esc(c.side)}</span></td><td><span class="tag ${k}">${esc(word)}</span></td>${afterCells(c)}</tr>${open ? `<tr class="detail"><td colspan="7">${candidateTrace(c)}</td></tr>` : ""}`;
+    }).join("");
+    body = `<div class="filters">${chips}</div><div class="tablewrap"><table><thead><tr><th>Time</th><th>Coin</th><th>Side</th><th>What happened</th><th class="n">1 min later</th><th class="n">5 min later</th><th class="n">10 min later</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="empty">No decisions match this filter yet.</td></tr>`}</tbody></table></div>
+    <p class="say low" style="font-size:13px;color:var(--steel-ink)">"Later" columns: what a $1,000 trade in that direction would have made after fees, whether or not it was taken. ${cands.length < (sum.candidates || 0) ? `Showing the latest ${cands.length} of ${sum.candidates}.` : ""}</p>`;
+  } else if (tab === "trades") {
+    const rows = trades.map((x) => {
+      const id = "t:" + x.candidate_id + x.closed, open = S.open.has(id);
+      const story = `${x.side === "short" ? "Sold short" : "Bought"} ${usd(x.notional, 0)} of ${esc(x.asset)} at ${px(x.entry_px)} (${x.entry_order === "paper-maker" || /maker/.test(x.entry_order || "") ? "a resting order, the cheaper fee" : "a market order"}). Stop ${px(x.init_sl_px)}, target ${px(x.tp_px)}. After ${dur(x.hold_secs)} it closed at ${px(x.exit_px)}: ${esc(x.reason)}. Fees ${usd(x.fees_usd)}.`;
+      return `<tr class="click ${open ? "open" : ""}" data-row="${esc(id)}" tabindex="0" aria-expanded="${open}"><td>${hm(t(x.opened))}<span class="sm">${day(t(x.opened))}</span></td><td><b>${esc(x.asset)}</b></td><td><span class="side ${x.side}">${esc(x.side)}</span></td><td>${dur(x.hold_secs)}</td><td>${esc(x.reason)}</td><td class="n">${usd(x.fees_usd)}</td><td class="n ${cls(x.pnl_usd)}"><b>${susd(x.pnl_usd)}</b></td></tr>${open ? `<tr class="detail"><td colspan="7"><div class="why"><h3>${story}</h3>${x.candidate ? candidateTrace(x.candidate) : ""}</div></td></tr>` : ""}`;
+    }).join("");
+    body = `<div class="tablewrap"><table><thead><tr><th>Opened</th><th>Coin</th><th>Side</th><th>Held</th><th>Why it closed</th><th class="n">Fees</th><th class="n">Result after fees</th></tr></thead><tbody>${rows || `<tr><td colspan="7" class="empty">No closed trades yet.</td></tr>`}</tbody></table></div>`;
+  } else {
+    const blocked = sum.blocked_by || {};
+    let left = sum.candidates || 0;
+    const order = [...MARKET_GATES.filter((g) => g !== "warm-up"), ...RISK_GATES];
+    const items = order.map((g, i) => {
+      const n = blocked[g] || 0, [name, say] = gateInfo(g);
+      const before = left; left -= n;
+      return `<li><span class="num">${i + 1}</span><div><h4>${esc(name)}</h4><p>${esc(say)}</p></div><div class="cnt"><b class="${n ? "neg" : ""}">${n ? MINUS + n : "0"}</b><span>${before} reached it</span></div></li>`;
+    }).join("");
+    body = `<section class="sheet"><h2>How it decides</h2><p class="say" style="max-width:74ch">A chance starts when the market checks below pass for one side. Since ${hm(t(sum.session_start))} it found <b>${sum.candidates ?? 0}</b> chances that got past warm-up. Each check stopped some; <b>${blocked.taken ?? 0}</b> made it through every one and were placed as orders. Then it exits at the target, the stop (which trails to break-even once profit covers ${s.trail_after_cost_mult ?? 1.5}× the cost), when the flow reverses, on a hack alert, or after ${Math.round((s.hold_secs || 600) / 60)} minutes.</p>
+    <ol class="sieve" style="margin-top:12px">${items}</ol></section>`;
+  }
+  v.innerHTML = `<header class="head"><h1>Scalper</h1><p class="lede">It watches ${st.assets.length} Hyperliquid perps (${st.assets.map((a) => a.symbol).join(", ")}) every ${((s.eval_ms || 500) / 1000).toFixed(1)} s. When trading suddenly rushes one way and the move looks big enough to pay its fees, it joins: long when buyers rush in, short when sellers do. Before each entry Jev reads recent headlines and can veto it. Orders rest at the best price for the lower fee (${s.maker_fee_bps ?? 1.5} bps instead of ${s.fee_bps ?? 4.5}).</p></header>
+  ${open.length ? `<div class="sheets">${openHTML}</div>` : ""}
+  ${tabsHTML("scalper", [["decisions", "Decisions", sum.candidates], ["trades", "Trades", sum.trades?.n], ["how", "How it decides"]])}
+  ${body}`;
+}
+
+function newsView() {
+  const v = $("#view"), sn = S.snap;
+  v.dataset.view = "news"; v.dataset.sig = "";
+  if (!sn) { v.innerHTML = `<header class="head"><h1>News bot</h1></header><div class="sheet empty">Loading…</div>`; return; }
+  const set = sn.settings || {}, tab = S.tab.news || "coins";
+  let body = "";
+  if (tab === "coins") {
+    body = `<section class="sheet">${sn.assets.map((a) => {
+      const r = newsRows().find((x) => x.coin === a.symbol);
+      return `<div class="coinrow"><div><h3>${esc(a.symbol)}</h3><p class="st"><span class="tag ${r.tone === "green" ? "ok" : r.tone === "amber" ? "wait" : ""}">${esc(r.status.toLowerCase())}</span></p><p class="say">${esc(a.name)}</p></div><div style="grid-column: 2 / -1">${newsCoinWhy(a)}</div></div>`;
+    }).join("")}</section>`;
+  } else if (tab === "headlines") {
+    const ev = (sn.events || []).slice(0, 120);
+    const used = new Set(sn.assets.flatMap((a) => a.latest?.drivers || []));
+    body = `<div class="tablewrap"><table><thead><tr><th>Published</th><th>Headline</th><th>Coin</th><th>Jev says</th><th class="n">New info</th></tr></thead><tbody>${ev.map((e) => `<tr><td>${hm(t(e.published))}<span class="sm">${esc(e.source)}</span></td><td><a href="${esc(e.id)}" target="_blank" rel="noopener">${esc(e.title)}</a>${used.has(e.id) ? '<span class="sm">Driving a score now</span>' : ""}</td><td>${esc(e.asset)}<span class="sm">${pct(e.asset_conf, 0)} sure</span></td><td><span class="${e.sentiment > 0.25 ? "pos" : e.sentiment < -0.25 ? "neg" : ""}">${sentWord(e.sentiment)} ${sgn(e.sentiment, 2)}</span><span class="sm">${esc(e.event)}</span></td><td class="n">${pct(e.new_info, 0)}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">No headlines analysed yet.</td></tr>`}</tbody></table></div>
+    <p class="say" style="font-size:13px;color:var(--steel-ink)">Jev answers four questions per headline: which coin, what kind of event, how positive or negative (−1 to +1), and how likely it's genuinely new. ${sn.spiked ? `${sn.spiked} headlines were given up on after Jev failed repeatedly.` : ""}</p>`;
+  } else if (tab === "trades") {
+    body = `<div class="tablewrap"><table><thead><tr><th>Time</th><th>Coin</th><th>Side</th><th class="n">Price</th><th class="n">Amount</th><th>Why</th><th class="n">Result after fees</th></tr></thead><tbody>${(sn.trades || []).map((f) => { const v2 = f.round_trip_pnl ?? f.realized_pnl; return `<tr><td>${hm(t(f.ts))}<span class="sm">${day(t(f.ts))}</span></td><td><b>${esc(f.asset)}</b></td><td><span class="side ${f.side === "buy" ? "long" : "short"}">${esc(f.side)}</span></td><td class="n">${px(f.price)}</td><td class="n">${usd(f.notional, 0)}</td><td>${esc(f.reason)}${newsHeadlines(f.events).slice(0, 2).map((e) => `<span class="sm">${esc(e.title)}</span>`).join("")}</td><td class="n ${cls(v2)}">${v2 != null ? susd(v2) : "—"}</td></tr>`; }).join("") || `<tr><td colspan="7" class="empty">No trades yet. It buys only when the news score passes +${num(set.news_entry, 2)} and price is rising.</td></tr>`}</tbody></table></div>`;
+  } else {
+    const st = sn.status;
+    body = `<section class="sheet"><h2>Each look, step by step</h2><p class="say">Last look ${ago(t(st?.last_tick_at))}, look #${st?.tick ?? "—"}. Jev used ${st?.tokens_today ? `${st.tokens_today[0]} calls today` : "no calls yet"}.</p></section>
+    <div class="tablewrap"><div class="stages">${(st?.stages || []).map((g) => `<div class="stage ${g.state}"><i></i><b>${esc(g.name)}</b><span class="low">${g.ms != null ? g.ms + " ms" : ""}</span><small>${esc(g.detail)}</small></div>`).join("") || '<p class="empty">No looks recorded yet.</p>'}</div></div>`;
+  }
+  v.innerHTML = `<header class="head"><div class="title"><h1>News bot</h1></div><div id="ctl">${controlsHTML()}</div><p class="lede">Every ${set.interval_secs} s it reads headlines from ${set.feeds?.length ?? 3} crypto news sites and asks Jev what each one means for ${sn.assets.map((a) => a.symbol).join(", ")}. It adds them into a news score per coin, with older headlines counting less. It buys when that score is clearly positive and the hourly price trend is up, and sells when the news turns bad, on a hack alert, or at a ${pct(set.stop_loss_pct, 0)} stop. Long only, and no coin above ${pct(set.max_asset_weight, 0)} of the account.</p></header>
+  ${tabsHTML("news", [["coins", "Coins"], ["headlines", "Headlines", sn.events?.length], ["trades", "Trades", sn.trades?.length], ["steps", "Each look"]])}
+  ${body}`;
+}
+
+function evidenceView() {
+  const v = $("#view"), sc = S.scalp, sn = S.snap;
+  v.dataset.view = "evidence"; v.dataset.sig = "";
+  const groups = [["taken", "Taken"], ["jev_veto", "Jev vetoed"], ["cost", "Too small for fees"], ["other", "Other skips"], ["long", "All longs"], ["short", "All shorts"], ["all", "Everything"]];
+  const mrow = ([g, label]) => `<tr><td><b>${label}</b></td>${[60, 300, 600].map((h) => { const m = markout(g, h); if (!m) return `<td class="n low">—</td>`; const lo = m.n < 30; return `<td class="n ${lo ? "low" : cls(per1k(m.mean_net_bps))}"><b>${susd(per1k(m.mean_net_bps))}</b><span class="sm">${pct(m.hit, 0)} won · n=${m.n}</span></td>`; }).join("")}</tr>`;
+  const hyps = sn?.hypotheses || [];
+  const tk600 = markout("taken", 600), mk = sc?.status?.maker;
+  const days = sc?.summary?.session_start ? Math.max(1 / 24, (Date.now() - t(sc.summary.session_start)) / 864e5) : null;
+  const passes = sc?.summary ? (sc.summary.candidates || 0) - (sc.summary.blocked_by?.cost || 0) - (sc.summary.blocked_by?.spread || 0) : null;
+  const prog = {
+    "H-C01": tk600 ? [tk600.n, 150, `${tk600.n} of 150 taken trades with a 10-minute result`] : [0, 150, "No taken trades with a 10-minute result yet"],
+    "H-C02": mk ? [mk.filled + mk.missed, 100, `${mk.filled + mk.missed} of 100 orders · ${pct(mk.filled / Math.max(1, mk.filled + mk.missed), 0)} filled (needs ≥ 40%)`] : null,
+    "H-C03": days && passes != null ? [Math.min(7, days), 7, `${num(passes / days, 1)} chances per day passing every market check (needs ≥ 10) · ${num(days, 1)} of 7 days`] : null,
+  };
+  const oneHyp = (h) => {
+    const p = prog[h.id];
+    const tag = { testing: "wait", accepted: "ok", rejected: "no", proposed: "" }[h.status] ?? "";
+    return `<div class="hyp"><span class="id">${esc(h.id)}</span><div><h4>${esc(h.statement)}</h4><p><b>Passes if</b> ${esc(h.pass_if)}</p><p><b>Fails if</b> ${esc(h.invalidate_if)}</p>${h.result ? `<p><b>Result</b> ${esc(h.result)}</p>` : ""}</div><div class="prog"><span class="tag ${tag}">${esc(h.status)}</span>${p ? `<span>${esc(p[2])}</span>${meter(p[0], p[1])}` : ""}</div></div>`;
+  };
+  const rank = { testing: 0, accepted: 1, rejected: 2, proposed: 3 };
+  const group = (title, list) => {
+    if (!list.length) return "";
+    list = list.slice().sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9) || (b.id.startsWith("H-C") - a.id.startsWith("H-C")));
+    const live = list.filter((h) => h.status !== "proposed"), later = list.filter((h) => h.status === "proposed");
+    return `<div class="hypgroup"><h3>${title}</h3>${live.map(oneHyp).join("")}${later.length ? `<details class="hypmore"><summary>${icon("chev")}${later.length} proposed, not yet being tested</summary>${later.map(oneHyp).join("")}</details>` : ""}</div>`;
+  };
+  const isScalp = (h) => /^H-(C|S)/.test(h.id);
+  const hypHTML = group("Scalper", hyps.filter(isScalp)) + group("News bot", hyps.filter((h) => !isScalp(h)));
+  const scd = sn?.scorecard;
+  const headRows = (scd?.headlines || []).map((r) => `<tr class="${r.low_n ? "low" : ""}"><td>${r.h} h after</td><td class="n">${r.n_clusters}</td><td class="n">${sgn(r.ic, 2)}</td><td class="n">${pct(r.hit_rate, 0)}</td><td>${r.low_n ? "too few to judge" : r.null_pct != null ? `beats ${num(r.null_pct, 0)}% of random shuffles` : ""}</td></tr>`).join("");
+  const rg = sn?.regime;
+  v.innerHTML = `<header class="head"><h1>Is it working?</h1><p class="lede">Neither bot has proven an edge yet. Every decision is scored afterwards against what the price actually did, net of fees, and each bot has written tests (hypotheses) that say how much evidence is needed before trusting it. Grey figures rest on too few cases to mean anything.</p></header>
+  <section class="sheet"><h2>Scalper: what each kind of decision would have made</h2><p class="say">Dollars per $1,000 trade after fees, 1, 5 and 10 minutes after the decision, whether or not it was taken. If the scalper is any good, "Taken" should beat the skipped groups and stay above $0.</p></section>
+  <div class="tablewrap"><table><thead><tr><th>Decision</th><th class="n">1 min later</th><th class="n">5 min later</th><th class="n">10 min later</th></tr></thead><tbody>${sc?.summary ? groups.map(mrow).join("") : `<tr><td colspan="4" class="empty">No scalper data.</td></tr>`}</tbody></table></div>
+  <section class="sheet"><h2>The tests</h2><p class="say">From <code>hypotheses.toml</code>. A strategy change is written here before it is tried.</p>${hypHTML || '<p class="empty">No hypotheses file found next to the dashboard.</p>'}</section>
+  <section class="sheet"><h2>News bot: do headlines predict the price?</h2><p class="say">Each headline is scored a few hours later. Hit rate is how often the price moved the way Jev's reading pointed; IC is the correlation between reading and move (−1 to +1). Overlapping stories count once. ${scd ? `${scd.n_settled} scored so far.` : ""}</p>
+  ${headRows ? `<div class="tablewrap" style="box-shadow:none;margin-top:10px"><table><thead><tr><th>Horizon</th><th class="n">Stories</th><th class="n">IC</th><th class="n">Hit rate</th><th></th></tr></thead><tbody>${headRows}</tbody></table></div>` : '<p class="empty">Nothing scored yet.</p>'}
+  ${rg ? `<p class="say" style="margin-top:12px">Market regime: <b>${esc(rg.zone)}</b> (${num(rg.score, 0)} of 100). ${set_regime_mode()}</p>` : ""}</section>`;
+}
+function set_regime_mode() { const m = S.snap?.settings?.regime_mode; return m === "record" || m === "recordonly" || m === "record_only" ? "Recorded only; it doesn't change decisions yet." : m ? `Mode: ${esc(m)}.` : ""; }
+
+// ---------- render loop ----------
+function render() {
+  renderRail(); renderNotices();
+  const titles = { board: "Departures", scalper: "Scalper", news: "News bot", evidence: "Is it working?" };
+  document.title = (titles[S.view] || "Departures") + " · Jev trader";
+  const keep = window.scrollY;
+  if (S.view === "board") boardView();
+  else if (S.view === "scalper") scalperView();
+  else if (S.view === "news") newsView();
+  else evidenceView();
+  if (S.view !== "board") window.scrollTo(0, keep);
+}
+function route() {
+  const v = (location.hash || "#board").slice(1);
+  S.view = ["board", "scalper", "news", "evidence"].includes(v) ? v : "board";
+  $("#view").dataset.view = "";
+  render();
+  window.scrollTo(0, 0);
+}
+addEventListener("hashchange", route);
+
+document.addEventListener("click", async (e) => {
+  const b = e.target.closest("button, tr.click");
+  if (!b) return;
+  if (b.classList.contains("brow")) {
+    const k = b.dataset.key, open = !S.open.has(k);
+    open ? S.open.add(k) : S.open.delete(k);
+    b.setAttribute("aria-expanded", open);
+    const tr = document.querySelector(`[data-trace="${k}"]`);
+    tr.hidden = !open;
+    if (open) { const r = [...scalpRows(), ...newsRows()].find((x) => x.key === k); tr.innerHTML = k[0] === "s" ? scalpCoinWhy(r.a) : newsCoinWhy(r.a); }
+    return;
+  }
+  if (b.dataset.row) { const k = b.dataset.row; S.open.has(k) ? S.open.delete(k) : S.open.add(k); render(); return; }
+  if (b.dataset.tab) { const [p, id] = b.dataset.tab.split(":"); S.tab[p] = id; render(); return; }
+  if (b.dataset.filter) { S.filter = b.dataset.filter; render(); return; }
+  const act = b.dataset.act;
+  if (act === "pause") { await control("/api/control/pause", { paused: !S.snap?.control?.paused }); }
+  else if (act === "flatten") { S.confirmFlatten = true; render(); }
+  else if (act === "flatten-no") { S.confirmFlatten = false; render(); }
+  else if (act === "flatten-yes") { S.confirmFlatten = false; await control("/api/control/flatten", null); }
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches("tr.click")) { e.preventDefault(); e.target.click(); }
+});
+async function control(url, body) {
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : "{}" });
+    if (!r.ok) throw new Error(await r.text());
+    S.etag = null; await getSnap(); render();
+  } catch (err) { S.err.snap = "control failed: " + (err.message || err); renderNotices(); }
+}
+
+let ticking = false;
+async function tick() {
+  if (ticking) return; ticking = true;
+  try { await Promise.all([getSnap(), getScalp()]); render(); } finally { ticking = false; }
+}
+route();
+tick();
+setInterval(tick, 2500);
+setInterval(renderRail, 1000);

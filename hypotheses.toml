@@ -146,3 +146,60 @@ pass_if = ">= 3x the cost-passing candidates per day of the old universe and mea
 invalidate_if = "net_bps of the new coins below SOL's with n >= 100, or volatility rank collapses on the next scan"
 status = "testing"
 result = ""
+
+# --- Crypto / low-fee redesign (CRYPTO-REDESIGN.md, 2026-11-06) ---
+
+[[hypothesis]]
+id = "H-C01"
+statement = "The order-flow signal that could not pay Binance spot costs (~22 bps round trip) is net-positive at Hyperliquid perp costs (~7.5 bps maker-in / taker-out)"
+change = "config.hl.toml: feed = hyperliquid, perps = true, entry = maker, fee 4.5 / maker 1.5 bps"
+metric = "mean net_bps at 300s and 600s of TAKEN candidates (scalp_markouts.jsonl), and paper trade P&L after fees and funding"
+baseline = "the same markouts with the Binance spot cost (22 bps + spread) subtracted instead"
+pass_if = "mean net_bps at 600s > 0 with a 95% interval above 0 (clustered by hour), n >= 150 taken candidates"
+invalidate_if = "mean net_bps at 600s <= 0 with n >= 150"
+status = "testing"
+result = ""
+
+[[hypothesis]]
+id = "H-C02"
+statement = "Maker entries save fees without losing the edge to adverse selection (filled orders are not systematically the ones the market runs over)"
+change = "entry = maker, maker_timeout_secs = 20 (strict trade-through fills, scalp_orders.jsonl)"
+metric = "fill rate; markouts of filled vs missed maker orders; net P&L vs a taker-entry counterfactual of the same candidates"
+baseline = "entry = taker on the same candidates (cost 12 bps vs 7.5)"
+pass_if = "fill rate >= 40% and filled orders' 600s markout minus missed orders' >= -4.5 bps (less than the fee saved), n >= 100 orders"
+invalidate_if = "filled orders underperform missed ones by more than the 4.5 bps fee saving, or fill rate < 25%"
+status = "testing"
+result = ""
+
+[[hypothesis]]
+id = "H-C03"
+statement = "The Hyperliquid universe from `hl scan` (ZEC, HYPE, SOL, NEAR, ETH, XRP, kPEPE, ENA) gives enough cost-clearing candidates per day to matter"
+change = "config.scalp.toml assets (scan 2026-11-06: 42-75% of 10m windows clear 2x cost vs 6-37% at Binance spot cost)"
+metric = "candidates per day passing every market gate, per coin"
+baseline = "SOL (also in the Binance universe) as the within-run control"
+pass_if = ">= 10 market-gate passes per day across the universe over 7 days"
+invalidate_if = "< 3 per day over 7 days"
+status = "testing"
+result = ""
+
+[[hypothesis]]
+id = "H-C04"
+statement = "Extreme perp funding is a contrarian tilt for the scalper (crowded side pays and unwinds)"
+change = "none yet: funding_bps_1h, open_interest_usd and premium_bps are recorded with every candidate"
+metric = "net_bps at 600s of candidates whose side opposes funding beyond +/- 0.5 bps/h vs those that go with it"
+baseline = "candidates with |funding| < 0.125 bps/h (Hyperliquid's resting rate)"
+pass_if = "opposing-funding candidates beat with-funding ones by >= 3 bps at 600s, null percentile > 90, n >= 40 each"
+invalidate_if = "no difference with n >= 40 each; then funding stays record-only"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-V01"
+statement = "Moving the news bot from Binance spot to Hyperliquid perps doesn't change its decisions, only its costs (taker 10 -> 4.5 bps, plus hourly funding on longs)"
+change = "config.toml: candles, regime and settlement from Hyperliquid; [paper] fee_rate 0.001 -> 0.00045; funding accrued on open longs (2026-11-06)"
+metric = "per-tick target weights vs the same ticks priced on Binance spot candles; funding paid as a share of gross P&L"
+baseline = "settled scorecard before 2026-11-06 (Binance-priced)"
+pass_if = "momentum sign agrees on >= 98% of ticks over 7 days and funding < 25% of gross P&L"
+invalidate_if = "momentum sign disagrees on > 5% of ticks (perp basis matters) or funding eats > 50% of gross P&L"
+status = "testing"
+result = ""

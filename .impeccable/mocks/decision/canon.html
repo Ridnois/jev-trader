@@ -1,30 +1,17 @@
 <!doctype html><html><head><meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#0F1115;--p:#171A21;--b:#262A33;--t:#E6E8EB;--m:#8B919C;--g:#22C55E;--r:#EF4444;--a:#F59E0B}
-*{box-sizing:border-box;margin:0}
-body{width:1440px;height:900px;overflow:hidden;background:var(--bg);color:var(--t);font:14px/1.4 Inter,sans-serif;font-variant-numeric:tabular-nums;display:grid;grid-template-columns:220px 1fr}
-nav{background:var(--p);border-right:1px solid var(--b);padding:22px 14px;display:flex;flex-direction:column;gap:2px}
-nav b{font-size:16px;margin:0 10px 24px}nav a{padding:9px 10px;border-radius:6px;color:var(--m)}nav a.on{background:#222733;color:var(--t)}
-main{padding:24px;display:grid;grid-template-rows:auto auto 1fr;gap:16px}
-.hd{display:flex;align-items:center;gap:12px}.hd h1{font-size:20px;flex:1}
-.pill{font-size:12px;padding:4px 10px;border-radius:99px;background:#14321F;color:var(--g)}
-button{font:500 13px Inter;padding:8px 14px;border-radius:6px;border:1px solid var(--b);background:var(--p);color:var(--t)}button.k{background:var(--r);border-color:var(--r)}
-.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
-.kpi{background:var(--p);border:1px solid var(--b);border-radius:8px;padding:14px}
-.kpi small{color:var(--m);font-size:12px}.kpi b{display:block;font-size:24px;margin-top:4px}.kpi .up{color:var(--g);font-size:12px}
-.grid{display:grid;grid-template-columns:2fr 1fr;gap:12px}
-.card{background:var(--p);border:1px solid var(--b);border-radius:8px;padding:14px}
-.card h3{font-size:13px;color:var(--m);font-weight:500;margin-bottom:10px}
-table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:8px 6px;border-bottom:1px solid var(--b);text-align:left}th{color:var(--m);font-weight:500}
-.log{font:12px/1.7 'JetBrains Mono',monospace;color:var(--m)}.log .w{color:var(--a)}.log .e{color:var(--r)}
+*{box-sizing:border-box;margin:0}body{width:1440px;height:900px;overflow:hidden;font:14px/1.45 Inter,sans-serif;background:#F5F6F8;color:#111827;display:grid;grid-template-columns:230px 1fr}
+.side{background:#fff;border-right:1px solid #E5E7EB;padding:20px 14px;display:grid;align-content:start;gap:4px}.side b{font:700 18px Inter;margin-bottom:16px}.side a{padding:8px 10px;border-radius:6px;color:#4B5563}.side a.on{background:#EFF6FF;color:#2563EB;font-weight:600}
+main{padding:24px 32px;display:grid;grid-template-rows:auto auto 300px 1fr;gap:20px}
+h1{font:700 24px Inter}.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.t{background:#fff;border:1px solid #E5E7EB;border-radius:10px;padding:16px}.t p{color:#6B7280;font-size:13px}.t b{font:700 26px Inter}.up{color:#16A34A}.dn{color:#DC2626}
+.chart{background:#fff;border:1px solid #E5E7EB;border-radius:10px;padding:16px}.chart svg{width:100%;height:240px}
+table{width:100%;background:#fff;border:1px solid #E5E7EB;border-radius:10px;border-collapse:separate;border-spacing:0}th,td{text-align:left;padding:10px 16px;border-bottom:1px solid #F3F4F6}th{color:#6B7280;font-weight:500;font-size:12.5px}
 </style></head><body>
-<nav><b>jev-trader</b><a class="on">Dashboard</a><a>Pipeline</a><a>News</a><a>Positions</a><a>Trades</a><a>Logs</a></nav>
-<main>
-<div class="hd"><h1>Dashboard</h1><span class="pill">● Running · tick 4,112</span><button>Pause</button><button class="k">Flatten all</button></div>
-<div class="kpis"><div class="kpi"><small>Equity (paper)</small><b>$10,184.32</b><span class="up">+1.84%</span></div><div class="kpi"><small>Gross exposure</small><b>18%</b></div><div class="kpi"><small>Day P&L</small><b>−0.4%</b></div><div class="kpi"><small>Events (24h)</small><b>41</b></div><div class="kpi"><small>Jev p50</small><b>182ms</b></div></div>
-<div class="grid">
-<div class="card"><h3>Equity · synthetic data</h3><svg viewBox="0 0 600 220" width="100%" height="220"><polyline fill="none" stroke="#22C55E" stroke-width="2" points="0,180 60,170 120,176 180,150 240,156 300,130 360,136 420,100 480,90 540,80 600,70"/></svg>
-<h3 style="margin-top:12px">Positions</h3><table><tr><th>Asset</th><th>Qty</th><th>Entry</th><th>Price</th><th>P&L</th></tr><tr><td>BTC</td><td>0.0228</td><td>79,610</td><td>80,485.80</td><td style="color:#22C55E">+1.10%</td></tr><tr><td>SOL</td><td>—</td><td>—</td><td>148.22</td><td>cooldown</td></tr></table></div>
-<div class="card"><h3>Logs</h3><div class="log">14:12:05 INFO tick done equity=10184.32<br><span class="e">14:12:04 WARN SOL hack alert conf=0.94</span><br>14:10:02 INFO PAPER sell 4.21 SOL @ 148.15<br><span class="w">14:09:01 WARN jev timeout 3000ms</span><br>14:05:03 INFO BTC macro +0.36<br>14:00:01 INFO feeds 3/3 new=4</div></div>
-</div></main></body></html>
+<aside class="side"><b>Jev Trader</b><a class="on">Dashboard</a><a>Scalper</a><a>News bot</a><a>Trades</a><a>Settings</a></aside>
+<main><h1>Dashboard</h1>
+<div class="tiles"><div class="t"><p>Scalper P&amp;L</p><b class="dn">−$0.86</b></div><div class="t"><p>News bot P&amp;L</p><b class="up">+$4.12</b></div><div class="t"><p>Trades today</p><b>8</b></div><div class="t"><p>Win rate</p><b>33%</b></div></div>
+<div class="chart"><p>Equity</p><svg viewBox="0 0 1000 240"><polyline fill="none" stroke="#2563EB" stroke-width="2.5" points="0,120 100,118 200,125 300,122 400,130 500,128 600,124 700,132 800,126 900,121 1000,123"/></svg></div>
+<table><tr><th>Time</th><th>Bot</th><th>Coin</th><th>Side</th><th>P&amp;L</th></tr><tr><td>21:06</td><td>Scalper</td><td>ZEC</td><td>Long</td><td class="up">+$0.04</td></tr><tr><td>20:41</td><td>Scalper</td><td>SOL</td><td>Short</td><td class="dn">−$0.31</td></tr><tr><td>19:00</td><td>News</td><td>BTC</td><td>Long</td><td class="up">+$4.12</td></tr></table>
+</main></body></html>

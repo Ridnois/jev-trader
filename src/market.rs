@@ -1,9 +1,8 @@
-//! Public Binance market data (no API key). `data-api.binance.vision` is the
-//! market-data-only mirror; swap `base_url` for another Binance-compatible host if needed.
+//! Candles and the indicators computed from them. Data comes from Hyperliquid's
+//! public info API (`candleSnapshot`, no key needed).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Candle {
@@ -13,7 +12,7 @@ pub struct Candle {
     pub low: f64,
     pub close: f64,
     pub volume: f64,
-    /// Last millisecond of the candle (kline field 6).
+    /// Last millisecond of the candle (Hyperliquid `T`).
     pub close_time: i64,
 }
 
@@ -56,139 +55,21 @@ pub fn split_closed(mut candles: Vec<Candle>, now_ms: i64, interval_ms: i64) -> 
     Snapshot { closed: candles, live_price, stale }
 }
 
-fn num(v: &Value) -> Result<f64> {
-    match v {
-        Value::String(s) => Ok(s.parse()?),
-        Value::Number(n) => n.as_f64().context("bad number"),
-        _ => bail!("unexpected kline field {v}"),
+/// The last `limit` candles of `interval` (the newest may still be open).
+pub async fn klines(http: &reqwest::Client, api: &str, coin: &str, interval: &str, limit: usize) -> Result<Vec<Candle>> {
+    let ims = interval_ms(interval).with_context(|| format!("bad interval {interval}"))?;
+    let end = chrono::Utc::now().timestamp_millis();
+    let start = end - ims * limit as i64;
+    let mut c = crate::hyperliquid::candles(http, api, coin, interval, start, end).await?;
+    if c.len() > limit {
+        c.drain(..c.len() - limit);
     }
+    Ok(c)
 }
 
-fn parse_rows(rows: &[Vec<Value>]) -> Result<Vec<Candle>> {
-    rows.iter()
-        .map(|r| {
-            if r.len() < 7 {
-                bail!("short kline row");
-            }
-            Ok(Candle {
-                open_time: r[0].as_i64().context("open_time")?,
-                open: num(&r[1])?,
-                high: num(&r[2])?,
-                low: num(&r[3])?,
-                close: num(&r[4])?,
-                volume: num(&r[5])?,
-                close_time: r[6].as_i64().context("close_time")?,
-            })
-        })
-        .collect()
-}
-
-pub async fn klines(
-    http: &reqwest::Client,
-    base_url: &str,
-    pair: &str,
-    interval: &str,
-    limit: usize,
-) -> Result<Vec<Candle>> {
-    let rows: Vec<Vec<Value>> = http
-        .get(format!("{base_url}/api/v3/klines"))
-        .query(&[("symbol", pair), ("interval", interval), ("limit", &limit.to_string())])
-        .send()
-        .await?
-        .error_for_status()
-        .with_context(|| format!("klines for {pair}"))?
-        .json()
-        .await?;
-    parse_rows(&rows)
-}
-
-/// All candles opening in [start_ms, end_ms], paging 1000 at a time.
-pub async fn klines_range(
-    http: &reqwest::Client,
-    base_url: &str,
-    pair: &str,
-    interval: &str,
-    start_ms: i64,
-    end_ms: i64,
-) -> Result<Vec<Candle>> {
-    let mut out: Vec<Candle> = Vec::new();
-    let mut from = start_ms;
-    loop {
-        let rows: Vec<Vec<Value>> = http
-            .get(format!("{base_url}/api/v3/klines"))
-            .query(&[
-                ("symbol", pair),
-                ("interval", interval),
-                ("startTime", &from.to_string()),
-                ("endTime", &end_ms.to_string()),
-                ("limit", "1000"),
-            ])
-            .send()
-            .await?
-            .error_for_status()
-            .with_context(|| format!("klines range for {pair}"))?
-            .json()
-            .await?;
-        let batch = parse_rows(&rows)?;
-        let n = batch.len();
-        let Some(last) = batch.last() else { break };
-        from = last.open_time + 1;
-        out.extend(batch);
-        if n < 1000 || from > end_ms {
-            break;
-        }
-    }
-    out.dedup_by_key(|c| c.open_time);
-    Ok(out)
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Ticker24h {
-    pub symbol: String,
-    #[serde(deserialize_with = "de_f64")]
-    pub quote_volume: f64,
-}
-
-fn de_f64<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<f64, D::Error> {
-    let v = Value::deserialize(d)?;
-    num(&v).map_err(serde::de::Error::custom)
-}
-
-pub async fn tickers_24h(http: &reqwest::Client, base_url: &str) -> Result<Vec<Ticker24h>> {
-    Ok(http
-        .get(format!("{base_url}/api/v3/ticker/24hr"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?)
-}
-
-/// Last funding rate (per 8h, as a fraction) from USDⓈ-M futures.
-pub async fn funding_rate(http: &reqwest::Client, futures_url: &str, pair: &str) -> Result<f64> {
-    let v: Value = http
-        .get(format!("{futures_url}/fapi/v1/premiumIndex"))
-        .query(&[("symbol", pair)])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    num(v.get("lastFundingRate").context("lastFundingRate")?)
-}
-
-/// Open interest in contracts (base asset units).
-pub async fn open_interest(http: &reqwest::Client, futures_url: &str, pair: &str) -> Result<f64> {
-    let v: Value = http
-        .get(format!("{futures_url}/fapi/v1/openInterest"))
-        .query(&[("symbol", pair)])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    num(v.get("openInterest").context("openInterest")?)
+/// All candles opening in [start_ms, end_ms].
+pub async fn klines_range(http: &reqwest::Client, api: &str, coin: &str, interval: &str, start_ms: i64, end_ms: i64) -> Result<Vec<Candle>> {
+    crate::hyperliquid::candles(http, api, coin, interval, start_ms, end_ms).await
 }
 
 /// Average true range over the last `n` candles, as a fraction of the last close.

@@ -15,6 +15,10 @@ struct Sec {
     sell_usd: f64,
     /// Last mid seen in this second (0 = none).
     mid: f64,
+    /// Lowest and highest trade price in this second (0 = no trades). Used to decide
+    /// whether a resting maker order would have filled.
+    lo: f64,
+    hi: f64,
 }
 
 /// Live market state for one pair.
@@ -30,6 +34,11 @@ pub struct AssetMarket {
     obi_ewma: f64,
     obi_ms: i64,
     first_ms: i64,
+    /// Perp context (Hyperliquid activeAssetCtx); zero until the first update.
+    pub funding_1h: f64,
+    pub open_interest: f64,
+    pub mark_px: f64,
+    pub oracle_px: f64,
 }
 
 /// One evaluation's view of the market.
@@ -57,6 +66,15 @@ pub struct Features {
     /// Seconds of history available.
     pub history_secs: i64,
     pub book_age_ms: i64,
+    /// Hourly funding rate in bps (positive = longs pay shorts).
+    #[serde(default)]
+    pub funding_bps_1h: f64,
+    /// Open interest in dollars at the mark price.
+    #[serde(default)]
+    pub open_interest_usd: f64,
+    /// Perps: (mark − oracle) / oracle, bps.
+    #[serde(default)]
+    pub premium_bps: f64,
 }
 
 impl AssetMarket {
@@ -100,11 +118,36 @@ impl AssetMarket {
         self.last_trade_ms = now_ms;
         let b = self.bucket(now_ms.div_euclid(1000));
         b.trades += 1;
+        b.lo = if b.lo > 0.0 { b.lo.min(price) } else { price };
+        b.hi = b.hi.max(price);
         if buyer_is_maker {
             b.sell_usd += price * qty;
         } else {
             b.buy_usd += price * qty;
         }
+    }
+
+    pub fn on_ctx(&mut self, funding_1h: f64, open_interest: f64, mark_px: f64, oracle_px: f64) {
+        if funding_1h.is_finite() {
+            self.funding_1h = funding_1h;
+        }
+        if open_interest.is_finite() && open_interest >= 0.0 {
+            self.open_interest = open_interest;
+        }
+        if mark_px > 0.0 {
+            self.mark_px = mark_px;
+        }
+        if oracle_px > 0.0 {
+            self.oracle_px = oracle_px;
+        }
+    }
+
+    /// Did any trade print strictly through `px` in a second after `after_sec`?
+    /// `below` = a resting buy at `px` (fills when someone sells under it); otherwise
+    /// a resting sell. Strictly through, and only in later seconds, so the queue
+    /// ahead of us at `px` is assumed to absorb trades at exactly our price.
+    pub fn traded_through(&self, px: f64, below: bool, after_sec: i64) -> bool {
+        self.secs.iter().rev().take_while(|b| b.sec > after_sec).any(|b| b.lo > 0.0 && if below { b.lo < px } else { b.hi > px })
     }
 
     /// Mid at the end of second `sec` (forward-filled from earlier seconds).
@@ -195,6 +238,9 @@ impl AssetMarket {
             exp_move_bps: sigma * (cfg.hold_secs.max(1) as f64).sqrt(),
             history_secs,
             book_age_ms: now_ms - self.last_book_ms,
+            funding_bps_1h: self.funding_1h * 1e4,
+            open_interest_usd: self.open_interest * if self.mark_px > 0.0 { self.mark_px } else { mid },
+            premium_bps: if self.oracle_px > 0.0 && self.mark_px > 0.0 { (self.mark_px / self.oracle_px - 1.0) * 1e4 } else { 0.0 },
         })
     }
 }
@@ -228,6 +274,22 @@ mod tests {
         assert!(f.ret_60s_bps > 20.0, "ret {}", f.ret_60s_bps);
         assert!(f.micro_bps > 0.0 && f.obi > 0.0);
         assert!(f.sigma_1s_bps > 0.0 && f.exp_move_bps > f.sigma_1s_bps);
+    }
+
+    #[test]
+    fn maker_fill_needs_a_trade_through_after_posting() {
+        let mut m = AssetMarket::default();
+        let t0 = 2_000_000_000i64;
+        m.on_book(99.99, 1.0, 100.01, 1.0, t0);
+        m.on_trade(99.98, 1.0, true, t0 + 100); // same second as the post: ignored
+        assert!(!m.traded_through(99.99, true, t0 / 1000));
+        m.on_trade(99.99, 1.0, true, t0 + 1100); // at our price: queue ahead absorbs it
+        assert!(!m.traded_through(99.99, true, t0 / 1000));
+        m.on_trade(99.985, 1.0, true, t0 + 2100); // through it: filled
+        assert!(m.traded_through(99.99, true, t0 / 1000));
+        assert!(!m.traded_through(100.01, false, t0 / 1000), "no buyer paid above the ask");
+        m.on_trade(100.02, 1.0, false, t0 + 3100);
+        assert!(m.traded_through(100.01, false, t0 / 1000));
     }
 
     #[test]

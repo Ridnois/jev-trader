@@ -2,6 +2,8 @@
 //! claude-trading-skills' crypto-regime-analyzer). Missing components have their
 //! weight redistributed; fewer than 4 of 6 present → UNKNOWN (fails closed as a gate).
 //! Computed at most every `refresh_minutes` and cached in `data/regime.json`.
+//! Market inputs come from Hyperliquid perps (candles, volume, funding, open
+//! interest); BTC dominance from CoinGecko.
 //! Step 4.2: recorded and displayed only, unless `[regime] mode` is set.
 
 use std::collections::BTreeMap;
@@ -12,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::config::{Config, RegimeMode};
+use crate::hyperliquid::{self, PerpCtx};
 use crate::market::{self, Candle};
 use crate::status::{Paths, read_json, write_atomic};
 
@@ -157,27 +160,14 @@ pub fn drawdown_vol_score(closes: &[f64]) -> Option<(f64, String)> {
     Some((0.5 * dd_score + 0.5 * (100.0 - pct), format!("drawdown {:.0}% · vol pct {pct:.0}", dd * 100.0)))
 }
 
-const EXCLUDE: &[&str] = &[
-    "USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "USDE", "BUSD", "PYUSD", "AEUR", "XUSD", "USD1",
-    "WBTC", "WBETH", "STETH", "BFUSD", "EURI", "PAXG",
-];
+/// Not crypto risk appetite: stablecoin-like and tokenized-asset perps.
+const EXCLUDE: &[&str] = &["USDC", "USDT", "USDE", "PAXG", "XAUT"];
 
-/// Top-`n` USDT pairs by quote volume, excluding stablecoins, wrapped and leveraged tokens.
-pub fn universe(tickers: &[market::Ticker24h], n: usize) -> Vec<String> {
-    let mut v: Vec<&market::Ticker24h> = tickers
-        .iter()
-        .filter(|t| {
-            let Some(base) = t.symbol.strip_suffix("USDT") else { return false };
-            !base.is_empty()
-                && !EXCLUDE.contains(&base)
-                && !base.ends_with("UP")
-                && !base.ends_with("DOWN")
-                && !base.ends_with("BULL")
-                && !base.ends_with("BEAR")
-        })
-        .collect();
-    v.sort_by(|a, b| b.quote_volume.total_cmp(&a.quote_volume));
-    v.into_iter().take(n).map(|t| t.symbol.clone()).collect()
+/// Top-`n` perps by 24h volume, excluding stablecoin-like and tokenized-asset perps.
+pub fn universe(perps: &[PerpCtx], n: usize) -> Vec<String> {
+    let mut v: Vec<&PerpCtx> = perps.iter().filter(|p| !p.coin.is_empty() && !EXCLUDE.contains(&p.coin.as_str()) && p.day_volume_usd.is_finite()).collect();
+    v.sort_by(|a, b| b.day_volume_usd.total_cmp(&a.day_volume_usd));
+    v.into_iter().take(n).map(|p| p.coin.clone()).collect()
 }
 
 /// Daily-refreshed alt breadth and thrust.
@@ -219,12 +209,16 @@ fn closes(c: &[Candle]) -> Vec<f64> {
 }
 
 async fn compute(http: &reqwest::Client, cfg: &Config, paths: &Paths, now: DateTime<Utc>) -> Regime {
-    let base = &cfg.market.base_url;
+    let base = cfg.api();
     let now_ms = now.timestamp_millis();
+    let perps = hyperliquid::perp_universe(http, base).await;
+    if let Err(e) = &perps {
+        warn!("regime: Hyperliquid universe unavailable: {e:#}");
+    }
     let mut comps = Vec::new();
 
     // BTC daily: trend + drawdown/vol.
-    let btc = market::klines(http, base, "BTCUSDT", "1d", 400)
+    let btc = market::klines(http, base, "BTC", "1d", 400)
         .await
         .map(|c| c.into_iter().filter(|k| k.is_closed(now_ms)).collect::<Vec<_>>());
     let btc_closes = btc.as_ref().map(|c| closes(c)).unwrap_or_default();
@@ -240,7 +234,7 @@ async fn compute(http: &reqwest::Client, cfg: &Config, paths: &Paths, now: DateT
     let today = now.date_naive();
     let mut cache: DailyCache = read_json(&paths.regime_cache).unwrap_or_default();
     if cache.day != Some(today) {
-        match breadth_thrust(http, base, now_ms).await {
+        match breadth_thrust(http, base, perps.as_deref().unwrap_or_default(), now_ms).await {
             Ok((b, t, n)) => {
                 cache = DailyCache { day: Some(today), breadth: Some(b), thrust: Some(t), n };
                 if let Ok(bytes) = serde_json::to_vec_pretty(&cache) {
@@ -281,19 +275,17 @@ async fn compute(http: &reqwest::Client, cfg: &Config, paths: &Paths, now: DateT
             .unwrap_or_else(|| format!("{} of 31 days stored", dom.history.len())),
     });
 
-    // Funding, contrarian.
+    // Funding, contrarian. Hyperliquid funds hourly; stored ×8 so the score keeps
+    // its 8-hour scale (1 bp/8h is normal).
     let mut funding = BTreeMap::new();
     let mut oi = BTreeMap::new();
     for a in &cfg.assets {
-        if let Ok(f) = market::funding_rate(http, &cfg.market.futures_url, &a.pair).await
-            && f.is_finite()
-        {
-            funding.insert(a.symbol.clone(), f);
+        let Some(p) = perps.as_deref().unwrap_or_default().iter().find(|p| p.coin == a.coin) else { continue };
+        if p.funding_1h.is_finite() {
+            funding.insert(a.symbol.clone(), p.funding_1h * 8.0);
         }
-        if let Ok(o) = market::open_interest(http, &cfg.market.futures_url, &a.pair).await
-            && o.is_finite()
-        {
-            oi.insert(a.symbol.clone(), o);
+        if p.open_interest.is_finite() {
+            oi.insert(a.symbol.clone(), p.open_interest);
         }
     }
     let avg_f = (!funding.is_empty()).then(|| funding.values().sum::<f64>() / funding.len() as f64);
@@ -339,12 +331,12 @@ async fn dominance(http: &reqwest::Client, url: &str) -> Result<f64> {
     v["data"]["market_cap_percentage"]["btc"].as_f64().context("no btc dominance")
 }
 
-async fn breadth_thrust(http: &reqwest::Client, base: &str, now_ms: i64) -> Result<(f64, f64, usize)> {
-    let tickers = market::tickers_24h(http, base).await?;
-    let uni = universe(&tickers, 20);
+async fn breadth_thrust(http: &reqwest::Client, base: &str, perps: &[PerpCtx], now_ms: i64) -> Result<(f64, f64, usize)> {
+    anyhow::ensure!(!perps.is_empty(), "no perp universe");
+    let uni = universe(perps, 20);
     let (mut above, mut pos, mut n) = (0, 0, 0);
-    for pair in &uni {
-        let Ok(c) = market::klines(http, base, pair, "1d", 202).await else { continue };
+    for coin in &uni {
+        let Ok(c) = market::klines(http, base, coin, "1d", 202).await else { continue };
         let c: Vec<f64> = c.iter().filter(|k| k.is_closed(now_ms)).map(|k| k.close).collect();
         let (Some(s200), Some(last)) = (sma(&c, 200), c.last()) else { continue };
         n += 1;
@@ -355,7 +347,7 @@ async fn breadth_thrust(http: &reqwest::Client, base: &str, now_ms: i64) -> Resu
             pos += 1;
         }
     }
-    anyhow::ensure!(n >= 10, "only {n} pairs with 200 days of history");
+    anyhow::ensure!(n >= 10, "only {n} perps with 200 days of history");
     Ok((above as f64 / n as f64, pos as f64 / n as f64, n))
 }
 
@@ -394,8 +386,8 @@ mod tests {
 
     #[test]
     fn universe_filters() {
-        let t = |s: &str, v: f64| market::Ticker24h { symbol: s.into(), quote_volume: v };
-        let u = universe(&[t("BTCUSDT", 9.0), t("USDCUSDT", 99.0), t("ETHBTC", 50.0), t("BNBUPUSDT", 9.0), t("SOLUSDT", 5.0)], 5);
-        assert_eq!(u, vec!["BTCUSDT", "SOLUSDT"]);
+        let t = |s: &str, v: f64| PerpCtx { coin: s.into(), day_volume_usd: v, open_interest_usd: 0.0, open_interest: 0.0, funding_1h: 0.0, mark_px: 1.0, impact_spread_bps: 1.0 };
+        let u = universe(&[t("BTC", 9.0), t("PAXG", 99.0), t("ETH", 50.0), t("SOL", 5.0)], 2);
+        assert_eq!(u, vec!["ETH", "BTC"]);
     }
 }

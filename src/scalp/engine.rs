@@ -5,16 +5,16 @@
 use serde::{Deserialize, Serialize};
 
 use super::features::Features;
-use crate::config::ScalpConfig;
+use crate::config::{EntryMode, ScalpConfig};
 use crate::status::GateResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
-    /// Buy above the neutral inventory, sell back down.
+    /// Buy the perp, sell it back.
     #[default]
     Long,
-    /// Sell part of the neutral inventory, buy it back.
+    /// Sell the perp, buy it back.
     Short,
 }
 
@@ -44,7 +44,7 @@ pub struct NewsCtx {
     pub n_events: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EntryEval {
     pub side: Side,
     pub gates: Vec<GateResult>,
@@ -64,9 +64,19 @@ impl EntryEval {
     }
 }
 
-/// Round-trip cost in bps: two fees, two slippages, and the spread crossed once.
-pub fn round_trip_cost_bps(f: &Features, cfg: &ScalpConfig) -> f64 {
-    2.0 * cfg.fee_bps + 2.0 * cfg.slippage_bps + f.spread_bps
+/// Round-trip cost in bps, measured from the mid. Taker entry: two taker fees, two
+/// slippages, the spread crossed once (half in, half out). Maker entry: the maker
+/// fee in, a taker exit (stops must be certain), half the spread and one slippage.
+/// Perps add the funding the side pays over the holding period (received funding
+/// is not counted as a credit).
+pub fn round_trip_cost_bps(f: &Features, cfg: &ScalpConfig, side: Side) -> f64 {
+    let trading = match cfg.entry {
+        EntryMode::Taker => 2.0 * cfg.fee_bps + 2.0 * cfg.slippage_bps + f.spread_bps,
+        EntryMode::Maker => cfg.maker_fee_bps + cfg.fee_bps + cfg.slippage_bps + 0.5 * f.spread_bps,
+    };
+    // Funding the side would pay over the hold (perps).
+    let funding = (side.sign() * f.funding_bps_1h).max(0.0) * cfg.hold_secs as f64 / 3600.0;
+    trading + funding
 }
 
 /// The same gates for both sides, with every directional reading multiplied by the
@@ -78,7 +88,7 @@ pub fn evaluate_entry(f: &Features, news: &NewsCtx, cfg: &ScalpConfig, side: Sid
         gates.push(GateResult::new(name, pass, detail));
         pass
     };
-    let cost = round_trip_cost_bps(f, cfg);
+    let cost = round_trip_cost_bps(f, cfg, side);
     let flow_threshold = (cfg.min_flow_imbalance - cfg.news_tilt * s * news.score.clamp(-1.0, 1.0)).max(0.05);
     let (buyers, rising) = match side {
         Side::Long => ("buyers", "rising"),
@@ -197,6 +207,7 @@ mod tests {
             exp_move_bps: 2.5 * 600f64.sqrt(),
             history_secs: 3600,
             book_age_ms: 100,
+            ..Default::default()
         }
     }
 
@@ -216,7 +227,8 @@ mod tests {
         let cfg = ScalpConfig::default();
         let e = evaluate_entry(&hot(), &NewsCtx::default(), &cfg, Side::Long);
         assert!(e.ok, "{:?}", e.first_block());
-        assert!((e.cost_bps - 23.0).abs() < 1e-9);
+        // Hyperliquid defaults: maker 1.5 + taker 4.5 + slippage 1 + half the 1 bp spread.
+        assert!((e.cost_bps - 7.5).abs() < 1e-9);
         assert!(e.tp_bps > e.sl_bps && e.sl_bps >= e.cost_bps);
         assert!(!evaluate_entry(&hot(), &NewsCtx::default(), &cfg, Side::Short).candidate);
     }
@@ -233,7 +245,7 @@ mod tests {
     fn cost_gate_blocks_quiet_markets() {
         let cfg = ScalpConfig::default();
         let mut f = hot();
-        f.exp_move_bps = 600f64.sqrt(); // ≈ 24.5 bps < 2 × 23
+        f.exp_move_bps = 0.5 * 600f64.sqrt(); // ≈ 12.2 bps < 2 × 7.5
         let e = evaluate_entry(&f, &NewsCtx::default(), &cfg, Side::Long);
         assert!(e.candidate && !e.ok);
         assert_eq!(e.first_block(), Some("cost"));
@@ -257,6 +269,18 @@ mod tests {
         quiet.activity = 0.8;
         quiet.flow = 0.0;
         assert!(!evaluate_entry(&quiet, &good, &cfg, Side::Long).candidate);
+    }
+
+    #[test]
+    fn maker_perps_cost_model() {
+        // Hyperliquid tier 0: maker 1.5, taker 4.5 bps; 1 bps spread; 1 bps slippage.
+        let cfg = ScalpConfig { entry: EntryMode::Maker, maker_fee_bps: 1.5, fee_bps: 4.5, slippage_bps: 1.0, hold_secs: 3600, ..Default::default() };
+        let mut f = hot();
+        f.funding_bps_1h = 0.5; // longs pay 0.5 bps/hour
+        assert!((round_trip_cost_bps(&f, &cfg, Side::Long) - (1.5 + 4.5 + 1.0 + 0.5 + 0.5)).abs() < 1e-9);
+        assert!((round_trip_cost_bps(&f, &cfg, Side::Short) - 7.5).abs() < 1e-9, "received funding is not a credit");
+        let taker = ScalpConfig { entry: EntryMode::Taker, ..cfg };
+        assert!((round_trip_cost_bps(&f, &taker, Side::Short) - (9.0 + 2.0 + 1.0)).abs() < 1e-9);
     }
 
     #[test]

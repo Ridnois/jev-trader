@@ -30,12 +30,16 @@ use crate::status::{
 const INDEX: &str = include_str!("../dashboard/index.html");
 const CSS: &str = include_str!("../dashboard/app.css");
 const JS: &str = include_str!("../dashboard/app.js");
-const CLASSIC_INDEX: &str = include_str!("../dashboard/classic/index.html");
-const CLASSIC_CSS: &str = include_str!("../dashboard/classic/app.css");
-const CLASSIC_JS: &str = include_str!("../dashboard/classic/app.js");
-const FONT_MONO_400: &[u8] = include_bytes!("../dashboard/fonts/courier-prime-400.woff2");
-const FONT_MONO_700: &[u8] = include_bytes!("../dashboard/fonts/courier-prime-700.woff2");
-const FONT_SANS: &[u8] = include_bytes!("../dashboard/fonts/archivo-narrow-var.woff2");
+/// Barlow (sentences) and Barlow Condensed (board caps and labels), served from the binary.
+const FONTS: &[(&str, &[u8])] = &[
+    ("barlow-400", include_bytes!("../dashboard/fonts/barlow-400.woff2")),
+    ("barlow-500", include_bytes!("../dashboard/fonts/barlow-500.woff2")),
+    ("barlow-600", include_bytes!("../dashboard/fonts/barlow-600.woff2")),
+    ("barlow-700", include_bytes!("../dashboard/fonts/barlow-700.woff2")),
+    ("barlow-condensed-500", include_bytes!("../dashboard/fonts/barlow-condensed-500.woff2")),
+    ("barlow-condensed-600", include_bytes!("../dashboard/fonts/barlow-condensed-600.woff2")),
+    ("barlow-condensed-700", include_bytes!("../dashboard/fonts/barlow-condensed-700.woff2")),
+];
 
 struct App {
     cfg: Config,
@@ -53,12 +57,7 @@ pub async fn serve(cfg: Config, host: String, port: u16, scalp_dir: std::path::P
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX.as_bytes()) }))
         .route("/app.css", get(|| async { asset("text/css; charset=utf-8", CSS.as_bytes()) }))
         .route("/app.js", get(|| async { asset("text/javascript; charset=utf-8", JS.as_bytes()) }))
-        .route("/fonts/courier-prime-400.woff2", get(|| async { asset("font/woff2", FONT_MONO_400) }))
-        .route("/fonts/courier-prime-700.woff2", get(|| async { asset("font/woff2", FONT_MONO_700) }))
-        .route("/fonts/archivo-narrow-var.woff2", get(|| async { asset("font/woff2", FONT_SANS) }))
-        .route("/classic", get(|| async { asset("text/html; charset=utf-8", CLASSIC_INDEX.as_bytes()) }))
-        .route("/classic/app.css", get(|| async { asset("text/css; charset=utf-8", CLASSIC_CSS.as_bytes()) }))
-        .route("/classic/app.js", get(|| async { asset("text/javascript; charset=utf-8", CLASSIC_JS.as_bytes()) }))
+        .route("/fonts/{name}", get(font_handler))
         .route("/api/snapshot", get(snapshot_handler))
         .route("/api/scalp", get(scalp_handler))
         .route("/api/control/pause", post(pause_handler))
@@ -77,6 +76,14 @@ pub async fn serve(cfg: Config, host: String, port: u16, scalp_dir: std::path::P
         })
         .await?;
     Ok(())
+}
+
+async fn font_handler(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    let stem = name.strip_suffix(".woff2").unwrap_or(&name);
+    match FONTS.iter().find(|(n, _)| *n == stem) {
+        Some((_, bytes)) => asset("font/woff2", bytes),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 fn asset(ct: &'static str, body: &'static [u8]) -> Response {
@@ -142,6 +149,8 @@ struct Settings {
     min_clusters: usize,
     reaction_gate: bool,
     jev_max_attempts: u32,
+    /// Paper round trip in bps: fee and slippage on the buy and on the sell.
+    round_trip_cost_bps: f64,
 }
 
 #[derive(Serialize)]
@@ -170,6 +179,8 @@ struct Snapshot {
     scorecard: Option<Arc<Scorecard>>,
     /// Headlines given up on after the Jev retry budget (6.1).
     spiked: usize,
+    /// The hypothesis register (`hypotheses.toml`), so the Evidence page can say what each test needs.
+    hypotheses: Vec<crate::hypotheses::Hypothesis>,
 }
 
 fn file_key(p: &std::path::Path) -> (u64, Option<SystemTime>) {
@@ -314,10 +325,12 @@ fn build_snapshot(app: &App) -> Snapshot {
             min_clusters: cfg.strategy.min_clusters,
             reaction_gate: cfg.strategy.reaction_gate,
             jev_max_attempts: cfg.jev.max_attempts,
+            round_trip_cost_bps: 2.0 * (cfg.paper.fee_rate + cfg.paper.slippage_rate) * 1e4,
         },
         regime: read_json(&p.regime),
         scorecard: scorecard(app),
         spiked: std::fs::read_to_string(&p.spiked).map(|s| s.lines().count()).unwrap_or(0),
+        hypotheses: crate::hypotheses::load(std::path::Path::new("hypotheses.toml")).unwrap_or_default(),
     }
 }
 

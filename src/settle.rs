@@ -374,7 +374,7 @@ pub async fn run(
     }
     for sym in fetch_assets {
         let Some(a) = cfg.assets.iter().find(|a| a.symbol == sym) else { continue };
-        match market::klines_range(http, &cfg.market.base_url, &a.pair, "1h", start, now.timestamp_millis()).await {
+        match market::klines_range(http, cfg.api(), &a.coin, "1h", start, now.timestamp_millis()).await {
             Ok(c) => {
                 let c: Vec<Candle> = c.into_iter().filter(|k| k.is_closed(now.timestamp_millis())).collect();
                 if crate::validate::candles(&c).is_ok() {

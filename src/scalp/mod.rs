@@ -1,12 +1,13 @@
-//! `jev-trader scalp`: an order-flow scalper.
+//! `jev-trader scalp`: an order-flow scalper on Hyperliquid perps.
 //!
-//! - **Pace:** market events. A websocket keeps best bid/ask and every trade; the
-//!   engine evaluates every `eval_ms`.
+//! - **Pace:** market events. A websocket keeps best bid/ask, every trade and the
+//!   perp context (funding, open interest); the engine evaluates every `eval_ms`.
 //! - **Decision:** microstructure (activity burst, trade-flow and book imbalance,
 //!   short push, no chasing) plus a cost gate: the typical move over the holding
-//!   period must pay for the round trip several times over. The same gates,
-//!   mirrored, open shorts: spot can't borrow, so shorts sell from a neutral coin
-//!   inventory and buy it back. Trade P&L is reported apart from inventory drift.
+//!   period must pay for the round trip (fees, spread, funding) several times over.
+//!   The same gates, mirrored, open shorts: a perp short is a plain sell. 1× notional.
+//! - **Fills:** paper fills on the real feed, or (`--live`) real orders: post-only
+//!   entries that count only once the exchange reports the fill, reduce-only IOC exits.
 //! - **Exits:** take profit, stop (trailing to break-even after fees once in
 //!   profit), flow reversal, hack alert (longs), time stop.
 //! - **Thought process:** news never starts a trade. The slow news loop tilts the
@@ -30,11 +31,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{error, info, warn};
 
-use crate::binance::Qty;
 use crate::bot::append_jsonl;
-use crate::config::{Config, ScalpConfig};
+use crate::config::{Config, EntryMode, ScalpConfig};
 use crate::jev::JevClient;
-use crate::live::{Booked, Live};
+use crate::live::{Booked, Live, MIN_ORDER_USD};
 use crate::news::{self, NewsEvent, ScalpReview};
 use crate::signals::{SignalOpts, news_signal_with_drivers};
 use crate::status::{GateResult, write_atomic};
@@ -51,6 +51,7 @@ struct Files {
     candidates: PathBuf,
     markouts: PathBuf,
     events: PathBuf,
+    orders: PathBuf,
 }
 
 impl Files {
@@ -63,19 +64,12 @@ impl Files {
             candidates: dir.join("scalp_candidates.jsonl"),
             markouts: dir.join("scalp_markouts.jsonl"),
             events: dir.join("scalp_events.jsonl"),
+            orders: dir.join("scalp_orders.jsonl"),
         }
     }
 }
 
 // ---------------------------------------------------------------- ledger
-
-/// The neutral coin inventory for one asset: what shorts sell from and buy back.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Inventory {
-    pub qty: f64,
-    /// Price when it was allotted (for reporting inventory drift apart from trading).
-    pub px: f64,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScalpPos {
@@ -101,24 +95,32 @@ pub struct ScalpPos {
     #[serde(default)]
     pub review: Option<ScalpReview>,
     pub order_id: String,
+    /// Perps: funding received (+) or paid (−) while open, already in cash.
+    #[serde(default)]
+    pub funding_usd: f64,
+    /// An exit was decided but not (fully) filled yet: keep closing, whatever the rules say now.
+    #[serde(default)]
+    pub closing: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ledger {
     #[serde(default)]
     pub mode: Option<String>,
+    /// "hyperliquid-paper", "hyperliquid" or "hyperliquid-testnet".
+    #[serde(default)]
+    pub venue: Option<String>,
+    /// Collateral plus realized results (a long's notional is spent, a short's received).
     pub cash: f64,
     /// Cash when the ledger was created.
     pub starting_cash: f64,
-    #[serde(default)]
-    pub inventory: BTreeMap<String, Inventory>,
-    /// Coins the ledger owns now: inventory ± open trades.
+    /// Signed perp position per coin (positive = long).
     #[serde(default)]
     pub held: BTreeMap<String, f64>,
     pub positions: BTreeMap<String, ScalpPos>,
     pub day: NaiveDate,
     pub day_start_equity: f64,
-    /// Trade P&L today; the daily loss limit applies to this, not to inventory drift.
+    /// Trade P&L today (the daily loss limit applies to this).
     #[serde(default)]
     pub day_trade_pnl: f64,
     #[serde(default)]
@@ -139,12 +141,12 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    fn new(cash: f64, live: bool) -> Self {
+    fn new(cash: f64, live: bool, venue: &str) -> Self {
         Self {
             mode: live.then(|| LIVE_MODE.to_string()),
+            venue: Some(venue.to_string()),
             cash,
             starting_cash: cash,
-            inventory: BTreeMap::new(),
             held: BTreeMap::new(),
             positions: BTreeMap::new(),
             day: Utc::now().date_naive(),
@@ -168,24 +170,23 @@ impl Ledger {
         self.held.get(sym).copied().unwrap_or(0.0)
     }
 
-    /// Cash plus every coin the ledger owns, at the bid.
-    fn equity(&self, bids: &HashMap<String, f64>) -> f64 {
-        self.cash
-            + self
-                .held
-                .iter()
-                .map(|(s, q)| q * bids.get(s).copied().or_else(|| self.inventory.get(s).map(|i| i.px)).unwrap_or(0.0))
-                .sum::<f64>()
+    /// Cash plus every open position at its mark (entry price when no mark).
+    fn equity(&self, marks: &HashMap<String, f64>) -> f64 {
+        self.cash + self.held.iter().map(|(s, q)| q * self.mark(s, marks)).sum::<f64>()
     }
 
-    /// What the ledger was given: cash plus the inventory at its allotment price.
+    fn mark(&self, sym: &str, marks: &HashMap<String, f64>) -> f64 {
+        marks.get(sym).copied().or_else(|| self.positions.get(sym).map(|p| p.entry_px)).unwrap_or(0.0)
+    }
+
+    /// Notional of open positions; at 1× it is the collateral already in use.
+    fn open_notional(&self, marks: &HashMap<String, f64>) -> f64 {
+        self.held.iter().map(|(s, q)| q.abs() * self.mark(s, marks)).sum()
+    }
+
+    /// What the ledger was given.
     fn capital(&self) -> f64 {
-        self.starting_cash + self.inventory.values().map(|i| i.qty * i.px).sum::<f64>()
-    }
-
-    /// Price drift of the neutral inventory, kept apart from trading results.
-    fn inventory_drift(&self, bids: &HashMap<String, f64>) -> f64 {
-        self.inventory.iter().map(|(s, i)| i.qty * (bids.get(s).copied().unwrap_or(i.px) - i.px)).sum()
+        self.starting_cash
     }
 
     fn apply(&mut self, sym: &str, x: &Exec) {
@@ -209,83 +210,83 @@ struct Exec {
 impl Exec {
     fn from_booked(b: Booked, buy: bool) -> Self {
         if buy {
-            Exec { cash: -b.cash_out, base: b.qty, price: b.price, fee_usd: b.fee_usd, order_id: b.order_id }
+            Exec { cash: -(b.notional + b.fee_usd), base: b.sz, price: b.price, fee_usd: b.fee_usd, order_id: b.order_id }
         } else {
-            Exec { cash: b.cash_in, base: -b.qty, price: b.price, fee_usd: b.fee_usd, order_id: b.order_id }
+            Exec { cash: b.notional - b.fee_usd, base: -b.sz, price: b.price, fee_usd: b.fee_usd, order_id: b.order_id }
         }
     }
 }
 
-enum Amount {
-    /// Spend this much quote (buys only).
-    Quote(f64),
-    /// Buy or sell this much of the coin.
-    Base(f64),
-}
-
 enum Venue {
+    /// Simulated fills against the real Hyperliquid feed, charged real fees.
     Paper,
-    Binance(Live),
+    Live(Live),
 }
 
 impl Venue {
     fn name(&self) -> &'static str {
         match self {
-            Venue::Paper => "paper",
-            Venue::Binance(l) if l.testnet => "binance-testnet",
-            Venue::Binance(_) => "binance",
+            Venue::Paper => "hyperliquid-paper",
+            Venue::Live(l) => l.venue(),
         }
     }
 
-    fn min_notional(&self, sym: &str) -> f64 {
+    fn min_notional(&self) -> f64 {
         match self {
             Venue::Paper => 0.0,
-            Venue::Binance(l) => l.rules.get(sym).map(|(_, r)| r.min_notional * 1.02).unwrap_or(0.0),
+            Venue::Live(_) => MIN_ORDER_USD,
         }
     }
 
-    /// Rounds a coin quantity down to what the venue accepts.
-    fn floor_qty(&self, sym: &str, q: f64) -> f64 {
-        match self {
-            Venue::Paper => q,
-            Venue::Binance(l) => l.rules.get(sym).map(|(_, r)| r.floor_qty(q)).unwrap_or(0.0),
-        }
-    }
-
-    async fn trade(&self, sym: &str, buy: bool, amt: Amount, f: Option<&Features>, cfg: &ScalpConfig, now: DateTime<Utc>) -> std::result::Result<Exec, String> {
+    /// A marketable order for `qty` of the coin. Exits pass `reduce_only`.
+    async fn trade(&self, coin: &str, buy: bool, qty: f64, reduce_only: bool, f: Option<&Features>, cfg: &ScalpConfig) -> std::result::Result<Exec, String> {
+        let f = f.ok_or("no price for the order")?;
         match self {
             Venue::Paper => {
-                let f = f.ok_or("no price to fill a paper order")?;
                 let fee = cfg.fee_bps / 1e4;
-                if buy {
-                    let px = f.ask * (1.0 + cfg.slippage_bps / 1e4);
-                    let (qty, notional) = match amt {
-                        Amount::Quote(usd) => (usd / px, usd),
-                        Amount::Base(q) => (q, q * px),
-                    };
-                    Ok(Exec { cash: -(notional * (1.0 + fee)), base: qty, price: px, fee_usd: notional * fee, order_id: "paper".into() })
-                } else {
-                    let Amount::Base(q) = amt else { return Err("a sell needs a coin quantity".into()) };
-                    let px = f.bid * (1.0 - cfg.slippage_bps / 1e4);
-                    Ok(Exec { cash: q * px * (1.0 - fee), base: -q, price: px, fee_usd: q * px * fee, order_id: "paper".into() })
-                }
+                let px = if buy { f.ask * (1.0 + cfg.slippage_bps / 1e4) } else { f.bid * (1.0 - cfg.slippage_bps / 1e4) };
+                let notional = qty * px;
+                let (cash, base) = if buy { (-(notional * (1.0 + fee)), qty) } else { (notional * (1.0 - fee), -qty) };
+                Ok(Exec { cash, base, price: px, fee_usd: notional * fee, order_id: "paper".into() })
             }
-            Venue::Binance(l) => {
-                let qty = match amt {
-                    Amount::Quote(usd) => Qty::Quote(usd),
-                    Amount::Base(q) => {
-                        let (_, r) = l.rules.get(sym).ok_or("not configured")?;
-                        let q = r.floor_qty(q);
-                        if q < r.min_qty {
-                            return Err(format!("{q} is below the minimum order size"));
-                        }
-                        Qty::Base(r.fmt_qty(q))
-                    }
-                };
-                crate::live::market_fill(l, sym, buy, qty, now, cfg.fee_bps / 1e4).await.map(|b| Exec::from_booked(b, buy))
+            Venue::Live(l) => {
+                let reference = if buy { f.ask } else { f.bid };
+                l.market_fill(coin, buy, qty, reference, reduce_only).await.map(|b| Exec::from_booked(b, buy))
             }
         }
     }
+}
+
+/// A post-only entry waiting for the market to trade through its price (paper)
+/// or for the exchange to report its fill (live).
+struct PendingEntry {
+    side: Side,
+    px: f64,
+    usd: f64,
+    posted_ms: i64,
+    /// Live only: the resting order and its size.
+    cloid: Option<String>,
+    sz: f64,
+    last_poll_ms: i64,
+    eval: EntryEval,
+    candidate_id: String,
+    size_mult: f64,
+    review: Option<ScalpReview>,
+}
+
+#[derive(Serialize)]
+struct OrderRecord<'a> {
+    ts: DateTime<Utc>,
+    candidate_id: &'a str,
+    asset: &'a str,
+    side: Side,
+    px: f64,
+    usd: f64,
+    /// "filled", "partial" (live: part filled before the cancel) or "missed".
+    outcome: &'a str,
+    wait_ms: i64,
+    /// Mid when the order resolved, vs the posted price, signed in the trade's favour.
+    mid_move_bps: f64,
 }
 
 // ---------------------------------------------------------------- shared state
@@ -386,19 +387,44 @@ struct PendingMarkout {
 
 // ---------------------------------------------------------------- tasks
 
-async fn feed_task(url: String, pairs: Vec<(String, String)>, markets: Markets, health: Arc<Mutex<FeedHealth>>) {
-    let by_pair: HashMap<String, String> = pairs.iter().map(|(p, s)| (p.to_uppercase(), s.clone())).collect();
-    let streams: Vec<String> = pairs.iter().flat_map(|(p, _)| [format!("{}@bookTicker", p.to_lowercase()), format!("{}@aggTrade", p.to_lowercase())]).collect();
-    let full = format!("{}/stream?streams={}", url.trim_end_matches('/'), streams.join("/"));
+/// Hyperliquid perp feed: best bid/ask (`bbo`, on change per block), every trade
+/// (`side` "B" = the taker bought), and funding / open interest (`activeAssetCtx`).
+async fn hl_feed_task(ws_url: &'static str, coins: Vec<(String, String)>, markets: Markets, health: Arc<Mutex<FeedHealth>>) {
+    use tokio_tungstenite::tungstenite::Message;
+    let by_coin: HashMap<String, String> = coins.iter().map(|(c, s)| (c.clone(), s.clone())).collect();
+    let num = |v: &Value| match v {
+        Value::String(s) => s.parse::<f64>().unwrap_or(f64::NAN),
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        _ => f64::NAN,
+    };
     let mut backoff = 1u64;
     loop {
-        match tokio_tungstenite::connect_async(&full).await {
+        match tokio_tungstenite::connect_async(ws_url).await {
             Ok((mut ws, _)) => {
-                info!("market stream connected ({} streams)", streams.len());
-                backoff = 1;
-                health.lock().unwrap().connected = true;
-                loop {
-                    let msg = match tokio::time::timeout(Duration::from_secs(30), ws.next()).await {
+                let mut sub_ok = true;
+                for (coin, _) in &coins {
+                    for kind in ["bbo", "trades", "activeAssetCtx"] {
+                        let m = serde_json::json!({"method": "subscribe", "subscription": {"type": kind, "coin": coin}});
+                        if ws.send(Message::Text(m.to_string().into())).await.is_err() {
+                            sub_ok = false;
+                        }
+                    }
+                }
+                if sub_ok {
+                    info!("hyperliquid stream connected ({} coins)", coins.len());
+                    backoff = 1;
+                    health.lock().unwrap().connected = true;
+                }
+                let mut ping = tokio::time::interval(Duration::from_secs(30));
+                while sub_ok {
+                    let msg = tokio::select! {
+                        _ = ping.tick() => {
+                            if ws.send(Message::Text(r#"{"method":"ping"}"#.into())).await.is_err() { break; }
+                            continue;
+                        }
+                        m = tokio::time::timeout(Duration::from_secs(45), ws.next()) => m,
+                    };
+                    let msg = match msg {
                         Ok(Some(Ok(m))) => m,
                         Ok(Some(Err(e))) => {
                             health.lock().unwrap().last_error = format!("{e}");
@@ -406,33 +432,52 @@ async fn feed_task(url: String, pairs: Vec<(String, String)>, markets: Markets, 
                         }
                         Ok(None) => break,
                         Err(_) => {
-                            health.lock().unwrap().last_error = "no data for 30s".into();
+                            health.lock().unwrap().last_error = "no data for 45s".into();
                             break;
                         }
                     };
                     let text = match msg {
-                        tokio_tungstenite::tungstenite::Message::Text(t) => t,
-                        tokio_tungstenite::tungstenite::Message::Ping(p) => {
-                            let _ = ws.send(tokio_tungstenite::tungstenite::Message::Pong(p)).await;
+                        Message::Text(t) => t,
+                        Message::Ping(p) => {
+                            let _ = ws.send(Message::Pong(p)).await;
                             continue;
                         }
-                        tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                        Message::Close(_) => break,
                         _ => continue,
                     };
                     let now = Utc::now().timestamp_millis();
                     let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
                     let d = &v["data"];
-                    let num = |k: &str| d[k].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                    let Some(sym) = d["s"].as_str().and_then(|p| by_pair.get(p)) else { continue };
-                    let stream = v["stream"].as_str().unwrap_or_default();
-                    let mut m = markets.lock().unwrap();
-                    let am = m.entry(sym.clone()).or_default();
-                    if stream.ends_with("@bookTicker") {
-                        am.on_book(num("b"), num("B"), num("a"), num("A"), now);
-                    } else if stream.ends_with("@aggTrade") {
-                        am.on_trade(num("p"), num("q"), d["m"].as_bool().unwrap_or(false), now);
+                    match v["channel"].as_str().unwrap_or_default() {
+                        "bbo" => {
+                            let Some(sym) = d["coin"].as_str().and_then(|c| by_coin.get(c)) else { continue };
+                            let (b, a) = (&d["bbo"][0], &d["bbo"][1]);
+                            if b.is_null() || a.is_null() {
+                                continue;
+                            }
+                            markets.lock().unwrap().entry(sym.clone()).or_default().on_book(num(&b["px"]), num(&b["sz"]), num(&a["px"]), num(&a["sz"]), now);
+                        }
+                        "trades" => {
+                            let Some(arr) = d.as_array() else { continue };
+                            let mut m = markets.lock().unwrap();
+                            for t in arr {
+                                let Some(sym) = t["coin"].as_str().and_then(|c| by_coin.get(c)) else { continue };
+                                let taker_sold = t["side"].as_str() == Some("A");
+                                m.entry(sym.clone()).or_default().on_trade(num(&t["px"]), num(&t["sz"]), taker_sold, now);
+                            }
+                        }
+                        "activeAssetCtx" => {
+                            let Some(sym) = d["coin"].as_str().and_then(|c| by_coin.get(c)) else { continue };
+                            let c = &d["ctx"];
+                            markets.lock().unwrap().entry(sym.clone()).or_default().on_ctx(num(&c["funding"]), num(&c["openInterest"]), num(&c["markPx"]), num(&c["oraclePx"]));
+                        }
+                        "error" => {
+                            warn!("hyperliquid stream error: {text}");
+                            health.lock().unwrap().last_error = text.to_string();
+                            continue;
+                        }
+                        _ => continue,
                     }
-                    drop(m);
                     health.lock().unwrap().last_msg_ms = now;
                 }
             }
@@ -442,7 +487,7 @@ async fn feed_task(url: String, pairs: Vec<(String, String)>, markets: Markets, 
             let mut h = health.lock().unwrap();
             h.connected = false;
             h.reconnects += 1;
-            warn!("market stream down ({}); reconnecting in {backoff}s", h.last_error);
+            warn!("hyperliquid stream down ({}); reconnecting in {backoff}s", h.last_error);
         }
         tokio::time::sleep(Duration::from_secs(backoff)).await;
         backoff = (backoff * 2).min(30);
@@ -531,14 +576,69 @@ struct Counts {
     review_fail: u64,
 }
 
+
+/// A position opened from a fill, with targets from the entry evaluation.
+#[allow(clippy::too_many_arguments)]
+fn new_pos(side: Side, x: &Exec, ev: &EntryEval, now_ms: i64, sc: &ScalpConfig, candidate_id: &str, size_mult: f64, review: Option<ScalpReview>) -> ScalpPos {
+    let s = side.sign();
+    ScalpPos {
+        side,
+        qty: x.base.abs(),
+        entry_px: x.price,
+        entry_cash: x.cash,
+        entry_base: x.base,
+        entry_fee: x.fee_usd,
+        opened_ms: now_ms,
+        tp_px: x.price * (1.0 + s * ev.tp_bps / 1e4),
+        sl_px: x.price * (1.0 - s * ev.sl_bps / 1e4),
+        init_sl_px: x.price * (1.0 - s * ev.sl_bps / 1e4),
+        best_px: x.price,
+        sl_bps: ev.sl_bps,
+        cost_bps: ev.cost_bps,
+        deadline_ms: now_ms + sc.hold_secs * 1000,
+        candidate_id: candidate_id.to_string(),
+        size_mult,
+        review,
+        order_id: x.order_id.clone(),
+        funding_usd: 0.0,
+        closing: None,
+    }
+}
+
+/// A maker fill in ledger terms: `sz` at `px`, paying `fee_usd`.
+fn maker_exec(buy: bool, sz: f64, px: f64, fee_usd: f64, order_id: String) -> Exec {
+    let n = sz * px;
+    if buy {
+        Exec { cash: -(n + fee_usd), base: sz, price: px, fee_usd, order_id }
+    } else {
+        Exec { cash: n - fee_usd, base: -sz, price: px, fee_usd, order_id }
+    }
+}
+
+/// Splits the closed fraction of a position off: returns its P&L and shrinks `p`
+/// to what is still open. `x` is the exit fill (its base has the opposite sign).
+fn close_part(p: &mut ScalpPos, x: &Exec) -> f64 {
+    let frac = (x.base.abs() / p.qty).clamp(0.0, 1.0);
+    let pnl = frac * p.entry_cash + x.cash + (frac * p.entry_base + x.base) * x.price + frac * p.funding_usd;
+    let keep = 1.0 - frac;
+    p.qty -= x.base.abs();
+    p.entry_cash *= keep;
+    p.entry_base *= keep;
+    p.entry_fee *= keep;
+    p.funding_usd *= keep;
+    pnl
+}
+
 pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> {
     let sc = cfg.scalp.clone();
     let files = Files::new(&cfg.data_dir);
     crate::status::acquire_pid_lock(&cfg.data_dir.join("scalp.pid"))?;
     let venue = match live {
-        Some(l) => Venue::Binance(l),
+        Some(l) => Venue::Live(l),
         None => Venue::Paper,
     };
+    let is_live = matches!(venue, Venue::Live(_));
+    let coin_of: HashMap<String, String> = cfg.assets.iter().map(|a| (a.symbol.clone(), a.coin.clone())).collect();
     let mut ledger = open_ledger(&venue, &cfg, &files.state).await?;
     info!(venue = venue.name(), cash = ledger.cash, positions = ledger.positions.len(), shorts = sc.shorts, "scalper ledger loaded");
 
@@ -547,26 +647,39 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
     let store: Arc<Mutex<NewsStore>> = Arc::new(Mutex::new(
         std::fs::read(&files.news).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default(),
     ));
-    let pairs: Vec<(String, String)> = cfg.assets.iter().map(|a| (a.pair.clone(), a.symbol.clone())).collect();
-    tokio::spawn(feed_task(sc.stream_url.clone(), pairs, markets.clone(), health.clone()));
+    let coins: Vec<(String, String)> = cfg.assets.iter().map(|a| (a.coin.clone(), a.symbol.clone())).collect();
+    tokio::spawn(hl_feed_task(cfg.exchange.network.ws_url(), coins, markets.clone(), health.clone()));
     tokio::spawn(news_task(cfg.clone(), jev.clone(), store.clone(), files.news.clone(), files.events.clone()));
 
     let mut reviews: HashMap<(String, Side), ReviewCache> = HashMap::new();
     let mut last_candidate_ms: HashMap<String, i64> = HashMap::new();
     let mut pending: Vec<PendingMarkout> = Vec::new();
-    let mut balances: Option<HashMap<String, f64>> = None;
+    // Live: free margin on the exchange and per-coin position mismatches.
+    let mut withdrawable: Option<f64> = None;
     let mut exch_review: HashMap<String, String> = HashMap::new();
-    let mut inventory_note: HashMap<String, String> = HashMap::new();
     let mut last_reconcile_ms = 0i64;
     let mut last_status_ms = 0i64;
     let mut blocks: HashMap<(String, Side), String> = HashMap::new();
     let mut n = Counts::default();
+    let mut pending_entries: HashMap<String, PendingEntry> = HashMap::new();
+    let (mut maker_filled, mut maker_missed) = (0u32, 0u32);
+    let mut last_funding_ms = Utc::now().timestamp_millis();
     let mut ticker = tokio::time::interval(Duration::from_millis(sc.eval_ms.max(100)));
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
             _ = tokio::signal::ctrl_c() => {
+                if let Venue::Live(l) = &venue {
+                    for (sym, pe) in &pending_entries {
+                        if let Some(c) = &pe.cloid {
+                            match l.cancel(&coin_of[sym], c).await {
+                                Ok(()) => info!("{sym}: resting entry cancelled on shutdown"),
+                                Err(e) => error!("{sym}: could not cancel resting entry {c} on shutdown ({e}); cancel it on Hyperliquid"),
+                            }
+                        }
+                    }
+                }
                 info!("shutting down; open positions stay in the ledger and are managed on restart");
                 ledger.save(&files.state)?;
                 return Ok(());
@@ -593,12 +706,12 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                 .collect();
             (ctx, s.events.clone())
         };
-        let bids: HashMap<String, f64> = feats.iter().map(|(k, f)| (k.clone(), f.bid)).collect();
+        let marks: HashMap<String, f64> = feats.iter().map(|(k, f)| (k.clone(), f.mid)).collect();
 
-        // Day roll; the daily limit is on trade P&L, never on inventory drift.
+        // Day roll; the daily limit is on trade P&L.
         if ledger.day != now.date_naive() {
             ledger.day = now.date_naive();
-            ledger.day_start_equity = ledger.equity(&bids);
+            ledger.day_start_equity = ledger.equity(&marks);
             ledger.day_trade_pnl = 0.0;
         }
         if ledger.day_trade_pnl < -sc.daily_loss_limit_pct * ledger.capital() && ledger.halted_day != Some(ledger.day) {
@@ -606,65 +719,135 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
             ledger.halted_day = Some(ledger.day);
         }
 
-        // Live: the exchange must hold every coin the ledger owns (every 60s).
-        if let Venue::Binance(l) = &venue
-            && now_ms - last_reconcile_ms > 60_000
+        // Live: the exchange must hold exactly what the ledger holds (every 30s).
+        if let Venue::Live(l) = &venue
+            && now_ms - last_reconcile_ms > 30_000
         {
             last_reconcile_ms = now_ms;
-            match l.client.balances().await {
-                Ok(b) => {
+            match l.ex.account().await {
+                Ok(acct) => {
                     exch_review.clear();
-                    for (sym, (_, r)) in &l.rules {
-                        let want = ledger.held(sym);
-                        let have = b.get(&r.base).copied().unwrap_or(0.0);
-                        if want > 0.0 && have + r.step < want * (1.0 - 1e-6) {
-                            exch_review.insert(sym.clone(), format!("Binance holds {have} {}, ledger expects {want:.8}", r.base));
+                    for a in &cfg.assets {
+                        // A resting entry may be part-filled; judge it once it resolves.
+                        if pending_entries.contains_key(&a.symbol) {
+                            continue;
+                        }
+                        let want = ledger.held(&a.symbol);
+                        let have = acct.positions.get(&a.coin).copied().unwrap_or(0.0);
+                        if (have - want).abs() > l.step(&a.coin) * 0.5 + 1e-12 {
+                            exch_review.insert(a.symbol.clone(), format!("Hyperliquid holds {have} {}, ledger expects {want:.6}", a.coin));
                         }
                     }
-                    balances = Some(b);
+                    withdrawable = Some(acct.withdrawable);
                 }
                 Err(e) => {
-                    warn!("balance check failed: {e:#}");
-                    balances = None;
+                    warn!("account check failed: {e:#}");
+                    withdrawable = None;
                 }
             }
         }
 
-        // Allot the neutral inventory that shorts sell from (once per asset).
-        if sc.shorts && sc.inventory_usd > 0.0 {
-            let mut changed = false;
-            for a in &cfg.assets {
-                let sym = &a.symbol;
-                if ledger.inventory.contains_key(sym) {
-                    continue;
-                }
-                let Some(f) = feats.get(sym) else { continue };
-                let want = sc.inventory_usd / f.mid;
-                let qty = match (&venue, &balances) {
-                    (Venue::Paper, _) => want,
-                    (Venue::Binance(l), Some(b)) => {
-                        let base = &l.rules[sym].1.base;
-                        let spare = b.get(base).copied().unwrap_or(0.0) - ledger.held(sym);
-                        venue.floor_qty(sym, want.min(spare.max(0.0)))
+        // Funding accrues continuously on open positions (Hyperliquid settles hourly;
+        // accrued here per tick at the current hourly rate). Live, the exchange
+        // charges the real amount; this keeps the ledger's estimate close to it.
+        let dt_h = (now_ms - last_funding_ms).max(0) as f64 / 3_600_000.0;
+        last_funding_ms = now_ms;
+        for (sym, p) in ledger.positions.iter_mut() {
+            let Some(f) = feats.get(sym) else { continue };
+            // Positive funding: longs pay, shorts receive.
+            let amt = -p.side.sign() * f.funding_bps_1h / 1e4 * p.qty * f.mid * dt_h;
+            p.funding_usd += amt;
+            ledger.cash += amt;
+        }
+
+        // 0. Resting maker entries.
+        let waiting: Vec<String> = pending_entries.keys().cloned().collect();
+        for sym in waiting {
+            let pe = &pending_entries[&sym];
+            let expired = now_ms - pe.posted_ms >= sc.maker_timeout_secs * 1000;
+            // (filled size, price, fee, order id) once resolved; None = still resting.
+            let resolved: Option<(f64, f64, f64, String)> = match (&venue, &pe.cloid) {
+                (Venue::Paper, _) | (Venue::Live(_), None) => {
+                    let filled = {
+                        let m = markets.lock().unwrap();
+                        m.get(&sym).is_some_and(|am| am.traded_through(pe.px, pe.side == Side::Long, pe.posted_ms.div_euclid(1000)))
+                    };
+                    if filled {
+                        let sz = pe.usd / pe.px;
+                        Some((sz, pe.px, pe.usd * sc.maker_fee_bps / 1e4, "paper-maker".into()))
+                    } else if expired {
+                        Some((0.0, pe.px, 0.0, String::new()))
+                    } else {
+                        None
                     }
-                    (Venue::Binance(_), None) => continue,
-                };
-                if qty * f.mid < venue.min_notional(sym).max(sc.min_trade_usd) {
-                    inventory_note.insert(sym.clone(), format!("no {sym} inventory to sell: shorts off for {sym}"));
-                    ledger.inventory.insert(sym.clone(), Inventory { qty: 0.0, px: f.mid });
-                } else {
-                    info!(qty, px = f.mid, "allotted {sym} inventory for shorts (${:.0})", qty * f.mid);
-                    ledger.inventory.insert(sym.clone(), Inventory { qty, px: f.mid });
-                    *ledger.held.entry(sym.clone()).or_default() += qty;
                 }
-                changed = true;
+                (Venue::Live(l), Some(cloid)) => {
+                    if !expired && now_ms - pe.last_poll_ms < 1000 {
+                        continue;
+                    }
+                    let coin = &coin_of[&sym];
+                    let (cloid, posted_ms, sz) = (cloid.clone(), pe.posted_ms, pe.sz);
+                    pending_entries.get_mut(&sym).expect("listed").last_poll_ms = now_ms;
+                    match l.maker_progress(&cloid, posted_ms).await {
+                        Err(e) => {
+                            warn!("{sym}: order status failed: {e:#}");
+                            None
+                        }
+                        Ok(p) if p.open && !expired => None,
+                        Ok(p) if p.oid == 0 && !expired && now_ms - posted_ms < 10_000 => None,
+                        Ok(p) if !p.open && p.filled_sz >= sz - l.step(coin) * 0.5 => Some((p.filled_sz, p.avg_px, p.fee_usd, p.oid.to_string())),
+                        Ok(_) => {
+                            // Expired, cancelled by the exchange, or never seen: pull it, then count what filled.
+                            if let Err(e) = l.cancel(coin, &cloid).await {
+                                warn!("{sym}: cancel failed ({e}); retrying next tick");
+                                None
+                            } else {
+                                match l.maker_progress(&cloid, posted_ms).await {
+                                    Ok(p) if p.open => None,
+                                    Ok(p) => Some((p.filled_sz, if p.filled_sz > 0.0 { p.avg_px } else { 0.0 }, p.fee_usd, p.oid.to_string())),
+                                    Err(e) => {
+                                        warn!("{sym}: order status after cancel failed: {e:#}");
+                                        None
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            let Some((fsz, fpx, ffee, oid)) = resolved else { continue };
+            let pe = pending_entries.remove(&sym).expect("listed");
+            let mid = feats.get(&sym).map(|f| f.mid).unwrap_or(pe.px);
+            let full = fsz > 0.0 && (pe.cloid.is_none() || fsz >= pe.sz * (1.0 - 1e-9));
+            append_jsonl(
+                &files.orders,
+                &OrderRecord {
+                    ts: now,
+                    candidate_id: &pe.candidate_id,
+                    asset: &sym,
+                    side: pe.side,
+                    px: pe.px,
+                    usd: pe.usd,
+                    outcome: if full { "filled" } else if fsz > 0.0 { "partial" } else { "missed" },
+                    wait_ms: now_ms - pe.posted_ms,
+                    mid_move_bps: pe.side.sign() * (mid / pe.px - 1.0) * 1e4,
+                },
+            );
+            if fsz <= 0.0 {
+                maker_missed += 1;
+                info!("{sym} maker {} at {:.4} not filled in {}s: cancelled", pe.side.word(), pe.px, sc.maker_timeout_secs);
+                continue;
             }
-            if changed {
-                ledger.save(&files.state)?;
-            }
+            maker_filled += 1;
+            let x = maker_exec(pe.side == Side::Long, fsz, fpx, ffee, oid);
+            ledger.apply(&sym, &x);
+            let pos = new_pos(pe.side, &x, &pe.eval, now_ms, &sc, &pe.candidate_id, pe.size_mult, pe.review.clone());
+            info!("{} maker fill {} {sym} {:.6} @ {:.4} (${:.2}) after {}ms · tp {:.4} · stop {:.4}", venue.name().to_uppercase(), pe.side.word(), pos.qty, x.price, pos.qty * x.price, now_ms - pe.posted_ms, pos.tp_px, pos.sl_px);
+            ledger.positions.insert(sym.clone(), pos);
+            ledger.save(&files.state)?;
         }
 
-        // 1. Exits (trailing the stop first).
+        // 1. Exits (trailing the stop first). Once decided, an exit is retried until flat.
         let open: Vec<String> = ledger.positions.keys().cloned().collect();
         for sym in open {
             let news = ctx.get(&sym).copied().unwrap_or_default();
@@ -678,41 +861,46 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                 p.sl_px = engine::trailed_stop(p.side, p.entry_px, p.best_px, p.sl_px, p.sl_bps, p.cost_bps, &sc);
             }
             let p = ledger.positions[&sym].clone();
-            let op = OpenPos { side: p.side, tp_px: p.tp_px, sl_px: p.sl_px, deadline_ms: p.deadline_ms };
-            let Some(mut reason) = engine::evaluate_exit(&op, feats.get(&sym), &news, now_ms, &sc) else { continue };
-            if reason == "stop" && p.side.sign() * (p.sl_px - p.init_sl_px) > 0.0 {
-                reason = "trailing stop".into();
-            }
-            let res = match p.side {
-                // Sell what the long bought (never more than the ledger holds).
-                Side::Long => venue.trade(&sym, false, Amount::Base(p.qty.min(ledger.held(&sym))), feats.get(&sym), &sc, now).await,
-                // Buy back what the short sold, plus the fee Binance takes in the coin.
-                Side::Short => {
-                    let q = if matches!(venue, Venue::Paper) { p.qty } else { p.qty * (1.0 + sc.fee_bps / 1e4) };
-                    venue.trade(&sym, true, Amount::Base(q), feats.get(&sym), &sc, now).await
+            let reason = match &p.closing {
+                Some(r) => r.clone(),
+                None => {
+                    let op = OpenPos { side: p.side, tp_px: p.tp_px, sl_px: p.sl_px, deadline_ms: p.deadline_ms };
+                    let Some(mut reason) = engine::evaluate_exit(&op, feats.get(&sym), &news, now_ms, &sc) else { continue };
+                    if reason == "stop" && p.side.sign() * (p.sl_px - p.init_sl_px) > 0.0 {
+                        reason = "trailing stop".into();
+                    }
+                    reason
                 }
             };
+            // Close what the long bought / buy back what the short sold; reduce-only live.
+            let res = venue.trade(&coin_of[&sym], p.side == Side::Short, p.qty, true, feats.get(&sym), &sc).await;
             match res {
                 Ok(x) => {
                     ledger.apply(&sym, &x);
-                    let pnl = p.entry_cash + x.cash + (p.entry_base + x.base) * x.price;
-                    let notional = p.qty * p.entry_px;
+                    let step = if let Venue::Live(l) = &venue { l.step(&coin_of[&sym]) } else { 0.0 };
+                    let mut rest = p.clone();
+                    let notional = x.base.abs() * p.entry_px;
+                    let pnl = close_part(&mut rest, &x);
+                    let flat = rest.qty <= step * 0.5 + 1e-12;
                     ledger.realized += pnl;
                     ledger.day_trade_pnl += pnl;
-                    ledger.positions.remove(&sym);
-                    if pnl < 0.0 {
-                        ledger.losses += 1;
-                        ledger.cooldown_until_ms.insert(sym.clone(), now_ms + sc.cooldown_after_loss_secs * 1000);
+                    if flat {
+                        ledger.positions.remove(&sym);
+                        // Dust below one size step can't be traded; drop it from the ledger.
+                        ledger.held.insert(sym.clone(), 0.0);
+                        if pnl < 0.0 {
+                            ledger.losses += 1;
+                            ledger.cooldown_until_ms.insert(sym.clone(), now_ms + sc.cooldown_after_loss_secs * 1000);
+                        } else {
+                            ledger.wins += 1;
+                        }
                     } else {
-                        ledger.wins += 1;
+                        warn!("{sym}: exit filled {:.6} of {:.6}; closing the rest next tick", x.base.abs(), p.qty);
+                        rest.closing = Some(reason.clone());
+                        ledger.positions.insert(sym.clone(), rest);
                     }
-                    info!(
-                        "{} close {} {sym} @ {:.2} — {reason} · pnl {pnl:+.2} ({:+.1} bps)",
-                        venue.name().to_uppercase(),
-                        p.side.word(),
-                        x.price,
-                        pnl / notional * 1e4
-                    );
+                    let shown = if flat { reason.clone() } else { format!("{reason} (partial)") };
+                    info!("{} close {} {sym} @ {:.4} — {shown} · pnl {pnl:+.2} ({:+.1} bps)", venue.name().to_uppercase(), p.side.word(), x.price, pnl / notional * 1e4);
                     append_jsonl(
                         &files.trades,
                         &TradeRecord {
@@ -722,14 +910,14 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                             opened: DateTime::from_timestamp_millis(p.opened_ms).unwrap_or(now),
                             closed: now,
                             hold_secs: (now_ms - p.opened_ms) / 1000,
-                            qty: p.qty,
+                            qty: x.base.abs(),
                             entry_px: p.entry_px,
                             exit_px: x.price,
                             notional,
-                            fees_usd: p.entry_fee + x.fee_usd,
+                            fees_usd: p.entry_fee * (x.base.abs() / p.qty) + x.fee_usd,
                             pnl_usd: pnl,
                             pnl_bps: pnl / notional * 1e4,
-                            reason: &reason,
+                            reason: &shown,
                             tp_px: p.tp_px,
                             sl_px: p.sl_px,
                             init_sl_px: p.init_sl_px,
@@ -744,10 +932,13 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                 }
                 Err(m) => {
                     error!("{sym} exit ({reason}) failed: {m}");
-                    if m.starts_with("UNCONFIRMED") {
-                        ledger.live_hold = Some(m);
-                        ledger.save(&files.state)?;
+                    if let Some(pp) = ledger.positions.get_mut(&sym) {
+                        pp.closing = Some(reason.clone());
                     }
+                    if m.starts_with("UNCONFIRMED") {
+                        ledger.live_hold = Some(format!("{m} · check Hyperliquid, then `jev-trader hl clear-hold`"));
+                    }
+                    ledger.save(&files.state)?;
                 }
             }
         }
@@ -779,36 +970,29 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
             n.candidates += 1;
             let side = ev.side;
 
-            let capital = ledger.capital();
-            let free_quote = match (&venue, &balances) {
-                (Venue::Binance(l), Some(b)) => b.get(&l.quote).copied().unwrap_or(0.0),
-                (Venue::Binance(_), None) => 0.0,
-                (Venue::Paper, _) => f64::INFINITY,
-            };
-            // Longs spend cash; shorts sell from the inventory (never below zero).
-            let room_usd = match side {
-                Side::Long => ledger.cash.min(free_quote / (1.0 + sc.fee_bps / 1e4)),
-                Side::Short => ledger.held(sym) * f.bid,
-            };
-            let base_usd = (capital * sc.position_pct).min(room_usd);
-            let min_usd = sc.min_trade_usd.max(venue.min_notional(sym));
+            // 1× notional: free collateral = equity − open notional − resting orders.
+            let reserved: f64 = pending_entries.values().map(|p| p.usd).sum();
+            let mut free = (ledger.equity(&marks) - ledger.open_notional(&marks) - reserved).max(0.0);
+            if is_live {
+                free = free.min(withdrawable.unwrap_or(0.0));
+            }
+            let base_usd = (ledger.capital() * sc.position_pct).min(free);
+            let min_usd = sc.min_trade_usd.max(venue.min_notional());
             let mut risk = Vec::new();
             let mut rg = |name: &str, pass: bool, detail: String| {
                 risk.push(GateResult::new(name, pass, detail));
                 pass
             };
             let mut ok = ev.ok;
-            ok &= rg("flat", !ledger.positions.contains_key(sym), String::new());
-            ok &= rg("max positions", ledger.positions.len() < sc.max_positions, format!("{}/{}", ledger.positions.len(), sc.max_positions));
+            ok &= rg("flat", !ledger.positions.contains_key(sym) && !pending_entries.contains_key(sym), if pending_entries.contains_key(sym) { "maker order resting".into() } else { String::new() });
+            let busy = ledger.positions.len() + pending_entries.len();
+            ok &= rg("max positions", busy < sc.max_positions, format!("{busy}/{}", sc.max_positions));
             ok &= rg("cooldown", ledger.cooldown_until_ms.get(sym).is_none_or(|t| now_ms >= *t), String::new());
             ok &= rg("trades/hour", ledger.entries_ms.len() < sc.max_trades_per_hour, format!("{}/{}", ledger.entries_ms.len(), sc.max_trades_per_hour));
             ok &= rg("daily limit", ledger.halted_day != Some(ledger.day), String::new());
-            ok &= rg("exchange", ledger.live_hold.is_none() && !exch_review.contains_key(sym), ledger.live_hold.clone().or_else(|| exch_review.get(sym).cloned()).unwrap_or_default());
-            ok &= rg(
-                if side == Side::Long { "cash" } else { "inventory" },
-                base_usd >= min_usd,
-                format!("{base_usd:.2} (≥ {min_usd:.2})"),
-            );
+            let exch_block = ledger.live_hold.clone().or_else(|| exch_review.get(sym).cloned()).or_else(|| (is_live && withdrawable.is_none()).then(|| "account check pending or failing".to_string()));
+            ok &= rg("exchange", exch_block.is_none(), exch_block.unwrap_or_default());
+            ok &= rg("cash", base_usd >= min_usd, format!("{base_usd:.2} free collateral (≥ {min_usd:.2})"));
 
             // Jev reviews only trades that would otherwise happen.
             let (mut review, mut review_err, mut size_mult) = (None, None::<String>, 1.0);
@@ -874,41 +1058,44 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
 
             let id = format!("{sym}-{}-{now_ms}", side.word());
             let usd = base_usd * size_mult;
-            let blocked_by = ev.first_block().map(str::to_string).or_else(|| risk.iter().find(|g| !g.passed).map(|g| g.gate.clone()));
+            let mut blocked_by = ev.first_block().map(str::to_string).or_else(|| risk.iter().find(|g| !g.passed).map(|g| g.gate.clone()));
             let mut taken = false;
-            if ok && usd >= min_usd {
-                let res = match side {
-                    Side::Long => venue.trade(sym, true, Amount::Quote(usd), Some(f), &sc, now).await,
-                    Side::Short => venue.trade(sym, false, Amount::Base(usd / f.bid), Some(f), &sc, now).await,
+            if ok && usd >= min_usd && sc.entry == EntryMode::Maker {
+                // Post at our side of the book; resolved in step 0 of a later tick.
+                let px = if side == Side::Long { f.bid } else { f.ask };
+                let posted = match &venue {
+                    Venue::Paper => Ok((None, px, usd / px)),
+                    Venue::Live(l) => l.post_maker(&a.coin, side == Side::Long, px, usd).await.map(|(c, p, sz)| (Some(c), p, sz)),
                 };
-                match res {
+                match posted {
+                    Ok((cloid, px, sz)) => {
+                        info!("{} post {} {sym} ${:.2} @ {px:.4} (maker, {}s timeout) · flow {:+.2} book {:+.2} activity {:.1}×", venue.name().to_uppercase(), side.word(), sz * px, sc.maker_timeout_secs, f.flow, f.obi, f.activity);
+                        pending_entries.insert(
+                            sym.clone(),
+                            PendingEntry { side, px, usd: sz * px, posted_ms: now_ms, cloid, sz, last_poll_ms: now_ms, eval: ev.clone(), candidate_id: id.clone(), size_mult, review: review.clone() },
+                        );
+                        ledger.entries_ms.push_back(now_ms);
+                        taken = true;
+                    }
+                    Err(m) => {
+                        warn!("{sym} {} maker post failed: {m}", side.word());
+                        if m.starts_with("UNCONFIRMED") {
+                            ledger.live_hold = Some(format!("{m} · check Hyperliquid, then `jev-trader hl clear-hold`"));
+                            ledger.save(&files.state)?;
+                        }
+                        blocked_by = Some("exchange".into());
+                    }
+                }
+            } else if ok && usd >= min_usd {
+                let qty = usd / if side == Side::Long { f.ask } else { f.bid };
+                match venue.trade(&a.coin, side == Side::Long, qty, false, Some(f), &sc).await {
                     Ok(x) => {
                         taken = true;
                         ledger.apply(sym, &x);
                         ledger.entries_ms.push_back(now_ms);
-                        let s = side.sign();
-                        let pos = ScalpPos {
-                            side,
-                            qty: x.base.abs(),
-                            entry_px: x.price,
-                            entry_cash: x.cash,
-                            entry_base: x.base,
-                            entry_fee: x.fee_usd,
-                            opened_ms: now_ms,
-                            tp_px: x.price * (1.0 + s * ev.tp_bps / 1e4),
-                            sl_px: x.price * (1.0 - s * ev.sl_bps / 1e4),
-                            init_sl_px: x.price * (1.0 - s * ev.sl_bps / 1e4),
-                            best_px: x.price,
-                            sl_bps: ev.sl_bps,
-                            cost_bps: ev.cost_bps,
-                            deadline_ms: now_ms + sc.hold_secs * 1000,
-                            candidate_id: id.clone(),
-                            size_mult,
-                            review: review.clone(),
-                            order_id: x.order_id.clone(),
-                        };
+                        let pos = new_pos(side, &x, &ev, now_ms, &sc, &id, size_mult, review.clone());
                         info!(
-                            "{} open {} {sym} {:.6} @ {:.2} (${:.2}) · tp {:.2} · stop {:.2} · flow {:+.2} book {:+.2} activity {:.1}×",
+                            "{} open {} {sym} {:.6} @ {:.4} (${:.2}) · tp {:.4} · stop {:.4} · flow {:+.2} book {:+.2} activity {:.1}×",
                             venue.name().to_uppercase(),
                             side.word(),
                             pos.qty,
@@ -926,9 +1113,10 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                     Err(m) => {
                         error!("{sym} {} entry failed: {m}", side.word());
                         if m.starts_with("UNCONFIRMED") {
-                            ledger.live_hold = Some(m);
+                            ledger.live_hold = Some(format!("{m} · check Hyperliquid, then `jev-trader hl clear-hold`"));
                             ledger.save(&files.state)?;
                         }
+                        blocked_by = Some("exchange".into());
                     }
                 }
             }
@@ -993,7 +1181,7 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                 let s = store.lock().unwrap();
                 (s.ok, s.failed, s.last_run, s.events.len())
             };
-            let equity = ledger.equity(&bids);
+            let equity = ledger.equity(&marks);
             let assets: Vec<Value> = cfg
                 .assets
                 .iter()
@@ -1006,6 +1194,7 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                     let block = if leaning == Side::Short { sb.clone().unwrap_or_default() } else { lb.clone() };
                     serde_json::json!({
                         "symbol": a.symbol,
+                        "coin": a.coin,
                         "features": f,
                         "news": ctx.get(&a.symbol),
                         "position": ledger.positions.get(&a.symbol),
@@ -1013,9 +1202,9 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                         "blocked_by": if block.is_empty() { None } else { Some(block) },
                         "long_block": lb,
                         "short_block": sb,
-                        "inventory": ledger.inventory.get(&a.symbol),
                         "held": ledger.held(&a.symbol),
-                        "inventory_note": inventory_note.get(&a.symbol),
+                        "exchange_review": exch_review.get(&a.symbol),
+                        "resting": pending_entries.get(&a.symbol).map(|p| serde_json::json!({"side": p.side, "px": p.px, "usd": p.usd, "age_ms": now_ms - p.posted_ms})),
                     })
                 })
                 .collect();
@@ -1023,12 +1212,15 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                 "ts": now,
                 "pid": std::process::id(),
                 "venue": venue.name(),
+                "live": is_live,
+                "network": cfg.exchange.network.name(),
                 "feed": { "connected": h.connected, "last_msg_ms_ago": now_ms - h.last_msg_ms, "reconnects": h.reconnects, "last_error": h.last_error },
                 "equity": equity,
                 "cash": ledger.cash,
                 "starting_cash": ledger.starting_cash,
                 "capital": ledger.capital(),
-                "inventory_drift": ledger.inventory_drift(&bids),
+                "open_notional": ledger.open_notional(&marks),
+                "withdrawable": withdrawable,
                 "day_trade_pnl": ledger.day_trade_pnl,
                 "day_pnl_pct": ledger.day_trade_pnl / ledger.capital() * 100.0,
                 "realized": ledger.realized,
@@ -1037,6 +1229,10 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                 "halted_today": ledger.halted_day == Some(ledger.day),
                 "live_hold": ledger.live_hold,
                 "candidates_session": n.candidates,
+                "feed_source": "hyperliquid",
+                "perps": true,
+                "entry_mode": sc.entry,
+                "maker": { "filled": maker_filled, "missed": maker_missed, "resting": pending_entries.len() },
                 "jev": { "reviews": n.reviews, "vetoes": n.vetoes, "failures": n.review_fail, "news_ok": news_ok, "news_failed": news_failed, "news_last_run": news_last, "events": n_events },
                 "assets": assets,
                 "settings": &sc,
@@ -1047,31 +1243,58 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
 }
 
 async fn open_ledger(venue: &Venue, cfg: &Config, path: &Path) -> Result<Ledger> {
-    let live = matches!(venue, Venue::Binance(_));
+    let live = matches!(venue, Venue::Live(_));
     if path.exists() {
         let l: Ledger = serde_json::from_slice(&std::fs::read(path)?).with_context(|| format!("parsing {}", path.display()))?;
         if (l.mode.as_deref() == Some(LIVE_MODE)) != live {
             bail!("{} was created in {} mode; use a separate data_dir", path.display(), if live { "paper" } else { "live" });
         }
+        let made_for = l.venue.as_deref().unwrap_or(if live { "binance" } else { "hyperliquid-paper" });
+        if made_for != venue.name() {
+            bail!("{} was created for {made_for}, not {}; use a separate data_dir", path.display(), venue.name());
+        }
         return Ok(l);
     }
     let cash = match venue {
         Venue::Paper => cfg.scalp.starting_cash,
-        Venue::Binance(l) => {
+        Venue::Live(l) => {
             let cap = cfg.exchange.max_capital_usd;
             if !(cap.is_finite() && cap > 0.0) {
                 bail!("set [exchange] max_capital_usd");
             }
-            let free = l.client.balances().await?.get(&l.quote).copied().unwrap_or(0.0);
-            cap.min(free)
+            let acct = l.ex.account().await?;
+            for a in &cfg.assets {
+                let szi = acct.positions.get(&a.coin).copied().unwrap_or(0.0);
+                if szi != 0.0 {
+                    bail!("the account already holds {szi} {} on Hyperliquid; close it or drop {} from the config, so the ledger starts in sync", a.coin, a.symbol);
+                }
+            }
+            cap.min(acct.withdrawable)
         }
     };
-    if cash < cfg.scalp.min_trade_usd {
+    if cash < cfg.scalp.min_trade_usd.max(venue.min_notional()) {
         bail!("only {cash:.2} available to the scalper");
     }
-    let l = Ledger::new(cash, live);
+    let l = Ledger::new(cash, live, venue.name());
     l.save(path)?;
     Ok(l)
+}
+
+/// Clears the scalper's hold (after an unconfirmed order). Returns whether one was set.
+pub fn clear_hold(data_dir: &Path) -> Result<bool> {
+    let path = Files::new(data_dir).state;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut l: Ledger = serde_json::from_slice(&std::fs::read(&path)?).with_context(|| format!("parsing {}", path.display()))?;
+    match l.live_hold.take() {
+        Some(h) => {
+            l.save(&path)?;
+            println!("scalper ledger: cleared {h}");
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 #[cfg(test)]
@@ -1083,35 +1306,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paper_round_trips_book_trade_pnl_apart_from_inventory() {
+    async fn paper_perp_round_trips() {
         let cfg = ScalpConfig { fee_bps: 10.0, slippage_bps: 0.0, ..Default::default() };
-        let now = Utc::now();
-        let mut l = Ledger::new(1000.0, false);
-        l.inventory.insert("BTC".into(), Inventory { qty: 1.0, px: 100.0 });
-        l.held.insert("BTC".into(), 1.0);
+        let mut l = Ledger::new(1000.0, false, "hyperliquid-paper");
+        let v = Venue::Paper;
 
         // Short 0.5 at 100, buy back at 98: gross +1.00, fees 0.05 + 0.049.
-        let v = Venue::Paper;
-        let e = v.trade("BTC", false, Amount::Base(0.5), Some(&at(100.0, 100.0)), &cfg, now).await.unwrap();
+        let e = v.trade("BTC", false, 0.5, false, Some(&at(100.0, 100.0)), &cfg).await.unwrap();
         l.apply("BTC", &e);
-        assert!((l.held("BTC") - 0.5).abs() < 1e-12, "sold half the inventory");
-        let x = v.trade("BTC", true, Amount::Base(0.5), Some(&at(98.0, 98.0)), &cfg, now).await.unwrap();
+        assert!((l.held("BTC") + 0.5).abs() < 1e-12, "a short is a negative position");
+        let marks: HashMap<String, f64> = [("BTC".to_string(), 100.0)].into();
+        assert!((l.equity(&marks) - (1000.0 - 0.05)).abs() < 1e-9, "only the fee is lost at entry");
+        let x = v.trade("BTC", true, 0.5, true, Some(&at(98.0, 98.0)), &cfg).await.unwrap();
         l.apply("BTC", &x);
         let pnl = e.cash + x.cash + (e.base + x.base) * x.price;
         assert!((pnl - (1.0 - 0.05 - 0.049)).abs() < 1e-9, "pnl {pnl}");
-        assert!((l.held("BTC") - 1.0).abs() < 1e-12, "inventory restored");
+        assert!(l.held("BTC").abs() < 1e-12, "flat again");
 
-        // Long $100 at 100, sell at 101: gross +1.00, fees 0.10 + 0.101.
-        let e = v.trade("BTC", true, Amount::Quote(100.0), Some(&at(100.0, 100.0)), &cfg, now).await.unwrap();
+        // Long 1 at 100, sell at 101: gross +1.00, fees 0.10 + 0.101.
+        let e = v.trade("BTC", true, 1.0, false, Some(&at(100.0, 100.0)), &cfg).await.unwrap();
         l.apply("BTC", &e);
-        let x = v.trade("BTC", false, Amount::Base(e.base), Some(&at(101.0, 101.0)), &cfg, now).await.unwrap();
+        let x = v.trade("BTC", false, 1.0, true, Some(&at(101.0, 101.0)), &cfg).await.unwrap();
         l.apply("BTC", &x);
         let pnl2 = e.cash + x.cash + (e.base + x.base) * x.price;
         assert!((pnl2 - (1.0 - 0.1 - 0.101)).abs() < 1e-9, "pnl {pnl2}");
+        assert!((l.equity(&marks) - (1000.0 + pnl + pnl2)).abs() < 1e-9);
+    }
 
-        // Equity = capital + trade P&L + inventory drift (price now 101 vs 100 at allotment).
-        let bids: HashMap<String, f64> = [("BTC".to_string(), 101.0)].into();
-        assert!((l.inventory_drift(&bids) - 1.0).abs() < 1e-9);
-        assert!((l.equity(&bids) - (l.capital() + pnl + pnl2 + 1.0)).abs() < 1e-9);
+    #[test]
+    fn partial_exit_keeps_the_rest_open() {
+        let ev = EntryEval { side: Side::Long, tp_bps: 20.0, sl_bps: 10.0, cost_bps: 7.5, ..Default::default() };
+        let entry = maker_exec(true, 2.0, 100.0, 0.03, "e".into());
+        let mut p = new_pos(Side::Long, &entry, &ev, 0, &ScalpConfig::default(), "c", 1.0, None);
+        // Sell 1 of 2 at 101 with a 0.05 fee: half the entry cost (100.015) against 100.95.
+        let x = Exec { cash: 101.0 - 0.05, base: -1.0, price: 101.0, fee_usd: 0.05, order_id: "x".into() };
+        let pnl = close_part(&mut p, &x);
+        assert!((pnl - (100.95 - 100.015)).abs() < 1e-9, "pnl {pnl}");
+        assert!((p.qty - 1.0).abs() < 1e-12);
+        assert!((p.entry_cash + 100.015).abs() < 1e-9, "the open half keeps half the entry cost");
     }
 }

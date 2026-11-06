@@ -3,26 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Jev Trader</title>
-<link rel="preload" href="/fonts/archivo-narrow-var.woff2" as="font" type="font/woff2" crossorigin>
+<title>Departures · Jev trader</title>
+<link rel="preload" href="/fonts/barlow-condensed-600.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/barlow-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <div class="shell">
   <nav class="rail" aria-label="Primary">
-    <a class="brand" href="#today">Jev<span>trader</span></a>
+    <a class="brand" href="#board"><span>Jev</span> trader</a>
     <ul class="nav">
-      <li><a href="#today" data-view="today">Today</a></li>
-      <li><a href="#trades" data-view="trades">Trades</a></li>
-      <li><a href="#decisions" data-view="decisions">Decisions</a></li>
+      <li><a href="#board" data-view="board">Departures</a></li>
+      <li><a href="#scalper" data-view="scalper">Scalper</a></li>
       <li><a href="#news" data-view="news">News bot</a></li>
-      <li><a href="#score" data-view="score">Scorecard</a></li>
+      <li><a href="#evidence" data-view="evidence">Is it working?</a></li>
     </ul>
-    <div class="pulse" role="status" aria-live="polite">
-      <p class="pulserow" id="pulse-scalp"><i></i><b>Scalp bot</b><span>Connecting…</span></p>
-      <p class="pulserow" id="pulse-news"><i></i><b>News bot</b><span>Connecting…</span></p>
-      <p class="money" id="money-note"></p>
-      <a class="classic" href="/classic">Open the old dashboard</a>
+    <section class="whose" id="whose" aria-label="Whose money"></section>
+    <div class="beats" role="status" aria-live="polite">
+      <p class="beat" id="beat-scalp"><i></i><span><b>Scalper</b><small>Connecting…</small></span></p>
+      <p class="beat" id="beat-news"><i></i><span><b>News bot</b><small>Connecting…</small></span></p>
     </div>
   </nav>
   <main class="page" id="page">

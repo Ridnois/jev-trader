@@ -118,18 +118,18 @@ pub async fn load_market(
     let end = to.timestamp_millis();
     let mut candles = BTreeMap::new();
     for a in &cfg.assets {
-        let cache = dir.join(format!("klines_{}_{}_{}.json", a.pair, start, end));
+        let cache = dir.join(format!("hl_klines_{}_{}_{}.json", a.coin, start, end));
         let c: Vec<Candle> = match std::fs::read(&cache).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
             Some(c) => c,
             None => {
-                let c = market::klines_range(http, &cfg.market.base_url, &a.pair, "1h", start, end).await?;
+                let c = market::klines_range(http, cfg.api(), &a.coin, "1h", start, end).await?;
                 write_atomic(&cache, &serde_json::to_vec(&c)?)?;
                 c
             }
         };
         let now_ms = Utc::now().timestamp_millis();
         let c: Vec<Candle> = c.into_iter().filter(|k| k.is_closed(now_ms)).collect();
-        crate::validate::candles(&c).with_context(|| format!("{} candles", a.pair))?;
+        crate::validate::candles(&c).with_context(|| format!("{} candles", a.coin))?;
         candles.insert(a.symbol.clone(), c);
     }
     let first = candles.values().next().context("no assets")?;
@@ -443,7 +443,7 @@ pub fn config_hash(path: &Path) -> Result<String> {
     Ok(format!("{h:016x}"))
 }
 
-const IGNORED: &[&str] = &["data_dir", "loop_interval_secs", "jev.", "news.feeds", "market.base_url", "market.futures_url", "regime.coingecko_url", "regime.refresh_minutes"];
+const IGNORED: &[&str] = &["data_dir", "loop_interval_secs", "jev.", "news.feeds", "exchange.", "regime.coingecko_url", "regime.refresh_minutes"];
 
 /// Leaf key → value string, sorted, without ignored keys.
 pub fn flatten(v: &toml::Value) -> BTreeMap<String, String> {

@@ -4,6 +4,29 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+pub use crate::hyperliquid::Network;
+
+/// A config that still points at Binance must not load: its `[exchange]` keys
+/// would otherwise be silently ignored and fall back to Hyperliquid defaults.
+fn reject_binance(text: &str) -> Result<()> {
+    let v: toml::Value = toml::from_str(text)?;
+    let get = |t: &str, k: &str| v.get(t).and_then(|x| x.get(k));
+    let text_of = |t: &str, k: &str| get(t, k).and_then(|x| x.as_str()).unwrap_or_default().to_lowercase();
+    // Keys that only ever existed for Binance.
+    for (t, k) in [("exchange", "base_url"), ("exchange", "quote"), ("market", "futures_url"), ("scalp", "stream_url"), ("scalp", "inventory_usd")] {
+        if get(t, k).is_some() {
+            anyhow::bail!("[{t}] {k} is a Binance setting");
+        }
+    }
+    if text_of("market", "base_url").contains("binance") || text_of("scalp", "feed") == "binance" {
+        anyhow::bail!("market data points at Binance");
+    }
+    if get("scalp", "perps").and_then(|x| x.as_bool()) == Some(false) {
+        anyhow::bail!("[scalp] perps = false (spot)");
+    }
+    Ok(())
+}
+
 /// Every knob added by the optimization plan has a default that reproduces the
 /// original strategy, so an old `config.toml` behaves exactly as before.
 #[derive(Debug, Clone, Deserialize)]
@@ -29,13 +52,12 @@ pub struct Config {
     pub assets: Vec<Asset>,
 }
 
-/// The order-flow scalper (`jev-trader scalp`). Market microstructure decides; Jev
-/// reviews entries against the news; the news context only tilts and vetoes.
+/// The order-flow scalper (`jev-trader scalp`) on Hyperliquid perps. Market
+/// microstructure decides; Jev reviews entries against the news; the news context
+/// only tilts and vetoes. Shorts are plain perp sells, 1× notional, funding accrued.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ScalpConfig {
-    /// Market-data websocket (signals). Orders go to `[exchange]`.
-    pub stream_url: String,
     /// How often the engine evaluates, in milliseconds.
     pub eval_ms: u64,
     /// Window for trade-flow imbalance and activity, seconds.
@@ -59,8 +81,8 @@ pub struct ScalpConfig {
     pub max_spread_bps: f64,
     /// Holding period limit (time stop), seconds.
     pub hold_secs: i64,
-    /// Cost model, per side: exchange fee and slippage, bps. Real Binance fees,
-    /// also on testnet, so results are not flattered.
+    /// Cost model, per side: taker fee and slippage, bps. Paper fills are charged
+    /// these, so results are not flattered.
     pub fee_bps: f64,
     pub slippage_bps: f64,
     /// Expected move over the hold (σ₁ₛ·√hold) must be ≥ this × round-trip cost.
@@ -94,20 +116,31 @@ pub struct ScalpConfig {
     pub jev_headline_minutes: i64,
     /// Markout horizons for every candidate, seconds.
     pub markouts: Vec<i64>,
-    /// Trade shorts by selling from a neutral coin inventory (spot: no borrowing).
+    /// Also open shorts (perp sells), judged by the same mirrored gates.
     pub shorts: bool,
-    /// Neutral coin inventory per asset, in dollars at allocation. Shorts sell from
-    /// it and buy it back; it is never sold below zero.
-    pub inventory_usd: f64,
     /// Once a trade is this many round-trip costs in profit, the stop moves to
     /// break-even after fees and trails the best price. 0 = off.
     pub trail_after_cost_mult: f64,
+    /// Fee for a resting (post-only) order, bps. `fee_bps` is the taker fee.
+    pub maker_fee_bps: f64,
+    /// "taker": cross the spread at once. "maker": post at the best bid (long) or
+    /// ask (short) and wait up to `maker_timeout_secs` for the market to trade
+    /// through it; unfilled orders are cancelled and logged as misses.
+    pub entry: EntryMode,
+    pub maker_timeout_secs: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryMode {
+    Taker,
+    #[default]
+    Maker,
 }
 
 impl Default for ScalpConfig {
     fn default() -> Self {
         Self {
-            stream_url: "wss://data-stream.binance.vision".into(),
             eval_ms: 500,
             flow_window_secs: 30,
             vol_window_secs: 300,
@@ -120,7 +153,7 @@ impl Default for ScalpConfig {
             max_chase_bps: 60.0,
             max_spread_bps: 5.0,
             hold_secs: 600,
-            fee_bps: 10.0,
+            fee_bps: 4.5,
             slippage_bps: 1.0,
             cost_mult: 2.0,
             tp_vol_mult: 1.5,
@@ -142,8 +175,10 @@ impl Default for ScalpConfig {
             jev_headline_minutes: 180,
             markouts: vec![60, 300, 600],
             shorts: true,
-            inventory_usd: 1000.0,
             trail_after_cost_mult: 1.5,
+            maker_fee_bps: 1.5,
+            entry: EntryMode::Maker,
+            maker_timeout_secs: 20,
         }
     }
 }
@@ -151,47 +186,53 @@ impl Default for ScalpConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecMode {
-    /// Simulated fills (the default).
+    /// Simulated fills on real Hyperliquid prices (the default).
     #[default]
     Paper,
-    /// Real market orders on Binance spot. Also needs `run --live`.
+    /// Real Hyperliquid orders, signed by an API agent wallet. Also needs `--live`.
     Live,
 }
 
-/// Where fills happen. Paper unless explicitly set to live.
+/// Where fills happen and which Hyperliquid chain supplies prices. Paper unless
+/// explicitly set to live.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct ExchangeConfig {
-    #[serde(default)]
     pub mode: ExecMode,
-    /// Binance spot REST host (signed trading endpoints).
-    #[serde(default = "d_binance_url")]
-    pub base_url: String,
-    /// Quote currency every pair is traded against.
-    #[serde(default = "d_quote")]
-    pub quote: String,
-    /// Live: the most quote currency the bot may manage. The ledger starts with
-    /// min(this, free balance) and never knows about the rest. 0 = refuse to start.
-    #[serde(default)]
+    /// "mainnet" or "testnet". Market data, the scalper's feed and orders all use it.
+    pub network: Network,
+    /// Environment variable holding the main account address (public).
+    pub account_env: String,
+    /// Environment variable holding the API agent wallet's private key. Approve the
+    /// agent at app.hyperliquid.xyz/API: it can trade but cannot withdraw.
+    pub agent_key_env: String,
+    /// Live: the most USDC the bot may manage. The ledger starts with
+    /// min(this, account value) and never knows about the rest. 0 = refuse to start.
     pub max_capital_usd: f64,
-    #[serde(default = "d_recv_window")]
-    pub recv_window_ms: u64,
-    /// Environment variables holding the key pair (lets testnet and mainnet keys coexist).
-    #[serde(default = "d_key_env")]
-    pub api_key_env: String,
-    #[serde(default = "d_secret_env")]
-    pub secret_env: String,
+    /// Marketable orders are IOC limits at most this far through the reference price.
+    pub max_slippage_bps: f64,
+    /// Cross leverage set on every configured coin at start (0 = leave it alone).
+    /// The ledgers size at 1× notional; 1 also makes the exchange enforce that.
+    pub leverage: u32,
 }
 
 impl ExchangeConfig {
-    /// Binance's spot testnet: fake balances, real order flow.
     pub fn is_testnet(&self) -> bool {
-        self.base_url.contains("testnet")
+        self.network == Network::Testnet
     }
 }
 
 impl Default for ExchangeConfig {
     fn default() -> Self {
-        Self { mode: ExecMode::Paper, base_url: d_binance_url(), quote: d_quote(), max_capital_usd: 0.0, recv_window_ms: d_recv_window(), api_key_env: d_key_env(), secret_env: d_secret_env() }
+        Self {
+            mode: ExecMode::Paper,
+            network: Network::Mainnet,
+            account_env: "HL_ACCOUNT_ADDRESS".into(),
+            agent_key_env: "HL_AGENT_PRIVATE_KEY".into(),
+            max_capital_usd: 0.0,
+            max_slippage_bps: 30.0,
+            leverage: 1,
+        }
     }
 }
 
@@ -214,14 +255,11 @@ pub struct JevConfig {
     pub breaker_min_calls: u32,
 }
 
+/// Candles for the news bot (from Hyperliquid on `[exchange] network`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketConfig {
-    pub base_url: String,
     pub interval: String,
     pub momentum_window: usize,
-    /// Binance USDⓈ-M futures public API, for funding / open interest (regime + Phase 7).
-    #[serde(default = "d_futures_url")]
-    pub futures_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -405,7 +443,9 @@ impl Default for SettleConfig {
 pub struct Asset {
     pub symbol: String,
     pub name: String,
-    pub pair: String,
+    /// Hyperliquid perp name, e.g. "BTC" or "kPEPE".
+    #[serde(alias = "pair")]
+    pub coin: String,
 }
 
 fn d_true() -> bool { true }
@@ -414,7 +454,6 @@ fn d_max_attempts() -> u32 { 5 }
 fn d_breaker_ticks() -> usize { 10 }
 fn d_breaker_fail_ratio() -> f64 { 0.5 }
 fn d_breaker_min_calls() -> u32 { 4 }
-fn d_futures_url() -> String { "https://fapi.binance.com".into() }
 fn d_coingecko() -> String { "https://api.coingecko.com".into() }
 fn d_reaction_min() -> usize { 3 }
 fn d_reaction_z() -> f64 { -1.5 }
@@ -425,17 +464,24 @@ fn d_regime_minutes() -> u64 { 60 }
 fn d_challenge_threshold() -> f64 { 0.7 }
 fn d_horizons() -> Vec<u32> { vec![1, 4, 24] }
 fn d_benchmark() -> String { "BTC".into() }
-fn d_binance_url() -> String { "https://api.binance.com".into() }
-fn d_quote() -> String { "USDT".into() }
-fn d_recv_window() -> u64 { 5000 }
-fn d_key_env() -> String { "BINANCE_API_KEY".into() }
-fn d_secret_env() -> String { "BINANCE_SECRET_KEY".into() }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        reject_binance(&text).with_context(|| format!("{} was written for Binance; this build trades only on Hyperliquid (see README)", path.display()))?;
+        let cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        for a in &cfg.assets {
+            if a.coin.ends_with("USDT") || a.coin.ends_with("USDC") {
+                anyhow::bail!("asset {}: coin \"{}\" looks like a Binance pair; use the Hyperliquid perp name (e.g. \"BTC\")", a.symbol, a.coin);
+            }
+        }
+        Ok(cfg)
+    }
+
+    /// Hyperliquid API base for market data and orders.
+    pub fn api(&self) -> &'static str {
+        self.exchange.network.api_url()
     }
 
     pub fn interval_ms(&self) -> i64 {

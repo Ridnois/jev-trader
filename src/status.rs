@@ -104,10 +104,10 @@ pub struct Status {
     /// 6.4: token use today.
     #[serde(default)]
     pub tokens_today: (u64, u64, u64),
-    /// Orders go to Binance (real money).
+    /// Orders go to Hyperliquid.
     #[serde(default)]
     pub live: bool,
-    /// ... on Binance's spot testnet (fake money).
+    /// ... on Hyperliquid's testnet (fake money).
     #[serde(default)]
     pub testnet: bool,
 }

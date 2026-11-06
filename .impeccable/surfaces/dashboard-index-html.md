@@ -7,18 +7,20 @@ related_targets: []
 
 # Dashboard surface brief
 
-Scope: `jev-trader dashboard`, the local monitoring page served by the bot binary. Mode: Operate. Desktop tab left open all day; glanced at, examined on events. Controls limited to Pause trading and Flatten all.
+Scope: `jev-trader dashboard`, the local monitoring page served by the bot binary for both bots (news bot `run`, order-flow scalper `scalp`) on Hyperliquid perps. Mode: Operate. Desktop tab or second monitor left open all day; glanced at, examined on events. Replaces both earlier dashboards (plain-language `/` and Wire Desk `/classic`). Controls limited to Pause and Flatten.
+
+User answers (2026-11-06): both bots get equal weight; what must become clear is whose money / what's at risk, why each trade was taken or skipped, and whether it is working (evidence net of fees, hypotheses).
 
 ## Direction contract
 
-THESIS: The dashboard is a wire desk. Every headline comes in as copy, Jev stamps it, and the slot editor (the bot) either runs it into a trade or spikes it. It refuses the category default: a charcoal KPI-tile dashboard with green/red numbers and a log tail.
+THESIS: The dashboard is a departure board. Every coin each bot watches is a row; its status flips WATCHING → CLEARED → IN TRADE, or HELD at the named check that stopped it, so "why not" is read straight off the board. It refuses the KPI-tile trading terminal and the P&L-first equity chart.
 
-OWN-WORLD: Desk-green rail (#2F4A3F) on a cool newsprint ground (#ECEDE6) with white sheets. Canary teleprinter paper (#F2E46B, slip fill #FBF3B9) marks copy the operator hasn't read yet; whether copy ran is told by its stamp (RUN · BUY/SELL, ALERT, FILED, SPIKED). Carbon ink (#1C1E22). Correction pink (#C23B57 text, #E8607A fill) for exits, alerts and stamps. Courier Prime for slugs and wire headlines, Archivo Narrow for UI and tabular figures. Verdicts are rubber stamps: 2px ink box, caps, slight rotation.
+OWN-WORLD: Brushed-steel ground (#C9CDD2), graphite rail (#2A2D31), white working sheets, and one matte flap-black board (#141414) with flap-white caps (#F2F2F0) split by a hairline. Amber (#E3A21A) means waiting or review, cancelled red (#B4372F) means stopped or loss, green (#4FB37A on flaps, darker on white) means cleared or profit. Barlow Condensed caps on flaps and labels, Barlow for sentences.
 
-STORY: The operator sees at once whether the bot is alive, what ran since they last looked, why each position exists (traced back to its slips), and the health of every pipeline stage. They can pause or flatten in one deliberate action.
+STORY: The operator knows at a glance whose money each bot is using and what is at risk, sees every coin's status and the check that holds it, and can open any row or trade to read its full reasoning in plain sentences. The evidence page says honestly whether either bot beats its fees yet.
 
-FIRST VIEWPORT: 190px green rail (wordmark, Wire / Run list / Pipeline / Trades, heartbeat footer). Centre: "The wire" heading with today's counts, filters, and Pause/Flatten at the right; slips newest first, each with a slug (ASSET-EVENT · SOURCE · time), the wire headline, Jev's reading, and a stamp on the right. Right 400px column: paper equity with its intraday history, the run list, the pipeline health grid.
+FIRST VIEWPORT: 220px graphite rail (wordmark, Board / Scalper / News bot / Evidence nav, money note, two heartbeats). Main: "Departures" title with posture and Pause/Flatten at right; a row of three white sheets (Scalper money + result, News bot money + result, Is it working?); then the flap board, one row per coin for both bots, columns Coin · Bot · Side · Status · Stopped at · Cost · Last result.
 
-FORM: Wire Desk, #1 on the grounded list (chosen as the pick card). seed:7e9083b6c40e291b. Signature interaction: selecting a position lights its source slips and dims the rest of the wire; new copy comes off the teleprinter and stays canary-unread until seen.
+FORM: Split-flap concourse board (catalog challenger, competitive verdict, chosen by the user over the assigned Flight Strip Board). seed:56582f45fa12f024. Signature interaction: when a row's value changes, its characters cascade through flaps to the new value; clicking a row opens its decision trace.
 
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance

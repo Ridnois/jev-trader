@@ -1,3 +1,5 @@
+# News bot on Hyperliquid perps, paper (no keys). Long-only, 1× notional.
+# Run: jev-trader run        Watch: jev-trader dashboard
 loop_interval_secs = 60
 data_dir = "data"
 
@@ -11,8 +13,7 @@ timeout_ms = 3000
 # breaker_min_calls = 4
 
 [market]
-# Binance public market-data mirror (no API key needed).
-base_url = "https://data-api.binance.vision"
+# Hyperliquid perp candles (public, no key), from [exchange] network.
 interval = "1h"
 momentum_window = 20      # close vs 20-candle SMA
 
@@ -59,8 +60,9 @@ rebalance_band = 0.02     # ignore changes < 2% of equity
 
 [paper]
 starting_cash = 10000.0
-fee_rate = 0.001          # 0.1% taker
-slippage_rate = 0.0005    # 5 bps
+fee_rate = 0.00045        # Hyperliquid perps taker, tier 0 (checked 2026-11-06)
+slippage_rate = 0.0005    # 5 bps (conservative for BTC/ETH/SOL)
+# Funding on open longs is accrued every tick at Hyperliquid's hourly rate.
 
 # [regime]                    # crypto market regime, refreshed hourly (keyless sources)
 # enabled = true
@@ -76,17 +78,21 @@ slippage_rate = 0.0005    # 5 bps
 # horizons = [1, 4, 24]
 # benchmark = "BTC"
 
+[exchange]
+mode = "paper"            # simulated fills on real Hyperliquid prices
+network = "mainnet"       # market data source (and order venue when live)
+
 [[assets]]
 symbol = "BTC"
 name = "Bitcoin"
-pair = "BTCUSDT"
+coin = "BTC"
 
 [[assets]]
 symbol = "ETH"
 name = "Ethereum"
-pair = "ETHUSDT"
+coin = "ETH"
 
 [[assets]]
 symbol = "SOL"
 name = "Solana"
-pair = "SOLUSDT"
+coin = "SOL"

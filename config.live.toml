@@ -1,4 +1,6 @@
-# Live trading config: same strategy as config.toml, real Binance spot orders.
+# News bot, LIVE on Hyperliquid perps: same strategy as config.toml, real orders.
+# Check first:  jev-trader --config config.live.toml hl check
+# Run:          jev-trader --config config.live.toml run --live
 loop_interval_secs = 60
 data_dir = "data-live"   # separate ledger: never shares state with paper
 
@@ -12,8 +14,7 @@ timeout_ms = 3000
 # breaker_min_calls = 4
 
 [market]
-# Binance public market-data mirror (no API key needed).
-base_url = "https://data-api.binance.vision"
+# Hyperliquid perp candles (public, no key), from [exchange] network.
 interval = "1h"
 momentum_window = 20      # close vs 20-candle SMA
 
@@ -60,8 +61,9 @@ rebalance_band = 0.02     # ignore changes < 2% of equity
 
 [paper]
 starting_cash = 10000.0
-fee_rate = 0.001          # 0.1% taker
-slippage_rate = 0.0005    # 5 bps
+fee_rate = 0.00045        # Hyperliquid perps taker, tier 0 (checked 2026-11-06)
+slippage_rate = 0.0005    # 5 bps (conservative for BTC/ETH/SOL)
+# Funding on open longs is accrued every tick at Hyperliquid's hourly rate.
 
 # [regime]                    # crypto market regime, refreshed hourly (keyless sources)
 # enabled = true
@@ -78,25 +80,25 @@ slippage_rate = 0.0005    # 5 bps
 # benchmark = "BTC"
 
 [exchange]
-# REAL MONEY. Runs only with: cargo run --release -- --config config.live.toml run --live
-mode = "live"
-base_url = "https://api.binance.com"
-quote = "USDT"
-# The most USDT the bot may trade with; it never sees the rest of the account.
-# 0 = refuse to start. Set this yourself before the first live run.
-max_capital_usd = 0.0
+mode = "live"             # real orders; also needs `run --live`
+network = "mainnet"
+account_env = "HL_ACCOUNT_ADDRESS"      # your main Hyperliquid address (public)
+agent_key_env = "HL_AGENT_PRIVATE_KEY"  # API agent wallet key: trades, cannot withdraw
+max_capital_usd = 0       # YOU choose this; 0 refuses to start
+max_slippage_bps = 30     # IOC limit at most 0.3% through the price
+leverage = 1              # cross 1× on each coin, matching the ledger's sizing
 
 [[assets]]
 symbol = "BTC"
 name = "Bitcoin"
-pair = "BTCUSDT"
+coin = "BTC"
 
 [[assets]]
 symbol = "ETH"
 name = "Ethereum"
-pair = "ETHUSDT"
+coin = "ETH"
 
 [[assets]]
 symbol = "SOL"
 name = "Solana"
-pair = "SOLUSDT"
+coin = "SOL"

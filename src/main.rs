@@ -1,5 +1,5 @@
 mod backtest;
-mod binance;
+mod hyperliquid;
 mod live;
 mod bot;
 mod breaker;
@@ -36,11 +36,11 @@ use paper::State;
 use status::Paths;
 
 #[derive(Parser)]
-#[command(about = "News-driven crypto paper-trading bot powered by TypeSafe Jev")]
+#[command(about = "Crypto trading bots for Hyperliquid perps, powered by TypeSafe Jev")]
 struct Cli {
     #[arg(long, default_value = "config.toml")]
     config: PathBuf,
-    /// Secrets file loaded before .env.local (its values win), e.g. `.env.test`.
+    /// Secrets file loaded before .env.local (its values win), e.g. `.env.hl-testnet`.
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
     #[command(subcommand)]
@@ -53,25 +53,25 @@ enum Cmd {
     Analyze { text: String },
     /// Fetch configured news feeds and print headlines (no Jev calls).
     News,
-    /// Run the paper-trading loop.
+    /// Run the news bot loop (paper unless armed).
     Run {
         /// Run a single tick and exit.
         #[arg(long)]
         once: bool,
-        /// Arm real Binance orders. Needs `[exchange] mode = "live"` in the config too.
+        /// Arm real Hyperliquid orders. Needs `[exchange] mode = "live"` in the config too.
         #[arg(long)]
         live: bool,
     },
     /// Run the order-flow scalper (market data decides; Jev reviews entries against the news).
     Scalp {
-        /// Arm real orders (needs `[exchange] mode = "live"`; a testnet base_url trades fake money).
+        /// Arm real Hyperliquid orders (needs `[exchange] mode = "live"`; network = "testnet" trades fake money).
         #[arg(long)]
         live: bool,
     },
-    /// Binance account tools (live trading).
-    Binance {
+    /// Hyperliquid tools: market scan, account check, clearing a hold.
+    Hl {
         #[command(subcommand)]
-        cmd: BinanceCmd,
+        cmd: HlCmd,
     },
     /// Show the paper account.
     Status,
@@ -101,20 +101,34 @@ enum Cmd {
         #[arg(long, default_value_t = 8787)]
         port: u16,
         /// Scalper data directory shown on the Scalper page.
-        #[arg(long, default_value = "data-scalp")]
+        #[arg(long, default_value = "data-hl")]
         scalp_dir: PathBuf,
     },
 }
 
 #[derive(Subcommand)]
-enum BinanceCmd {
-    /// Check keys, balances and pair rules, and send one test order per pair
-    /// (validated by Binance, never executed).
+enum HlCmd {
+    /// Rank liquid perps by how often a 10-minute move clears the round-trip cost at
+    /// this config's [scalp] fees (no key needed).
+    Scan {
+        /// How many of the highest-volume perps to test.
+        #[arg(long, default_value_t = 30)]
+        top: usize,
+        /// Skip perps with less 24h volume than this, millions of dollars.
+        #[arg(long, default_value_t = 5.0)]
+        min_volume: f64,
+        /// Hours of 1-minute candles (max 83).
+        #[arg(long, default_value_t = 72)]
+        hours: i64,
+    },
+    /// Check the account address, agent key, margin, coins and leverage of this
+    /// config's [exchange]. Sends no orders.
     Check,
-    /// Clear the hold set after an unconfirmed order, once you've checked Binance
-    /// and the live ledger agree.
+    /// Clear the hold set after an unconfirmed order, once you've checked
+    /// Hyperliquid and the live ledger agree.
     ClearHold,
 }
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -170,19 +184,10 @@ async fn main() -> Result<()> {
             let live = arm(&cfg, live).await?;
             scalp::run(cfg.clone(), jev_client(&cfg)?, live).await?;
         }
-        Cmd::Binance { cmd } => match cmd {
-            BinanceCmd::Check => live::check(&cfg).await?,
-            BinanceCmd::ClearHold => {
-                let path = Paths::new(&cfg.data_dir).state;
-                let mut s = State::load_or_new(&path, 0.0)?;
-                match s.live_hold.take() {
-                    Some(h) => {
-                        s.save(&path)?;
-                        println!("cleared: {h}");
-                    }
-                    None => println!("no hold set"),
-                }
-            }
+        Cmd::Hl { cmd } => match cmd {
+            HlCmd::Scan { top, min_volume, hours } => println!("{}", hyperliquid::scan(&http, cfg.api(), &cfg.scalp, top, min_volume, hours.clamp(1, 83)).await?),
+            HlCmd::Check => live::check(&cfg).await?,
+            HlCmd::ClearHold => live::clear_hold(&cfg)?,
         },
         Cmd::Report => {
             let md = run_report(&cfg, &cli.config)?;
@@ -241,11 +246,11 @@ async fn print_status(http: &reqwest::Client, cfg: &Config) -> Result<()> {
     let state = State::load_or_new(&Paths::new(&cfg.data_dir).state, cfg.paper.starting_cash)?;
     let start = state.starting_cash.unwrap_or(cfg.paper.starting_cash);
     if state.mode.as_deref() == Some(live::MODE) {
-        println!("LIVE ledger (Binance){}", state.live_hold.as_ref().map(|h| format!(" · HOLD: {h}")).unwrap_or_default());
+        println!("LIVE ledger ({}){}", state.venue.as_deref().unwrap_or("unknown venue"), state.live_hold.as_ref().map(|h| format!(" · HOLD: {h}")).unwrap_or_default());
     }
     let mut prices = HashMap::new();
     for a in &cfg.assets {
-        if let Ok(c) = market::klines(http, &cfg.market.base_url, &a.pair, &cfg.market.interval, 1).await
+        if let Ok(c) = market::klines(http, cfg.api(), &a.coin, &cfg.market.interval, 1).await
             && validate::candles(&c).is_ok()
             && let Some(last) = c.last()
         {
@@ -259,6 +264,9 @@ async fn print_status(http: &reqwest::Client, cfg: &Config) -> Result<()> {
     }
     println!("equity  ${equity:.2}  (start ${start:.2}, {:+.2}%)", (equity / start - 1.0) * 100.0);
     println!("cash    ${:.2}", state.cash);
+    if state.funding_usd != 0.0 {
+        println!("funding ${:+.2} since start", state.funding_usd);
+    }
     for (sym, p) in &state.positions {
         let px = prices.get(sym).copied().unwrap_or(p.entry);
         println!(
