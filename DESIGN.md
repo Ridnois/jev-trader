@@ -1,369 +1,434 @@
 ---
-name: Jev Wire Desk
-description: A newsroom wire desk for a news-driven paper-trading bot; every headline is copy, every verdict is a rubber stamp.
+name: Jev Departures
+description: A split-flap departure board for two trading bots; every coin is a row, and the check that holds it is read straight off the board.
 colors:
-  desk: "#2F4A3F"
-  desk-2: "#3B5A4D"
-  desk-3: "#24392F"
-  desk-ink: "#E4EDE7"
-  desk-mute: "#AFC4B8"
-  canary: "#F2E46B"
-  canary-paper: "#FBF3B9"
-  canary-edge: "#E3D35A"
-  pink: "#E8607A"
-  pink-ink: "#B3304C"
-  pink-wash: "#FBE7EB"
-  pos: "#2F6B4F"
-  amber: "#D39A1E"
-  amber-ink: "#80540A"
-  ground: "#ECEDE6"
+  steel: "#C9CDD2"
+  steel-lt: "#DDE0E3"
+  steel-dk: "#6F757D"
+  steel-dkr: "#5C6168"
+  steel-ink: "#33383E"
+  rail: "#2A2D31"
+  rail-2: "#3A3E43"
+  rail-3: "#23262A"
+  rail-ink: "#E9EBED"
+  rail-mute: "#AEB3B9"
+  flap: "#141414"
+  flap-leaf-top: "#282828"
+  flap-leaf-bot: "#151515"
+  flap-pin: "#5E6268"
+  flap-ink: "#F2F2F0"
+  flap-dim: "#9A9EA4"
+  board-ink: "#EEF0F2"
+  lamp-off: "#2B2E33"
+  amber: "#E3A21A"
+  amber-ink: "#885800"
+  amber-wash: "#FBF1DA"
+  red-flap: "#F0675C"
+  red: "#B4372F"
+  red-deep: "#962A23"
+  red-wash: "#FBE9E7"
+  green-flap: "#62C98E"
+  green: "#22704A"
+  green-wash: "#E5F3EB"
   sheet: "#FFFFFF"
-  sheet-2: "#F6F6F1"
-  rule: "#D5D6CE"
-  rule-2: "#E4E5DE"
-  ink: "#1C1E22"
-  mute: "#575F59"
-  faint: "#5E655F"
+  sheet-2: "#F3F4F5"
+  ink: "#15171A"
+  mute: "#4A5058"
+  rule: "#D9DCE0"
+  rule-2: "#EBEDEF"
 typography:
-  display:
-    fontFamily: "Archivo Narrow, Arial Narrow, sans-serif"
-    fontSize: "42px"
+  title:
+    fontFamily: "Barlow, system-ui, sans-serif"
+    fontSize: "32px"
+    fontWeight: 700
+    lineHeight: 1.05
+    letterSpacing: "-0.015em"
+  figure:
+    fontFamily: "Barlow, system-ui, sans-serif"
+    fontSize: "28px"
     fontWeight: 700
     lineHeight: 1
     letterSpacing: "-0.02em"
     fontFeature: "tnum"
-  headline:
-    fontFamily: "Archivo Narrow, Arial Narrow, sans-serif"
-    fontSize: "28px"
+  wordmark:
+    fontFamily: "Barlow, system-ui, sans-serif"
+    fontSize: "21px"
     fontWeight: 700
-    lineHeight: 1.1
+    lineHeight: 1
     letterSpacing: "-0.01em"
-  wire-headline:
-    fontFamily: "Courier Prime, ui-monospace, monospace"
-    fontSize: "18px"
+  heading:
+    fontFamily: "Barlow, system-ui, sans-serif"
+    fontSize: "17px"
     fontWeight: 700
-    lineHeight: 1.28
-    letterSpacing: "-0.01em"
-  title:
-    fontFamily: "Archivo Narrow, Arial Narrow, sans-serif"
-    fontSize: "16px"
-    fontWeight: 700
-    lineHeight: 1.3
+    lineHeight: 1.2
   body:
-    fontFamily: "Archivo Narrow, Arial Narrow, sans-serif"
-    fontSize: "14px"
-    fontWeight: 450
+    fontFamily: "Barlow, system-ui, sans-serif"
+    fontSize: "15px"
+    fontWeight: 400
     lineHeight: 1.45
     fontFeature: "tnum"
-  slug:
-    fontFamily: "Courier Prime, ui-monospace, monospace"
-    fontSize: "12px"
+  small:
+    fontFamily: "Barlow, system-ui, sans-serif"
+    fontSize: "12.5px"
+    fontWeight: 400
+    lineHeight: 1.3
+  flap:
+    fontFamily: "Barlow Condensed, Barlow, system-ui, sans-serif"
+    fontSize: "clamp(10px, calc((100cqi - 236px) / 41), 23px)"
+    fontWeight: 600
+    lineHeight: 1
+  board-title:
+    fontFamily: "Barlow Condensed, Barlow, system-ui, sans-serif"
+    fontSize: "20px"
     fontWeight: 700
-    letterSpacing: "0.06em"
-  label:
-    fontFamily: "Archivo Narrow, Arial Narrow, sans-serif"
-    fontSize: "12px"
-    fontWeight: 700
-    letterSpacing: "0.07em"
-  stamp:
-    fontFamily: "Archivo Narrow, Arial Narrow, sans-serif"
+    lineHeight: 1
+    letterSpacing: "0.14em"
+  nav:
+    fontFamily: "Barlow Condensed, Barlow, system-ui, sans-serif"
     fontSize: "14px"
+    fontWeight: 600
+    lineHeight: 1.2
+    letterSpacing: "0.09em"
+  button:
+    fontFamily: "Barlow Condensed, Barlow, system-ui, sans-serif"
+    fontSize: "13.5px"
+    fontWeight: 600
+    lineHeight: 1.1
+    letterSpacing: "0.08em"
+  column-head:
+    fontFamily: "Barlow Condensed, Barlow, system-ui, sans-serif"
+    fontSize: "12px"
+    fontWeight: 600
+    lineHeight: 1.2
+    letterSpacing: "0.14em"
+  label:
+    fontFamily: "Barlow Condensed, Barlow, system-ui, sans-serif"
+    fontSize: "11.5px"
+    fontWeight: 600
+    lineHeight: 1.2
+    letterSpacing: "0.1em"
+  tag:
+    fontFamily: "Barlow Condensed, Barlow, system-ui, sans-serif"
+    fontSize: "11px"
     fontWeight: 700
-    lineHeight: 1.15
+    lineHeight: 1
     letterSpacing: "0.09em"
 rounded:
-  stamp: "3px"
-  sheet: "4px"
+  flap: "2px"
+  tag: "3px"
+  row: "4px"
   control: "5px"
-  panel: "6px"
+  sheet: "6px"
+  board: "8px"
+  pill: "999px"
   dot: "50%"
 spacing:
+  flap-gap: "2px"
   xs: "4px"
   sm: "8px"
-  slip-gap: "10px"
-  md: "14px"
-  lg: "18px"
-  xl: "22px"
-  gutter: "28px"
+  md: "12px"
+  lg: "16px"
+  xl: "20px"
+  page-x: "32px"
 components:
   button-outline:
     backgroundColor: "transparent"
     textColor: "{colors.ink}"
-    typography: "{typography.body}"
+    typography: "{typography.button}"
     rounded: "{rounded.control}"
     padding: "8px 14px"
   button-outline-hover:
     backgroundColor: "{colors.sheet}"
-  button-ink:
-    backgroundColor: "{colors.ink}"
-    textColor: "{colors.sheet}"
+  button-flatten:
+    backgroundColor: "transparent"
+    textColor: "{colors.red}"
+    typography: "{typography.button}"
     rounded: "{rounded.control}"
     padding: "8px 14px"
+  button-flatten-hover:
+    backgroundColor: "{colors.red-wash}"
   button-danger:
-    backgroundColor: "{colors.pink-ink}"
+    backgroundColor: "{colors.red}"
     textColor: "{colors.sheet}"
+    typography: "{typography.button}"
     rounded: "{rounded.control}"
     padding: "8px 14px"
+  button-danger-hover:
+    backgroundColor: "{colors.red-deep}"
   button-quiet:
     backgroundColor: "transparent"
     textColor: "{colors.ink}"
+    typography: "{typography.button}"
     rounded: "{rounded.control}"
     padding: "8px 14px"
-  button-quiet-hover:
-    backgroundColor: "{colors.rule-2}"
-  slip:
+  flap-cell:
+    backgroundColor: "{colors.flap-leaf-top}"
+    textColor: "{colors.flap-ink}"
+    typography: "{typography.flap}"
+    rounded: "{rounded.flap}"
+    width: "calc(var(--fs) * .64)"
+    height: "calc(var(--fs) * 1.36)"
+  board:
+    backgroundColor: "{colors.steel-dk}"
+    textColor: "{colors.board-ink}"
+    rounded: "{rounded.board}"
+    padding: "14px 16px 16px"
+  board-row:
+    backgroundColor: "transparent"
+    rounded: "{rounded.row}"
+    padding: "3px 4px"
+  lamp:
+    backgroundColor: "{colors.lamp-off}"
+    rounded: "{rounded.dot}"
+    size: "10px"
+  trace:
     backgroundColor: "{colors.sheet}"
     textColor: "{colors.ink}"
-    rounded: "{rounded.stamp}"
-    padding: "14px 18px 14px 20px"
-  slip-unread:
-    backgroundColor: "{colors.canary-paper}"
-  stamp-run-buy:
-    backgroundColor: "transparent"
-    textColor: "{colors.pos}"
-    typography: "{typography.stamp}"
-    rounded: "{rounded.stamp}"
-    padding: "6px 10px 7px"
-    width: "118px"
-  stamp-run-sell:
-    backgroundColor: "transparent"
-    textColor: "{colors.pink-ink}"
-    typography: "{typography.stamp}"
-    rounded: "{rounded.stamp}"
-    padding: "6px 10px 7px"
-  stamp-alert:
-    backgroundColor: "{colors.pink-ink}"
-    textColor: "{colors.sheet}"
-    typography: "{typography.stamp}"
-    rounded: "{rounded.stamp}"
-    padding: "6px 10px 7px"
-  stamp-filed:
-    backgroundColor: "rgba(47,107,79,0.07)"
-    textColor: "{colors.pos}"
-    typography: "{typography.stamp}"
-    rounded: "{rounded.stamp}"
-    padding: "6px 10px 7px"
-  stamp-spiked:
-    backgroundColor: "transparent"
-    textColor: "{colors.faint}"
-    typography: "{typography.stamp}"
-    rounded: "{rounded.stamp}"
-    padding: "6px 10px 7px"
+    rounded: "{rounded.control}"
+    padding: "16px 18px"
+  sheet-bot:
+    backgroundColor: "{colors.sheet}"
+    textColor: "{colors.ink}"
+    rounded: "{rounded.sheet}"
+    padding: "14px 18px 16px"
+  rail:
+    backgroundColor: "{colors.rail}"
+    textColor: "{colors.rail-ink}"
+    width: "228px"
+    padding: "22px 16px 18px"
   rail-nav-item:
     backgroundColor: "transparent"
-    textColor: "{colors.desk-mute}"
-    rounded: "{rounded.panel}"
-    padding: "9px 10px"
+    textColor: "{colors.rail-mute}"
+    typography: "{typography.nav}"
+    rounded: "{rounded.control}"
+    padding: "8px 10px"
   rail-nav-item-hover:
-    backgroundColor: "{colors.desk-3}"
-    textColor: "{colors.desk-ink}"
+    backgroundColor: "{colors.rail-3}"
+    textColor: "{colors.rail-ink}"
   rail-nav-item-active:
-    backgroundColor: "{colors.desk-2}"
+    backgroundColor: "{colors.rail-2}"
     textColor: "{colors.sheet}"
-  filter-tabs:
-    backgroundColor: "{colors.rule-2}"
-    rounded: "{rounded.panel}"
-    padding: "3px"
-  filter-tab-active:
-    backgroundColor: "{colors.sheet}"
+  whose-money:
+    backgroundColor: "{colors.rail-3}"
+    textColor: "{colors.rail-ink}"
+    rounded: "{rounded.sheet}"
+    padding: "14px 12px"
+  venue-paper:
+    backgroundColor: "{colors.rail-2}"
+    textColor: "{colors.rail-ink}"
+    rounded: "{rounded.tag}"
+    padding: "3px 6px 2px"
+  venue-testnet:
+    backgroundColor: "{colors.amber}"
     textColor: "{colors.ink}"
-    rounded: "{rounded.stamp}"
-    padding: "6px 12px"
-  unread-flag:
-    backgroundColor: "{colors.canary}"
+    rounded: "{rounded.tag}"
+    padding: "3px 6px 2px"
+  venue-live:
+    backgroundColor: "{colors.red-flap}"
     textColor: "{colors.ink}"
-    typography: "{typography.slug}"
-    rounded: "{rounded.stamp}"
-    padding: "2px 7px"
+    rounded: "{rounded.tag}"
+    padding: "3px 6px 2px"
+  tab-active:
+    backgroundColor: "transparent"
+    textColor: "{colors.ink}"
+    typography: "{typography.nav}"
+    padding: "9px 14px 8px"
+  chip:
+    backgroundColor: "transparent"
+    textColor: "{colors.steel-ink}"
+    rounded: "{rounded.pill}"
+    padding: "5px 11px"
+  chip-active:
+    backgroundColor: "{colors.ink}"
+    textColor: "{colors.sheet}"
+  tag-ok:
+    backgroundColor: "{colors.green-wash}"
+    textColor: "{colors.green}"
+    typography: "{typography.tag}"
+    rounded: "{rounded.tag}"
+    padding: "4px 7px 3px"
+  tag-no:
+    backgroundColor: "{colors.red-wash}"
+    textColor: "{colors.red}"
+    typography: "{typography.tag}"
+    rounded: "{rounded.tag}"
+    padding: "4px 7px 3px"
+  tag-wait:
+    backgroundColor: "{colors.amber-wash}"
+    textColor: "{colors.amber-ink}"
+    typography: "{typography.tag}"
+    rounded: "{rounded.tag}"
+    padding: "4px 7px 3px"
   table-sheet:
     backgroundColor: "{colors.sheet}"
     rounded: "{rounded.sheet}"
-    padding: "10px 14px"
+    padding: "9px 14px"
 ---
 
-# Design System: Jev Wire Desk
+# Design System: Jev Departures
 
 ## Overview
 
-**Creative North Star: "The Wire Desk"**
+**Creative North Star: "The Departure Board"**
 
-The interface is a newsroom slot desk, not a trading terminal. Headlines arrive as copy on canary teleprinter paper, the operator reads them, and the slot editor (the bot) either runs each one into a trade or spikes it. Every verdict is a rubber stamp in the margin of the slip. The world sits on a cool newsprint ground with white sheets laid on it and a desk-green rail along the left edge; ink is carbon black, corrections are pink.
+The dashboard is a station concourse. A brushed-steel ground carries a graphite rail on the left, white working sheets for money and evidence, and one matte split-flap board where every coin both bots watch is a row. A row's status flips through the flaps (WATCHING, IN TRADE, HOLDING, HELD, ORDER WAITING, REVIEW, WARMING UP, PAUSED, ON HOLD) and its WAITING FOR column names the next thing that has to happen, so "why not" is read off the board instead of hunted for in a log. Clicking a row drops a white trace sheet into the board with the checks in order.
 
-Density is working-desk density: a light, all-day tab that reads at a glance (is the bot alive, what ran, what needs attention) and rewards a closer look (each position traces back to its source slips). Type is split between the copy (Courier Prime, a typewriter face for slugs and wire headlines) and the desk (Archivo Narrow with tabular figures for every piece of UI and every number). Color is semantic and scarce: canary means unread, green means it ran long or was filed, pink means an exit, an alert, or a warning about the data itself.
+Density is concourse density: an all-day second-monitor tab that reads at a glance (heartbeats, whose money, which coins are lit) and rewards a closer look (trace, decisions, trades, evidence). Type splits by role, not by mood: Barlow Condensed caps for everything mechanical (flaps, labels, buttons, nav), Barlow for sentences and figures, all with tabular numerals.
 
-The world explicitly rejects the category default: a charcoal dashboard of KPI tiles with green/red numbers over a log tail.
+The world rejects the KPI-tile trading terminal and the P&L-first equity chart. Money appears as three compact sheets above the board, never as a hero number.
 
 **Key Characteristics:**
-- Cool newsprint ground, white paper sheets, desk-green rail.
-- Canary paper is reserved for unread copy.
-- Verdicts are rotated rubber stamps, the system's signature device.
-- Typewriter face for copy, narrow grotesque with tabular figures for everything else.
-- One authored motion moment: a slip feeds off the teleprinter and its stamp thunks down.
+- Brushed-steel ground with a fine horizontal grain, graphite rail, white sheets, one flap board.
+- The flap board is the signature: two-leaf cells split by a hairline with hinge pins, folding on change.
+- Color is a four-state signal (white, amber, green, red) carried by flap lettering and a row lamp, never by panels.
+- Condensed caps for machinery, a plain grotesque for sentences.
+- Only two writing controls exist (Pause, Flatten), both for the news bot.
 
 ## Colors
 
-A newsroom palette: green desk furniture, newsprint, canary copy paper, carbon ink and a correction pen.
+A cool, nearly achromatic steel-and-graphite world in which the only saturated color is signal. Each signal exists twice: a bright flap version for lettering on black, and a dark ink version plus a pale wash for use on white.
 
 ### Primary
-- **Desk Green** (desk): the rail background, the focus ring, the trace banner and the keyboard focus outline. It is the furniture and the operator's hand; it never marks a trade outcome.
-- **Desk Green Lifted** (desk-2) and **Desk Green Sunk** (desk-3): the active and hover states of rail navigation, and the rail's divider rule.
-- **Desk Ink** (desk-ink) and **Desk Mute** (desk-mute): text on the rail, active and resting.
+- **Brushed Steel** (steel): the page ground, overlaid with a 3px repeating horizontal grain (white at 7%, black at 1.8%). Tabs, chips and page-level notes sit directly on it in Steel Ink.
+- **Board Steel / Board Steel Deep** (steel-dk to steel-dkr): the flap board's housing, a top-to-bottom gradient. Steel-dk also draws chip outlines, the tab baseline, the scrollbar, and the unlit heartbeat.
+- **Graphite Rail** (rail), **Lifted** (rail-2, the active nav item and paper venue tag) and **Sunk** (rail-3, nav hover and the whose-money panel). Rail Ink and Rail Mute carry rail text.
 
 ### Secondary
-- **Canary Teleprinter** (canary): the wordmark, the active rail icon, the unread counter, text selection, and the NEW flag (canary on ink).
-- **Canary Slip Paper** (canary-paper): the fill of an unread slip and of a warning notice. **Canary Edge** (canary-edge) is its darker margin.
+- **Matte Flap Black** (flap): the board's material name and the legend swatches. The cells themselves render as two leaves, **Upper Leaf** (flap-leaf-top) over **Lower Leaf** (flap-leaf-bot), so the top half catches more light than the bottom.
+- **Flap White** (flap-ink): default flap lettering. **Flap Dim** (flap-dim): lettering for secondary or not-yet-meaningful values (WAITING FOR on a plain watching row, cost/move that doesn't clear the bar, "NO TRADES YET").
+- **Hinge Pin** (flap-pin): the 2 x 4px pins at each cell's split. **Board Lettering** (board-ink): column heads, section headers and legend on the board housing. **Unlit Lamp** (lamp-off).
 
 ### Tertiary
-- **Correction Pink Ink** (pink-ink): RUN · SELL stamps, the solid ALERT stamp, sell sides and negative figures, error dots, the danger button and the SYNTHETIC DATA flag.
-- **Correction Pink** (pink): the stale/stopped heartbeat dot and exit zones.
-- **Pink Wash** (pink-wash): the fill of a bad-news notice (synthetic data, kill switch).
-- **Ledger Green** (pos): RUN · BUY and FILED stamps, buy sides, positive figures, healthy stage dots.
-- **Amber** (amber) and **Amber Ink** (amber-ink): degraded pipeline stages only, as a dot or as text.
+- **Signal Amber** (amber): waiting, held by a limit, or needs review. Also the brand accent ("Jev"), the active-nav inset bar, focus rings, text selection, the testnet venue tag, and a budget meter at 75% or more. **Amber Ink / Amber Wash** carry it on white (wait tags, warning notices).
+- **Flap Red** (red-flap) on black and **Cancelled Red** (red) on white: stopped, on hold, or a loss; also the Flatten button, short side, stop tick, and a full meter. **Red Deep** is the confirm button's hover only. **Red Wash** backs failed checks and bad notices.
+- **Flap Green** (green-flap) on black and **Cleared Green** (green) on white: in a trade, a passed check, or a profit; long side; take-profit tick. **Green Wash** backs passed checks.
 
 ### Neutral
-- **Newsprint Ground** (ground): the page behind everything; also the sticky header's fill.
-- **Sheet White** (sheet): slips, tables, run-list sheets; text on solid ink, desk or pink surfaces.
-- **Off Sheet** (sheet-2): the glance column and empty-state panels.
-- **Rule** (rule) and **Hairline** (rule-2): column dividers, table header rules, row hairlines and the filter-tab tray.
-- **Carbon Ink** (ink): all primary text, the ink button, the gauge needle.
-- **Mute** (mute) and **Faint** (faint): secondary text (readings, slugs, captions) and the dashed SPIKED stamp. Faint is held at legible contrast; it is not a lighter tier.
+- **Working Sheet** (sheet) and **Sheet Recess** (sheet-2, hovered/open table rows and detail rows).
+- **Ink** (ink) for text and filled controls; **Mute** (mute) for secondary text on white. **Rule** (rule, table head underline) and **Hairline Rule** (rule-2, row dividers, meter tracks).
 
 ### Named Rules
-**The Canary Means Unread Rule.** Canary paper fills a slip only while the operator has not seen it. It is never used to signal importance, profit or warning tone on a slip.
+**The Two-Voice Signal Rule.** Every signal color has a flap voice and a paper voice. Bright flap colors (red-flap, green-flap, amber) letter black cells and light lamps; dark ink colors (red, green, amber-ink) on their washes mark white sheets. Never put a flap color on white or an ink color on a flap.
 
-**The Stamp Tells Rule.** Whether copy ran, was filed or was spiked is told by its stamp, not by the slip's fill, border or a colored stripe.
-
-**The Correction Pen Rule.** Pink marks exits, alerts, sell stamps and warnings about the data's honesty. It is never decoration.
+**The Lamp Not Panel Rule.** A row's state is shown by its lamp, its STATUS flaps and a faint same-hue tint behind the row (13% amber or green, 14% red). Sheets and the board housing never change color with state.
 
 ## Typography
 
-**Display / UI Font:** Archivo Narrow (with Arial Narrow, sans-serif), variable 400 to 700
-**Copy Font:** Courier Prime (with ui-monospace, monospace), 400 and 700
+**Sentence Font:** Barlow (400, 500, 600, 700), with system-ui fallback.
+**Machine Font:** Barlow Condensed (500, 600, 700), falling back to Barlow.
 
-**Character:** A typewriter face for what came over the wire, a condensed grotesque for what the desk does with it. All figures are tabular.
+The body sets `font-variant-numeric: tabular-nums` globally, so every figure on every surface aligns. Both families are self-hosted woff2 served by the bot binary; Barlow Condensed 600 and Barlow 400 are preloaded.
 
 ### Hierarchy
-- **Display** (700, 42px, line-height 1): the paper equity figure only.
-- **Headline** (700, 28px, 1.1): the view title in the sticky header ("The wire").
-- **Wire Headline** (Courier Prime 700, 18px, 1.28, max 68ch): the headline on each slip; also empty-state titles.
-- **Title** (700, 16px): sheet and table headings.
-- **Body** (450, 14px, 1.45): all UI text, readings at 13.5px, captions at 12 to 13px.
-- **Slug** (Courier Prime 700, 12px, 0.06em, uppercase): ASSET-EVENT · SOURCE · time above each headline; also the unread counter and rail flags.
-- **Label** (700, 12 to 13px, 0.07em, uppercase): glance panel headings and table column headers.
-- **Stamp** (700, 14px, 0.09em, uppercase): stamp verdicts, with a 12px sentence-case line beneath.
+- **Title** (Barlow 700, 32px, 26px at 860px and below): the page H1 only (Departures, Scalper, News bot, Is it working?).
+- **Figure** (Barlow 700, 28px): a bot sheet's result number. Larger 34px figures exist on detail sheets.
+- **Heading** (Barlow 700, 17px): sheet and trace headings.
+- **Body** (Barlow 400, 15px / 1.45): ledes and prose, capped near 78ch; 14px inside sheets, traces and tables.
+- **Small** (Barlow 400, 12.5px): explanations under readings, beats, checks.
+- **Flap** (Barlow Condensed 600, fluid size via `--fs`, uppercase): board cells only.
+- **Board Title** (Barlow Condensed 700, 20px, 0.14em): the DEPARTURES flap heading; its cells are fixed at 19px.
+- **Nav / Button / Column Head / Label / Tag** (Barlow Condensed 600-700, 11-14px, uppercase, 0.07-0.14em tracking): every mechanical word.
 
 ### Named Rules
-**The Copy/Desk Split Rule.** Courier Prime is for wire copy only: slugs, wire headlines, the wordmark, code and small flags. Every control, number and label is Archivo Narrow with tabular figures.
+**The Caps Are Machinery Rule.** Uppercase condensed type is for flaps, controls, nav, column heads and labels. Sentences, explanations and headlines are always Barlow in sentence case. If it is a full sentence, it is never in caps.
 
 ## Layout
 
-A three-column desk filling the viewport: a 200px desk-green rail (wordmark, four views, heartbeat footer pinned to the bottom), a fluid work column (28px side padding) with a sticky header holding the view title, counts and the Pause / Flatten controls, and a 400px glance column on off-sheet holding paper equity with its intraday line, the run list and the pipeline health grid. Each column scrolls on its own.
+A two-column shell: a sticky 228px graphite rail (full viewport height, scrolls on its own) and a fluid page padded 26px 32px 64px. The page and its view stack on a 20px grid gap. The board view runs: header (title, posture line, controls at right) / three bot sheets / the flap board.
 
-Slips stack newest first with a 10px gap; each slip is a two-column grid with copy on the left and a 140px stamp column on the right. Glance sections are separated by 14px.
+Sheets lay out with `repeat(auto-fit, minmax(min(300px, 100%), 1fr))` at a 16px gap, so three sit in a row on desktop and stack when narrow.
 
-Below 1240px the glance column moves above the work column as an auto-fit grid of 300px-minimum panels, and Pause / Flatten move into the rail. Below 760px the rail becomes a sticky top bar (wordmark, scrolling view tabs, heartbeat), icons drop out of nav, the work column uses a 16px gutter, and stamps drop under the slip text, left-aligned.
+### The board grid
+The board is a size container. Rows and the column head share one grid: a lamp column, then six flap columns sized in character cells: COIN 6, SIDE 5, STATUS 13, WAITING FOR 18, COST/MOVE 7, LAST RESULT 15, spread with `justify-content: space-between` and a 12px column gap. The cell size derives from the board's own width:
 
-**The Three-Column Desk Rule.** Rail for where you are and whether each desk lives, work column for copy, glance column for state. A new view goes into the work column; it never adds a fourth column.
+- `--fs: clamp(10px, calc((100cqi - 236px) / 41), 23px)` (flap font size)
+- `--cw: calc(var(--fs) * .64 + 2px)` (one cell plus its 2px gap)
+- each column is `calc(var(--cw) * N)` for N characters.
+
+Rows are grouped under section headers (Scalper, News bot) with a one-line description; there is no Bot column.
+
+### Responsive
+- **At 1100px and below:** detail rows (coin rows, hypothesis rows) drop to two columns.
+- **At 860px and below:** the shell becomes one column and the rail becomes a sticky top bar (wordmark, heartbeats without their sublines, a horizontally scrolling nav). The whose-money panel is hidden and a one-line money note appears under the title instead. Controls align left. The board drops COST/MOVE and LAST RESULT, keeping lamp + COIN, SIDE, STATUS, WAITING FOR at `--fs: clamp(9px, calc((100cqi - 160px) / 27), 20px)`.
+- **At 520px and below:** each board row stacks into two lines: lamp, COIN and STATUS on line one, WAITING FOR spanning beneath. SIDE is hidden; the WAITING FOR head is hidden. `--fs: clamp(9px, calc((100cqi - 60px) / 13), 16px)`, 10px column gap, 3px row gap, 6px vertical row padding.
+- **At 400px and below:** the board's padding trims to 12px 8px 14px and rows to 2px side padding.
+
+### Named Rules
+**The Count-In-Cells Rule.** Board columns are measured in flap characters, never in pixels or percentages. A new column declares its width as a character count and every value is padded or truncated to it.
 
 ## Elevation & Depth
 
-Paper on a desk: sheets sit on the newsprint ground with a single soft, low shadow; there is no stacking of elevations. Sticky bars use the ground color so content passes under them. Focus and tracing are shown with rings, not lift.
+Depth is physical and shallow: paper on steel, a recessed board, flaps with a split.
 
-### Shadow Vocabulary
-- **Paper** (`box-shadow: 0 1px 2px rgba(28,30,34,.07), 0 3px 10px rgba(28,30,34,.05)`): slips, sheets, notices.
-- **Trace ring** (`box-shadow: 0 0 0 2px #2F4A3F` plus Paper): a slip that sources the selected position.
-- **Focus banner** (`box-shadow: 0 6px 14px rgba(28,30,34,.12)`): the sticky trace banner only, so the wire visibly slides under it.
+- **Sheets** carry a soft two-layer paper shadow (1px/2px and 4px/12px of Ink at 8% and 6%).
+- **The board** is a pressed metal panel: an inner 1px white ring at 18%, a 1px top highlight at 25%, and a 6px/18px drop at 18%.
+- **The trace** sits on the board with a darker 2px/8px shadow at 25%, reading as a card laid onto the housing.
+- **Lit lamps** carry a 2px same-hue halo at 25%; the unlit lamp is inset (1px dark inner shadow).
+- **Flap cells** have no shadow; their depth is the hairline split between leaves.
 
-**The Paper Sheet Rule.** One soft shadow for every sheet. No hard offset shadows, no glows, no stacked elevations.
+### Named Rules
+**The Paper On Steel Rule.** Shadows are ambient and soft. There are no hard offset shadows and no glows except the lamp halo and the heartbeat ring.
 
 ## Shapes
 
-Nearly square paper. Slips and stamps use a 3px corner, tables and sheets 4px, buttons and selects 5px, rail items, tabs trays and notices 6px. Status dots are 9px circles; health strips are 4px bars. Borders are 1px hairlines for structure, 1.5px for controls, 2px for stamps.
-
-**The Rubber Stamp Rule.** A stamp is a 2px currentColor box, 3px corners, uppercase tracked caps, rotated -2.5deg. It is the only rotated element in the system.
+Small, mechanical radii that scale with the object: 2px flap cells, 3px tags and venue labels, 4px board rows, 5px buttons, nav items and the trace, 6px sheets and the whose-money panel, 8px for the board housing. Chips are full pills; lamps, heartbeats and stage dots are circles. Meters and gauge tracks are 4-6px bars with matching rounded ends.
 
 ## Components
 
-### Buttons
-Deliberate, inked, not soft.
-- **Shape:** gently squared (5px), 1.5px carbon border, 600 weight, 16px icon at 7px gap.
-- **Outline (Pause trading):** transparent on ground; hover fills sheet white.
-- **Ink (Flatten all):** carbon fill, white text; hover goes pure black.
-- **Danger (confirm flatten):** pink-ink fill and border; hover darkens.
-- **Quiet (Cancel):** no border; hover fills hairline.
-- **Press:** 1px downward nudge. Disabled at 45% opacity.
-- **In the rail:** the same buttons invert: white outline, white ink button, pink danger.
+### The split-flap cell (signature)
+Each character is a cell `calc(var(--fs) * .64)` wide and `calc(var(--fs) * 1.36)` tall, 2px apart, with 2px corners. It is built from two absolutely positioned halves holding the same character: the upper leaf clipped to the top half (`clip-path: inset(0 0 calc(50% + .5px) 0)`) on Upper Leaf, the lower leaf clipped to the bottom half on Lower Leaf. The 1px left between the clips is the hairline split, and the board steel shows through it. Two Hinge Pin nubs (2 x 4px) sit at the split on each side. Lettering takes the flap's tone class: default white, amber, red, green, or dim.
 
-### Slips (signature)
-The unit of the wire.
-- **Shape:** sheet white, 3px corners, Paper shadow, 14px 18px 14px 20px padding.
-- **Content:** slug line (with a NEW flag while unread), wire headline, Jev's reading in mute body with bold values, and an outcome line in green or pink when the slip ran.
-- **Unread:** canary slip paper fill until seen.
-- **Tracing:** selecting a run-list row dims every other slip to 32% opacity and grayscale; source slips keep full color and gain the 2px desk ring. A desk-green banner states what is being traced and offers "Show everything".
+**The fold.** When a value changes, only the changed characters move, each starting 24ms after the one before it and cycling through 1 to 3 random characters (by position) at 120ms steps before landing. Each step is a two-leaf fold: a temporary top leaf holding the old character folds down (`rotateX` 0 to -90deg, perspective 160px, 55ms ease-in, darkening to 55% brightness) while the static top already shows the new one; then a temporary bottom leaf with the new character drops into place (90deg to 0, 60ms ease-out after 55ms, starting at 140% brightness). Both temporary leaves are created for that fold and removed on `animationend`; there is no persistent `will-change` and no idle animation on the board.
 
-### Stamps (signature)
-- **RUN · BUY:** ledger-green ink outline.
-- **RUN · SELL:** correction-pink ink outline.
-- **ALERT:** solid pink-ink pad, white caps.
-- **FILED:** ledger-green ink on a 7% green tinted pad.
-- **SPIKED:** faint ink, dashed border.
-- A 12px sentence-case line under the verdict carries the asset or the reason (e.g. "opinion / recap", "+0.36 BTC").
+**Reduced motion.** With `prefers-reduced-motion: reduce`, characters are written into both halves directly with no fold, and a global rule removes every animation and transition.
 
-### Filter Tabs and Select
-- **Tabs:** a hairline tray (6px, 3px inset); the active tab is a sheet-white chip with a faint shadow; counts sit in faint weight after each label.
-- **Select:** sheet white, 1.5px rule border, 5px corners, inline chevron.
+**Accessibility.** Each flap group carries `role="text"` and an `aria-label` with the readable value; individual cells are `aria-hidden`.
 
-### Navigation (rail)
-- Desk-mute items at 15px/500 with an 18px line icon; hover sinks to desk-3; the active item lifts to desk-2 with white text and a canary icon.
-- **Heartbeat footer:** a 9px dot (pulsing mint when alive, pink when stale or stopped), "Bot alive" in white, the tick line in desk-mute, a pink SYNTHETIC DATA flag when the data is a demo, and PAPER TRADING in canary mono.
+### Board row
+A full-width button: lamp, then COIN, SIDE, STATUS, WAITING FOR, COST/MOVE, LAST RESULT. Hover tints the row with white at 7%; an open row holds white at 12%. `data-lamp` (amber, green, red, or empty) lights the lamp and tints the row in the same hue.
+- **Tones:** IN TRADE / HOLDING are green; ORDER WAITING, REVIEW, WARMING UP, HELD, PAUSED are amber; ON HOLD is red; WATCHING is white with an unlit lamp. SIDE is white for LONG/SHORT, dim otherwise. WAITING FOR is dim on plain watching rows, white when a trade or order is in play, amber or red when a limit or hold applies. COST/MOVE is white only when the typical move clears the cost bar, otherwise dim. LAST RESULT is green for a profit, red for a loss, dim for none.
+- **Column head and section headers** use Column Head type in Board Lettering; section headers carry a sentence-case Small description and a hairline rule (white at 16%) above every section but the first.
+- **Legend** at the board foot repeats the four signals as small flap-black squares outlined in their color, each with a plain-language meaning.
 
-### Run List and Gauges
-Each asset is a button row: symbol, state and why-line, P&L right-aligned, and a 16px gauge under it (pink exit zone, green buy zone, a midline, a carbon needle for the news score that slides on change). Pressed rows get a 1.5px inset desk ring.
+### Trace panel
+Opening a row reveals a white sheet inside the board (5px corners, 16px 18px padding). A Heading sentence states the situation ("SOL: watching, waiting for a rush of trading."), a muted sub line explains it, then two auto-fit columns (min 280px):
+- **Checks, in order.** The scalper runs warm-up, fresh prices, tight spread, rush of trading, one-sided flow, book support, price moving, no chase, big enough move, calmer news, then the risk checks: its open trade, free slot, cooldown, hourly limit, daily loss limit, exchange match, cash, Jev review. Each check has an 18px mark: green check on Green Wash (passed), red x on Red Wash (the first one that failed, set in 500 weight), or an outlined dash (not reached; its explanation is hidden and the row is tighter). The news bot shows its own safety checks with the raw detail right-aligned in condensed type.
+- **Readings now.** A grid of figure + explanation pairs (18px Barlow 600 over Small mute text). The news bot adds a score gauge (sell zone red, buy zone green at 35% opacity, a center tick and an ink needle) and the driving headlines.
 
-### Pipeline Health Grid
-A two-column hairline grid of stage cells on sheet white, each with a status dot (green ok, amber degraded, pink-ink error, hollow skipped), the stage name and a two-line clamp of detail.
+### Bot sheets
+Three compact white sheets above the board: Scalper, News bot, Is it working?. Each money sheet has the name as a link with its venue tag, a Figure-size result in green, red or mute, a muted sub line, an "At risk" line with a condensed label, and three budget meters (6px tracks on Hairline Rule; ink fill, amber at 75%, red when full). The evidence sheet is a stack of labelled sentences; figures resting on too few cases render muted.
 
-### Notices
-Full-width sheets under the header: sheet white by default, canary slip paper for warnings, pink wash with dark-pink text for bad news (synthetic data, kill switch).
+### Whose-money rail
+The rail holds the wordmark ("Jev" in amber, "trader" in Rail Ink), the nav, the whose-money panel and two heartbeats pinned to the bottom. The panel (Graphite Sunk, 6px corners) names each bot with a venue tag (Paper on Graphite Lifted, Testnet on amber, Live on Flap Red, all with ink or rail text) and one plain sentence about the money, then a closing sentence on whether real money is armed. Heartbeats are 9px dots: green with a 2.4s expanding ring when healthy (the only looping animation), amber when stale, red when down, steel when connecting.
 
-### Tables
-Sheet-white containers at 4px with the Paper shadow; uppercase label headers over a rule line, hairline rows, right-aligned tabular numbers, buy/sell sides as tracked green or pink caps.
+### Controls: Pause and Flatten
+Outline buttons with condensed caps and a 16px stroke icon: 1.5px border, 5px corners, 8px 14px padding, 1px press. Pause/Resume is the ink outline. Flatten is the red outline (Cancelled Red border and text, Red Wash on hover). Pressing it swaps in a confirm pair: a filled red "Yes, sell everything" (Red Deep on hover) and a borderless Cancel. Filled red appears nowhere else. A right-aligned note under the buttons says the controls are news-bot only.
 
-### Desks (self-explanation)
-The newsroom has two desks: the **News desk** (`jev-trader run`) and the **Scalp desk** (`jev-trader scalp`).
-- **Rail groups:** each desk's views sit under a mono desk heading with its own status dot and a canary venue tag (paper / testnet / LIVE).
-- **Heartbeat footer:** one row per desk (dot, name, what it is doing, venue line). A LIVE venue is a pink-ink pad.
-- **Glance column follows the active desk** and every heading names it ("News desk · equity", "Scalp desk · equity"), with a "where the money is" line under the figure.
-- **Header:** the subtitle starts with the desk slug; controls name their scope ("Pause news desk").
+### Navigation, tabs, chips, tables, notices
+- **Nav items** are condensed caps in Rail Mute; hover lifts to Graphite Sunk, the current page sits on Graphite Lifted in white with a 2px amber inset bar on the left.
+- **Tabs** sit on a 1.5px steel-dk baseline; the selected tab is Ink with a 3px ink underline, counts in Small Barlow beside the label.
+- **Filter chips** are steel-dk outlined pills; pressed chips fill with Ink.
+- **Tables** live in a white sheet with condensed caps heads over a Rule underline, Hairline Rule dividers, right-aligned numerics, and Sheet Recess on hover and open rows. Tags (ok, no, wait, ink) are 11px condensed caps on their washes.
+- **Notices** are sheets with a 16px icon; warn notices sit on Amber Wash, bad notices on Red Wash, with dark text in the same hue.
 
-### Guide sheets
-A "How to read this page" sheet opens each view: a title, plain sentences, and where useful a **flow strip** (mono step names over a 2px carbon rule, joined by faint arrows; a side input sits under the strip on a dashed rule), a **stamp legend** drawn with real stamps, or a **glossary** in the kv grid. "Got it, hide" collapses it into a header link; the choice is per viewer (localStorage). Jargon elsewhere is a **term**: dotted underline, definition on hover and focus.
-
-### Motion
-One authored moment: a newly arrived slip feeds down from its top edge (clip-path reveal with an 8px drop, 620ms), then its stamp thunks in from 1.35x scale and -9deg to rest (420ms, starting at 360ms). Both use `cubic-bezier(.16,1,.3,1)`. Everything else is 200ms color or background transitions; the heartbeat pulse is the only loop. All motion is removed under reduced motion.
+### Pages
+Four hash routes share the shell: **#board** (Departures: sheets plus flap board), **#scalper** (lede, tabs for Decisions with filter chips, Trades, How it decides), **#news** (lede with controls, tabs for Coins, Headlines, Trades, Each look), **#evidence** (Is it working?: markout table, hypothesis tests, headline scoring). Only the board uses flaps; the other pages are sheets, tabs and tables.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** tell every verdict with a stamp from the five-stamp vocabulary (RUN · BUY, RUN · SELL, ALERT, FILED, SPIKED).
-- **Do** keep canary slip paper for unread copy and clear it the moment the slip is seen.
-- **Do** set wire copy in Courier Prime and every number in Archivo Narrow with tabular figures.
-- **Do** put paper sheets on the newsprint ground with the single Paper shadow.
-- **Do** label synthetic data and paper trading in the rail and in a pink-wash notice whenever they apply.
-- **Do** trace by dimming: selected sources keep color and gain the desk ring, the rest go to 32% grayscale.
+- **Do** size every board column in flap characters and pad or truncate values to that count.
+- **Do** put the reason on the board: WAITING FOR names the next thing that must happen in plain words ("A RUSH OF TRADING", "COOLDOWN TO END", "YOU TO RESUME").
+- **Do** use the flap voice of a signal on black and the paper voice on white, with its wash behind it.
+- **Do** fold only the characters that changed, with leaves created for the fold and removed after it.
+- **Do** honor reduced motion by writing the final character directly.
+- **Do** keep money statements as plain sentences in the rail and sheets ("Real money on Hyperliquid mainnet, capped at $X").
+- **Do** keep Flatten as a red outline and reserve filled red for its confirm step.
 
 ### Don't:
-- **Don't** build charcoal KPI-tile dashboards or hero-metric tiles; state lives in the glance column as plain figures and rows.
-- **Don't** add eyebrow or kicker labels above headings.
-- **Don't** mark slips with colored side stripes or tinted borders; the stamp carries the outcome.
-- **Don't** use canary for emphasis, or pink for decoration.
-- **Don't** rotate anything except stamps, and don't animate anything beyond the feed-and-thunk moment, state transitions and the heartbeat.
-- **Don't** use hard offset shadows or glows.
-
-## 2026-11-05 plain-language redesign
-
-The main dashboard (`/`) now explains the bot instead of mirroring its internals. The Wire Desk UI is still served at `/classic`.
-- Plain sentences come first. Raw machine readings are set in Courier Prime beside them, so a reader can tell explanation from measurement.
-- Highlighter yellow marks only what the bot actually did: a trade taken, a position open.
-- Every percent is a percent; basis points are never shown outside the raw column.
-- Testnet results always sit next to the same trades costed at real Binance fees.
+- **Don't** add KPI tiles, sparklines or an equity chart above the board.
+- **Don't** color sheets, the board housing or the rail by state; state lives in lamps, flap lettering and the faint row tint.
+- **Don't** set sentences in condensed caps, or flap lettering in Barlow.
+- **Don't** leave `will-change` or idle animations on flap cells; the board is still unless a value changes.
+- **Don't** add new writing controls beyond Pause and Flatten, or browser controls for the scalper.
+- **Don't** use hard offset shadows or glows other than the lamp halo and heartbeat ring.
