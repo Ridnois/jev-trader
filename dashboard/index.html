@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jev Trader</title>
+<link rel="preload" href="/fonts/archivo-narrow-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="rail" aria-label="Primary">
+    <a class="brand" href="#today">Jev<span>trader</span></a>
+    <ul class="nav">
+      <li><a href="#today" data-view="today">Today</a></li>
+      <li><a href="#trades" data-view="trades">Trades</a></li>
+      <li><a href="#decisions" data-view="decisions">Decisions</a></li>
+      <li><a href="#news" data-view="news">News bot</a></li>
+      <li><a href="#score" data-view="score">Scorecard</a></li>
+    </ul>
+    <div class="pulse" role="status" aria-live="polite">
+      <p class="pulserow" id="pulse-scalp"><i></i><b>Scalp bot</b><span>Connecting…</span></p>
+      <p class="pulserow" id="pulse-news"><i></i><b>News bot</b><span>Connecting…</span></p>
+      <p class="money" id="money-note"></p>
+      <a class="classic" href="/classic">Open the old dashboard</a>
+    </div>
+  </nav>
+  <main class="page" id="page">
+    <div id="notices"></div>
+    <section id="view"></section>
+  </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

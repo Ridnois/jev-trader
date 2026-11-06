@@ -1,0 +1,14 @@
+target/
+data/
+data-live/
+data-testnet/
+data-scalp/
+.env
+.env.local
+.env.test
+.env.*.local
+scripts/vol_scan.json
+
+# Personal notes vault (Obsidian), not part of the project
+.obsidian/
+trader/

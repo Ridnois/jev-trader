@@ -1,0 +1,570 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-05T00:00:00Z",
+  "title": "Design System: Jev Wire Desk",
+  "extensions": {
+    "colorMeta": {
+      "desk": {
+        "role": "primary",
+        "displayName": "Desk Green",
+        "canonical": "oklch(38.4% 0.038 167)",
+        "tonalRamp": [
+          "oklch(15% 0.019 167)",
+          "oklch(26% 0.024 167)",
+          "oklch(37% 0.029 167)",
+          "oklch(48% 0.035 167)",
+          "oklch(59% 0.036 167)",
+          "oklch(70% 0.031 167)",
+          "oklch(82% 0.025 167)",
+          "oklch(95% 0.019 167)"
+        ]
+      },
+      "desk-2": {
+        "role": "primary",
+        "displayName": "Desk Green Lifted",
+        "canonical": "oklch(43.9% 0.043 166)",
+        "tonalRamp": [
+          "oklch(15% 0.021 166)",
+          "oklch(26% 0.027 166)",
+          "oklch(37% 0.033 166)",
+          "oklch(48% 0.039 166)",
+          "oklch(59% 0.040 166)",
+          "oklch(70% 0.034 166)",
+          "oklch(82% 0.028 166)",
+          "oklch(95% 0.021 166)"
+        ]
+      },
+      "desk-3": {
+        "role": "primary",
+        "displayName": "Desk Green Sunk",
+        "canonical": "oklch(32.3% 0.032 163)",
+        "tonalRamp": [
+          "oklch(15% 0.016 163)",
+          "oklch(26% 0.020 163)",
+          "oklch(37% 0.025 163)",
+          "oklch(48% 0.029 163)",
+          "oklch(59% 0.031 163)",
+          "oklch(70% 0.026 163)",
+          "oklch(82% 0.021 163)",
+          "oklch(95% 0.016 163)"
+        ]
+      },
+      "desk-ink": {
+        "role": "primary",
+        "displayName": "Desk Ink",
+        "canonical": "oklch(93.8% 0.012 157)",
+        "tonalRamp": [
+          "oklch(15% 0.010 157)",
+          "oklch(26% 0.012 157)",
+          "oklch(37% 0.012 157)",
+          "oklch(48% 0.012 157)",
+          "oklch(59% 0.012 157)",
+          "oklch(70% 0.012 157)",
+          "oklch(82% 0.012 157)",
+          "oklch(95% 0.010 157)"
+        ]
+      },
+      "desk-mute": {
+        "role": "primary",
+        "displayName": "Desk Mute",
+        "canonical": "oklch(80.1% 0.028 161)",
+        "tonalRamp": [
+          "oklch(15% 0.014 161)",
+          "oklch(26% 0.018 161)",
+          "oklch(37% 0.022 161)",
+          "oklch(48% 0.026 161)",
+          "oklch(59% 0.027 161)",
+          "oklch(70% 0.023 161)",
+          "oklch(82% 0.019 161)",
+          "oklch(95% 0.014 161)"
+        ]
+      },
+      "canary": {
+        "role": "secondary",
+        "displayName": "Canary Teleprinter",
+        "canonical": "oklch(90.7% 0.142 103)",
+        "tonalRamp": [
+          "oklch(15% 0.070 103)",
+          "oklch(26% 0.090 103)",
+          "oklch(37% 0.110 103)",
+          "oklch(48% 0.130 103)",
+          "oklch(59% 0.135 103)",
+          "oklch(70% 0.115 103)",
+          "oklch(82% 0.093 103)",
+          "oklch(95% 0.070 103)"
+        ]
+      },
+      "canary-paper": {
+        "role": "secondary",
+        "displayName": "Canary Slip Paper",
+        "canonical": "oklch(95.7% 0.075 101)",
+        "tonalRamp": [
+          "oklch(15% 0.037 101)",
+          "oklch(26% 0.047 101)",
+          "oklch(37% 0.058 101)",
+          "oklch(48% 0.068 101)",
+          "oklch(59% 0.071 101)",
+          "oklch(70% 0.060 101)",
+          "oklch(82% 0.049 101)",
+          "oklch(95% 0.037 101)"
+        ]
+      },
+      "canary-edge": {
+        "role": "secondary",
+        "displayName": "Canary Edge",
+        "canonical": "oklch(85.7% 0.141 102)",
+        "tonalRamp": [
+          "oklch(15% 0.069 102)",
+          "oklch(26% 0.089 102)",
+          "oklch(37% 0.109 102)",
+          "oklch(48% 0.129 102)",
+          "oklch(59% 0.134 102)",
+          "oklch(70% 0.114 102)",
+          "oklch(82% 0.093 102)",
+          "oklch(95% 0.069 102)"
+        ]
+      },
+      "pink": {
+        "role": "tertiary",
+        "displayName": "Correction Pink",
+        "canonical": "oklch(66.7% 0.169 11)",
+        "tonalRamp": [
+          "oklch(15% 0.083 11)",
+          "oklch(26% 0.107 11)",
+          "oklch(37% 0.131 11)",
+          "oklch(48% 0.154 11)",
+          "oklch(59% 0.161 11)",
+          "oklch(70% 0.137 11)",
+          "oklch(82% 0.111 11)",
+          "oklch(95% 0.083 11)"
+        ]
+      },
+      "pink-ink": {
+        "role": "tertiary",
+        "displayName": "Correction Pink Ink",
+        "canonical": "oklch(51.7% 0.167 13)",
+        "tonalRamp": [
+          "oklch(15% 0.082 13)",
+          "oklch(26% 0.105 13)",
+          "oklch(37% 0.129 13)",
+          "oklch(48% 0.152 13)",
+          "oklch(59% 0.158 13)",
+          "oklch(70% 0.135 13)",
+          "oklch(82% 0.110 13)",
+          "oklch(95% 0.082 13)"
+        ]
+      },
+      "pink-wash": {
+        "role": "tertiary",
+        "displayName": "Pink Wash",
+        "canonical": "oklch(94.5% 0.022 4)",
+        "tonalRamp": [
+          "oklch(15% 0.011 4)",
+          "oklch(26% 0.014 4)",
+          "oklch(37% 0.017 4)",
+          "oklch(48% 0.020 4)",
+          "oklch(59% 0.021 4)",
+          "oklch(70% 0.018 4)",
+          "oklch(82% 0.015 4)",
+          "oklch(95% 0.011 4)"
+        ]
+      },
+      "pos": {
+        "role": "tertiary",
+        "displayName": "Ledger Green",
+        "canonical": "oklch(47.9% 0.078 161)",
+        "tonalRamp": [
+          "oklch(15% 0.038 161)",
+          "oklch(26% 0.049 161)",
+          "oklch(37% 0.060 161)",
+          "oklch(48% 0.071 161)",
+          "oklch(59% 0.074 161)",
+          "oklch(70% 0.063 161)",
+          "oklch(82% 0.051 161)",
+          "oklch(95% 0.038 161)"
+        ]
+      },
+      "amber": {
+        "role": "tertiary",
+        "displayName": "Amber",
+        "canonical": "oklch(72.2% 0.142 80)",
+        "tonalRamp": [
+          "oklch(15% 0.070 80)",
+          "oklch(26% 0.090 80)",
+          "oklch(37% 0.110 80)",
+          "oklch(48% 0.130 80)",
+          "oklch(59% 0.135 80)",
+          "oklch(70% 0.115 80)",
+          "oklch(82% 0.093 80)",
+          "oklch(95% 0.070 80)"
+        ]
+      },
+      "amber-ink": {
+        "role": "tertiary",
+        "displayName": "Amber Ink",
+        "canonical": "oklch(48.3% 0.099 73)",
+        "tonalRamp": [
+          "oklch(15% 0.049 73)",
+          "oklch(26% 0.063 73)",
+          "oklch(37% 0.076 73)",
+          "oklch(48% 0.090 73)",
+          "oklch(59% 0.094 73)",
+          "oklch(70% 0.080 73)",
+          "oklch(82% 0.065 73)",
+          "oklch(95% 0.049 73)"
+        ]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Newsprint Ground",
+        "canonical": "oklch(94.3% 0.009 113)",
+        "tonalRamp": [
+          "oklch(15% 0.009 113)",
+          "oklch(26% 0.009 113)",
+          "oklch(37% 0.009 113)",
+          "oklch(48% 0.009 113)",
+          "oklch(59% 0.009 113)",
+          "oklch(70% 0.009 113)",
+          "oklch(82% 0.009 113)",
+          "oklch(95% 0.009 113)"
+        ]
+      },
+      "sheet": {
+        "role": "neutral",
+        "displayName": "Sheet White",
+        "canonical": "oklch(100.0% 0.000 90)",
+        "tonalRamp": [
+          "oklch(15% 0.000 90)",
+          "oklch(26% 0.000 90)",
+          "oklch(37% 0.000 90)",
+          "oklch(48% 0.000 90)",
+          "oklch(59% 0.000 90)",
+          "oklch(70% 0.000 90)",
+          "oklch(82% 0.000 90)",
+          "oklch(95% 0.000 90)"
+        ]
+      },
+      "sheet-2": {
+        "role": "neutral",
+        "displayName": "Off Sheet",
+        "canonical": "oklch(97.2% 0.007 107)",
+        "tonalRamp": [
+          "oklch(15% 0.007 107)",
+          "oklch(26% 0.007 107)",
+          "oklch(37% 0.007 107)",
+          "oklch(48% 0.007 107)",
+          "oklch(59% 0.007 107)",
+          "oklch(70% 0.007 107)",
+          "oklch(82% 0.007 107)",
+          "oklch(95% 0.007 107)"
+        ]
+      },
+      "rule": {
+        "role": "neutral",
+        "displayName": "Rule",
+        "canonical": "oklch(87.3% 0.011 112)",
+        "tonalRamp": [
+          "oklch(15% 0.010 112)",
+          "oklch(26% 0.011 112)",
+          "oklch(37% 0.011 112)",
+          "oklch(48% 0.011 112)",
+          "oklch(59% 0.011 112)",
+          "oklch(70% 0.011 112)",
+          "oklch(82% 0.011 112)",
+          "oklch(95% 0.010 112)"
+        ]
+      },
+      "rule-2": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(91.9% 0.009 113)",
+        "tonalRamp": [
+          "oklch(15% 0.009 113)",
+          "oklch(26% 0.009 113)",
+          "oklch(37% 0.009 113)",
+          "oklch(48% 0.009 113)",
+          "oklch(59% 0.009 113)",
+          "oklch(70% 0.009 113)",
+          "oklch(82% 0.009 113)",
+          "oklch(95% 0.009 113)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Carbon Ink",
+        "canonical": "oklch(23.5% 0.008 264)",
+        "tonalRamp": [
+          "oklch(15% 0.008 264)",
+          "oklch(26% 0.008 264)",
+          "oklch(37% 0.008 264)",
+          "oklch(48% 0.008 264)",
+          "oklch(59% 0.008 264)",
+          "oklch(70% 0.008 264)",
+          "oklch(82% 0.008 264)",
+          "oklch(95% 0.008 264)"
+        ]
+      },
+      "mute": {
+        "role": "neutral",
+        "displayName": "Mute",
+        "canonical": "oklch(47.7% 0.014 153)",
+        "tonalRamp": [
+          "oklch(15% 0.010 153)",
+          "oklch(26% 0.013 153)",
+          "oklch(37% 0.014 153)",
+          "oklch(48% 0.014 153)",
+          "oklch(59% 0.014 153)",
+          "oklch(70% 0.014 153)",
+          "oklch(82% 0.013 153)",
+          "oklch(95% 0.010 153)"
+        ]
+      },
+      "faint": {
+        "role": "neutral",
+        "displayName": "Faint",
+        "canonical": "oklch(49.9% 0.013 150)",
+        "tonalRamp": [
+          "oklch(15% 0.010 150)",
+          "oklch(26% 0.013 150)",
+          "oklch(37% 0.013 150)",
+          "oklch(48% 0.013 150)",
+          "oklch(59% 0.013 150)",
+          "oklch(70% 0.013 150)",
+          "oklch(82% 0.013 150)",
+          "oklch(95% 0.010 150)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "The paper equity figure only."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "View title in the sticky header."
+      },
+      "wire-headline": {
+        "displayName": "Wire Headline",
+        "purpose": "Headline on each slip; empty-state titles."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Sheet and table headings."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "All UI text and figures, tabular."
+      },
+      "slug": {
+        "displayName": "Slug",
+        "purpose": "ASSET-EVENT · SOURCE · time above each headline, uppercase; unread counter and rail flags."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Glance panel headings and table column headers, uppercase."
+      },
+      "stamp": {
+        "displayName": "Stamp",
+        "purpose": "Stamp verdicts, uppercase, with a 12px sentence-case line beneath."
+      }
+    },
+    "shadows": [
+      {
+        "name": "paper",
+        "value": "0 1px 2px rgba(28,30,34,.07), 0 3px 10px rgba(28,30,34,.05)",
+        "purpose": "Slips, sheets, notices."
+      },
+      {
+        "name": "trace-ring",
+        "value": "0 0 0 2px #2F4A3F, 0 1px 2px rgba(28,30,34,.07), 0 3px 10px rgba(28,30,34,.05)",
+        "purpose": "A slip that sources the traced position."
+      },
+      {
+        "name": "focus-banner",
+        "value": "0 6px 14px rgba(28,30,34,.12)",
+        "purpose": "The sticky trace banner only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-desk",
+        "value": "cubic-bezier(.16,1,.3,1)",
+        "purpose": "All authored motion."
+      },
+      {
+        "name": "slip-feed",
+        "value": "620ms clip-path inset(0 0 100% 0) to inset(0) with translateY(-8px) to 0",
+        "purpose": "A new slip feeds off the teleprinter."
+      },
+      {
+        "name": "stamp-thunk",
+        "value": "420ms, delay 360ms, scale(1.35) rotate(-9deg) opacity 0 to rotate(-2.5deg)",
+        "purpose": "The stamp lands on an arriving slip."
+      },
+      {
+        "name": "heartbeat",
+        "value": "2.4s infinite ring pulse, 0 to 7px",
+        "purpose": "Bot-alive dot; the only loop."
+      },
+      {
+        "name": "state",
+        "value": "200ms background/color",
+        "purpose": "Hover and pressed states."
+      },
+      {
+        "name": "trace-dim",
+        "value": "350ms opacity .32 + grayscale(1)",
+        "purpose": "Dimming non-source slips while tracing."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "stacked-glance",
+        "value": "1240px"
+      },
+      {
+        "name": "narrow",
+        "value": "760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Pause trading: the default inked control on the ground.",
+      "html": "<button class=\"ds-btn\"><svg viewBox=\"0 0 20 20\"><path d=\"M7 4.5v11M13 4.5v11\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"/></svg><span>Pause trading</span></button>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)} .ds-btn{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border:1.5px solid var(--ink,#1C1E22);border-radius:5px;background:transparent;color:var(--ink,#1C1E22);font:600 14px var(--sans,'Archivo Narrow',sans-serif);cursor:pointer;transition:background .2s,color .2s,transform .1s} .ds-btn:hover{background:var(--sheet,#fff)} .ds-btn:active{transform:translateY(1px)} .ds-btn:focus-visible{outline:2px solid var(--desk,#2F4A3F);outline-offset:2px} .ds-btn svg{width:16px;height:16px}"
+    },
+    {
+      "name": "Ink Button",
+      "kind": "button",
+      "refersTo": "button-ink",
+      "description": "Flatten all: the one solid carbon control in the header.",
+      "html": "<button class=\"ds-btn ds-btn-ink\"><svg viewBox=\"0 0 20 20\"><path d=\"M10 3v9M6 8.5l4 4 4-4M4 16.5h12\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg><span>Flatten all</span></button>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)} .ds-btn{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border:1.5px solid var(--ink,#1C1E22);border-radius:5px;background:transparent;color:var(--ink,#1C1E22);font:600 14px var(--sans,'Archivo Narrow',sans-serif);cursor:pointer;transition:background .2s,color .2s,transform .1s} .ds-btn:hover{background:var(--sheet,#fff)} .ds-btn:active{transform:translateY(1px)} .ds-btn:focus-visible{outline:2px solid var(--desk,#2F4A3F);outline-offset:2px} .ds-btn svg{width:16px;height:16px} .ds-btn-ink{background:var(--ink,#1C1E22);color:#fff} .ds-btn-ink:hover{background:#000}"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Confirm flatten: the second, deliberate step of a destructive action.",
+      "html": "<button class=\"ds-btn ds-btn-danger\">Confirm flatten</button> <button class=\"ds-btn ds-btn-quiet\">Cancel</button>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)} .ds-btn{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border:1.5px solid var(--ink,#1C1E22);border-radius:5px;background:transparent;color:var(--ink,#1C1E22);font:600 14px var(--sans,'Archivo Narrow',sans-serif);cursor:pointer;transition:background .2s,color .2s,transform .1s} .ds-btn:hover{background:var(--sheet,#fff)} .ds-btn:active{transform:translateY(1px)} .ds-btn:focus-visible{outline:2px solid var(--desk,#2F4A3F);outline-offset:2px} .ds-btn svg{width:16px;height:16px} .ds-btn-danger{background:var(--pink-ink,#B3304C);border-color:var(--pink-ink,#B3304C);color:#fff} .ds-btn-danger:hover{background:#962640} .ds-btn-quiet{border-color:transparent} .ds-btn-quiet:hover{background:var(--rule-2,#E4E5DE)}"
+    },
+    {
+      "name": "Stamps",
+      "kind": "custom",
+      "refersTo": "stamp-run-buy",
+      "description": "The five verdict stamps; the system's signature device.",
+      "html": "<span class=\"ds-stamp buy\">Run · Buy<small>BTC</small></span><span class=\"ds-stamp sell\">Run · Sell<small>SOL</small></span><span class=\"ds-stamp alert\">Alert<small>hack</small></span><span class=\"ds-stamp filed\">Filed<small>+0.36 BTC</small></span><span class=\"ds-stamp spiked\">Spiked<small>opinion / recap</small></span>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)} .ds-stamp{display:inline-block;min-width:118px;border:2px solid currentColor;border-radius:3px;padding:6px 10px 7px;text-align:center;font:700 14px/1.15 var(--sans,'Archivo Narrow',sans-serif);letter-spacing:.09em;text-transform:uppercase;transform:rotate(-2.5deg);color:var(--mute,#575F59);margin:6px} .ds-stamp small{display:block;font:600 12px var(--sans,'Archivo Narrow',sans-serif);letter-spacing:.02em;text-transform:none;margin-top:2px} .ds-stamp.buy{color:var(--pos,#2F6B4F)} .ds-stamp.sell{color:var(--pink-ink,#B3304C)} .ds-stamp.alert{color:#fff;background:var(--pink-ink,#B3304C);border-color:var(--pink-ink,#B3304C)} .ds-stamp.filed{color:var(--pos,#2F6B4F);background:rgba(47,107,79,.07)} .ds-stamp.spiked{color:var(--faint,#5E655F);border-style:dashed} .ds-stamp:hover{animation:ds-thunk .42s var(--ease,cubic-bezier(.16,1,.3,1)) both} @keyframes ds-thunk{from{transform:scale(1.35) rotate(-9deg);opacity:0}to{transform:rotate(-2.5deg);opacity:1}}"
+    },
+    {
+      "name": "Wire Slip",
+      "kind": "card",
+      "refersTo": "slip",
+      "description": "One headline as copy: slug, wire headline, Jev's reading, outcome and stamp. Unread slips sit on canary paper.",
+      "html": "<div class=\"ds-slips\"><article class=\"ds-slip unread\"><div class=\"ds-slug\"><span class=\"ds-new\">New</span>SOL-HACK · COINDESK · 02:31 AM</div><h2>Solana DEX drained of $40M in exploit</h2><p class=\"ds-reading\"><b>hack</b> 0.94 · sentiment <b>−0.88</b> · new fact <b>0.97</b></p><p class=\"ds-outcome sell\">→ Paper sell 7.74 SOL @ 148.15</p><span class=\"ds-stamp sell\">Run · Sell<small>SOL</small></span></article><article class=\"ds-slip\"><div class=\"ds-slug\">MKT-NOISE · COINTELEGRAPH · 01:37 AM</div><h2>Here’s what happened in crypto today</h2><p class=\"ds-reading\"><b>noise</b> 0.97 · new fact <b>0.12</b></p><span class=\"ds-stamp spiked\">Spiked<small>opinion / recap</small></span></article></div>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)} .ds-stamp{display:inline-block;min-width:118px;border:2px solid currentColor;border-radius:3px;padding:6px 10px 7px;text-align:center;font:700 14px/1.15 var(--sans,'Archivo Narrow',sans-serif);letter-spacing:.09em;text-transform:uppercase;transform:rotate(-2.5deg);color:var(--mute,#575F59);margin:6px} .ds-stamp small{display:block;font:600 12px var(--sans,'Archivo Narrow',sans-serif);letter-spacing:.02em;text-transform:none;margin-top:2px} .ds-stamp.buy{color:var(--pos,#2F6B4F)} .ds-stamp.sell{color:var(--pink-ink,#B3304C)} .ds-stamp.alert{color:#fff;background:var(--pink-ink,#B3304C);border-color:var(--pink-ink,#B3304C)} .ds-stamp.filed{color:var(--pos,#2F6B4F);background:rgba(47,107,79,.07)} .ds-stamp.spiked{color:var(--faint,#5E655F);border-style:dashed} .ds-stamp:hover{animation:ds-thunk .42s var(--ease,cubic-bezier(.16,1,.3,1)) both} @keyframes ds-thunk{from{transform:scale(1.35) rotate(-9deg);opacity:0}to{transform:rotate(-2.5deg);opacity:1}} .ds-slips{display:flex;flex-direction:column;gap:10px;background:var(--ground,#ECEDE6);padding:14px} .ds-slip{position:relative;background:var(--sheet,#fff);border-radius:3px;box-shadow:var(--shadow);padding:14px 18px 14px 20px;display:grid;grid-template-columns:minmax(0,1fr) 140px;gap:4px 22px;color:var(--ink,#1C1E22);font:450 14px/1.45 var(--sans,'Archivo Narrow',sans-serif);transition:background .35s} .ds-slip.unread{background:var(--canary-paper,#FBF3B9)} .ds-slip:hover{box-shadow:0 0 0 2px var(--desk,#2F4A3F),var(--shadow)} .ds-slug{font:700 12px var(--mono,monospace);letter-spacing:.06em;color:var(--mute,#575F59);text-transform:uppercase;display:flex;gap:8px} .ds-new{background:var(--ink,#1C1E22);color:var(--canary,#F2E46B);padding:0 5px;border-radius:2px} .ds-slip h2{font:700 18px/1.28 var(--mono,monospace);letter-spacing:-.01em;margin:0} .ds-reading{margin:0;font-size:13.5px;color:var(--mute,#575F59)} .ds-reading b{color:var(--ink,#1C1E22);font-weight:600} .ds-outcome{margin:0;font-weight:600} .ds-outcome.sell{color:var(--pink-ink,#B3304C)} .ds-slip .ds-stamp{grid-row:1/span 4;grid-column:2;align-self:start;justify-self:end;margin:0}"
+    },
+    {
+      "name": "Rail Navigation",
+      "kind": "nav",
+      "refersTo": "rail-nav-item",
+      "description": "Desk-green rail with wordmark, views and the heartbeat footer.",
+      "html": "<nav class=\"ds-rail\"><a class=\"ds-mark\" href=\"#\">JEV/WIRE</a><a class=\"ds-nav\" href=\"#\" aria-current=\"page\"><svg viewBox=\"0 0 20 20\" width=\"18\" height=\"18\"><path d=\"M5 3h10v4H5zM3 9h14v4H3zM5 15h10v2H5z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\" stroke-linejoin=\"round\"/></svg>Wire</a><a class=\"ds-nav\" href=\"#\">Run list</a><a class=\"ds-nav\" href=\"#\">Pipeline</a><div class=\"ds-beat\"><span class=\"ds-dot\"></span><strong>Bot alive</strong><span class=\"ds-flag\">Synthetic data</span><span class=\"ds-paper\">Paper trading</span></div></nav>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)}  .ds-rail{width:200px;background:var(--desk,#2F4A3F);color:var(--desk-ink,#E4EDE7);display:flex;flex-direction:column;gap:2px;padding:22px 14px 18px;font:500 15px var(--sans,'Archivo Narrow',sans-serif)} .ds-mark{font:700 19px var(--mono,monospace);color:var(--canary,#F2E46B);text-decoration:none;padding:0 10px 26px} .ds-nav{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:6px;color:var(--desk-mute,#AFC4B8);text-decoration:none;transition:background .2s,color .2s} .ds-nav:hover{background:var(--desk-3,#24392F);color:var(--desk-ink,#E4EDE7)} .ds-nav:focus-visible{outline:2px solid var(--canary,#F2E46B);outline-offset:2px} .ds-nav[aria-current=page]{background:var(--desk-2,#3B5A4D);color:#fff} .ds-nav[aria-current=page] svg{color:var(--canary,#F2E46B)} .ds-beat{margin-top:24px;padding:14px 10px 0;border-top:1px solid var(--desk-2,#3B5A4D);display:flex;flex-direction:column;gap:4px;font-size:13px} .ds-dot{width:9px;height:9px;border-radius:50%;background:#7FD3A4;animation:ds-beat 2.4s var(--ease) infinite} .ds-beat strong{color:#fff;font-weight:600} .ds-flag{align-self:flex-start;font:700 11px var(--mono,monospace);letter-spacing:.08em;text-transform:uppercase;color:#fff;background:var(--pink-ink,#B3304C);padding:2px 6px;border-radius:2px} .ds-paper{font:700 11px var(--mono,monospace);letter-spacing:.08em;text-transform:uppercase;color:var(--canary,#F2E46B)} @keyframes ds-beat{0%{box-shadow:0 0 0 0 rgba(127,211,164,.55)}70%{box-shadow:0 0 0 7px rgba(127,211,164,0)}100%{box-shadow:0 0 0 0 rgba(127,211,164,0)}}"
+    },
+    {
+      "name": "Filter Tabs",
+      "kind": "chip",
+      "refersTo": "filter-tabs",
+      "description": "Segmented filter over the wire with counts.",
+      "html": "<div class=\"ds-tabs\"><button aria-pressed=\"true\">All<span>15</span></button><button aria-pressed=\"false\">Ran<span>3</span></button><button aria-pressed=\"false\">Filed<span>6</span></button><button aria-pressed=\"false\">Spiked<span>6</span></button></div> <span class=\"ds-unread\">1 unread</span>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)}  .ds-tabs{display:inline-flex;background:var(--rule-2,#E4E5DE);border-radius:6px;padding:3px} .ds-tabs button{border:0;background:none;padding:6px 12px;border-radius:4px;font:600 14px var(--sans,'Archivo Narrow',sans-serif);color:var(--mute,#575F59);cursor:pointer;transition:background .2s,color .2s} .ds-tabs button:hover{color:var(--ink,#1C1E22)} .ds-tabs button:focus-visible{outline:2px solid var(--desk,#2F4A3F);outline-offset:2px} .ds-tabs button[aria-pressed=true]{background:var(--sheet,#fff);color:var(--ink,#1C1E22);box-shadow:0 1px 2px rgba(0,0,0,.08)} .ds-tabs span{font-weight:500;color:var(--faint,#5E655F);margin-left:4px} .ds-unread{font:700 12px var(--mono,monospace);background:var(--canary,#F2E46B);padding:2px 7px;border-radius:3px;margin-left:10px}"
+    },
+    {
+      "name": "Asset Select",
+      "kind": "input",
+      "refersTo": "select",
+      "description": "The asset filter on the wire toolbar.",
+      "html": "<select class=\"ds-select\"><option>All assets</option><option>BTC</option><option>ETH</option><option>SOL</option></select>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)}  .ds-select{font:600 14px var(--sans,'Archivo Narrow',sans-serif);padding:6px 30px 6px 10px;border:1.5px solid var(--rule,#D5D6CE);border-radius:5px;background:var(--sheet,#fff) url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%231C1E22' stroke-width='1.6'/%3E%3C/svg%3E\") no-repeat right 10px center;appearance:none;color:var(--ink,#1C1E22);transition:border-color .2s} .ds-select:hover{border-color:var(--mute,#575F59)} .ds-select:focus-visible{outline:2px solid var(--desk,#2F4A3F);outline-offset:2px}"
+    },
+    {
+      "name": "Pipeline Health Grid",
+      "kind": "custom",
+      "refersTo": "table-sheet",
+      "description": "Per-stage health cells with status dots.",
+      "html": "<div class=\"ds-hl\"><div class=\"ds-row\"><i class=\"ds-sdot\"></i><b>Feeds</b><span>3/3 sources · 41 items</span></div><div class=\"ds-row\"><i class=\"ds-sdot skipped\"></i><b>Jev</b><span>no new headlines</span></div><div class=\"ds-row\"><i class=\"ds-sdot degraded\"></i><b>Prices</b><span>1 pair late</span></div><div class=\"ds-row\"><i class=\"ds-sdot error\"></i><b>Execution</b><span>order rejected</span></div></div>",
+      "css": ":host{--desk:#2F4A3F;--desk-2:#3B5A4D;--desk-3:#24392F;--desk-ink:#E4EDE7;--desk-mute:#AFC4B8;--ground:#ECEDE6;--sheet:#FFFFFF;--sheet-2:#F6F6F1;--rule:#D5D6CE;--rule-2:#E4E5DE;--ink:#1C1E22;--mute:#575F59;--faint:#5E655F;--canary:#F2E46B;--canary-paper:#FBF3B9;--pink:#E8607A;--pink-ink:#B3304C;--pink-wash:#FBE7EB;--pos:#2F6B4F;--amber:#D39A1E;--mono:'Courier Prime',ui-monospace,monospace;--sans:'Archivo Narrow','Arial Narrow',sans-serif;--shadow:0 1px 2px rgba(28,30,34,.07),0 3px 10px rgba(28,30,34,.05);--ease:cubic-bezier(.16,1,.3,1)}  .ds-hl{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule-2,#E4E5DE);border:1px solid var(--rule-2,#E4E5DE);border-radius:4px;overflow:hidden;max-width:360px} .ds-row{display:grid;grid-template-columns:12px minmax(0,1fr);gap:0 7px;padding:6px 10px;background:var(--sheet,#fff);font:450 13px var(--sans,'Archivo Narrow',sans-serif);color:var(--ink,#1C1E22);transition:background .2s} .ds-row:hover{background:var(--sheet-2,#F6F6F1)} .ds-row b{font-weight:600} .ds-row span{grid-column:2;color:var(--mute,#575F59);font-size:12.5px} .ds-sdot{width:9px;height:9px;border-radius:50%;background:var(--pos,#2F6B4F);display:inline-block;transform:translateY(1px)} .ds-sdot.degraded{background:var(--amber,#D39A1E)} .ds-sdot.error{background:var(--pink-ink,#B3304C)} .ds-sdot.skipped{background:transparent;box-shadow:inset 0 0 0 1.5px var(--faint,#5E655F)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Wire Desk",
+    "overview": "**Creative North Star: \"The Wire Desk\"**\n\nThe interface is a newsroom slot desk, not a trading terminal. Headlines arrive as copy on canary teleprinter paper, the operator reads them, and the slot editor (the bot) either runs each one into a trade or spikes it. Every verdict is a rubber stamp in the margin of the slip. The world sits on a cool newsprint ground with white sheets laid on it and a desk-green rail along the left edge; ink is carbon black, corrections are pink.\n\nDensity is working-desk density: a light, all-day tab that reads at a glance (is the bot alive, what ran, what needs attention) and rewards a closer look (each position traces back to its source slips). Type is split between the copy (Courier Prime, a typewriter face for slugs and wire headlines) and the desk (Archivo Narrow with tabular figures for every piece of UI and every number). Color is semantic and scarce: canary means unread, green means it ran long or was filed, pink means an exit, an alert, or a warning about the data itself.\n\nThe world explicitly rejects the category default: a charcoal dashboard of KPI tiles with green/red numbers over a log tail.",
+    "keyCharacteristics": [
+      "Cool newsprint ground, white paper sheets, desk-green rail.",
+      "Canary paper is reserved for unread copy.",
+      "Verdicts are rotated rubber stamps, the system's signature device.",
+      "Typewriter face for copy, narrow grotesque with tabular figures for everything else.",
+      "One authored motion moment: a slip feeds off the teleprinter and its stamp thunks down."
+    ],
+    "rules": [
+      {
+        "name": "The Canary Means Unread Rule",
+        "body": "Canary paper fills a slip only while the operator has not seen it. It is never used to signal importance, profit or warning tone on a slip.",
+        "section": "colors"
+      },
+      {
+        "name": "The Stamp Tells Rule",
+        "body": "Whether copy ran, was filed or was spiked is told by its stamp, not by the slip's fill, border or a colored stripe.",
+        "section": "colors"
+      },
+      {
+        "name": "The Correction Pen Rule",
+        "body": "Pink marks exits, alerts, sell stamps and warnings about the data's honesty. It is never decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Copy/Desk Split Rule",
+        "body": "Courier Prime is for wire copy only: slugs, wire headlines, the wordmark, code and small flags. Every control, number and label is Archivo Narrow with tabular figures.",
+        "section": "typography"
+      },
+      {
+        "name": "The Three-Column Desk Rule",
+        "body": "Rail for where you are and whether the bot lives, work column for copy, glance column for state. A new view goes into the work column; it never adds a fourth column.",
+        "section": "layout"
+      },
+      {
+        "name": "The Paper Sheet Rule",
+        "body": "One soft shadow for every sheet. No hard offset shadows, no glows, no stacked elevations.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Rubber Stamp Rule",
+        "body": "A stamp is a 2px currentColor box, 3px corners, uppercase tracked caps, rotated -2.5deg. It is the only rotated element in the system.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "**Do** tell every verdict with a stamp from the five-stamp vocabulary (RUN · BUY, RUN · SELL, ALERT, FILED, SPIKED).",
+      "**Do** keep canary slip paper for unread copy and clear it the moment the slip is seen.",
+      "**Do** set wire copy in Courier Prime and every number in Archivo Narrow with tabular figures.",
+      "**Do** put paper sheets on the newsprint ground with the single Paper shadow.",
+      "**Do** label synthetic data and paper trading in the rail and in a pink-wash notice whenever they apply.",
+      "**Do** trace by dimming: selected sources keep color and gain the desk ring, the rest go to 32% grayscale."
+    ],
+    "donts": [
+      "**Don't** build charcoal KPI-tile dashboards or hero-metric tiles; state lives in the glance column as plain figures and rows.",
+      "**Don't** add eyebrow or kicker labels above headings.",
+      "**Don't** mark slips with colored side stripes or tinted borders; the stamp carries the outcome.",
+      "**Don't** use canary for emphasis, or pink for decoration.",
+      "**Don't** rotate anything except stamps, and don't animate anything beyond the feed-and-thunk moment, state transitions and the heartbeat.",
+      "**Don't** use hard offset shadows or glows."
+    ]
+  }
+}

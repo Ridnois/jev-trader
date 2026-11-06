@@ -1,0 +1,92 @@
+loop_interval_secs = 60
+data_dir = "data"
+
+[jev]
+model = "jev-latest"
+concurrency = 8
+timeout_ms = 3000
+# max_attempts = 5            # per headline, with exponential backoff, then spiked
+# breaker_ticks = 10          # Jev circuit breaker: >50% failed calls over 10 ticks
+# breaker_fail_ratio = 0.5    #   (with at least breaker_min_calls) blocks entries
+# breaker_min_calls = 4
+
+[market]
+# Binance public market-data mirror (no API key needed).
+base_url = "https://data-api.binance.vision"
+interval = "1h"
+momentum_window = 20      # close vs 20-candle SMA
+
+[news]
+feeds = [
+  "https://www.coindesk.com/arc/outboundfeeds/rss/",
+  "https://cointelegraph.com/rss",
+  "https://decrypt.co/feed",
+]
+max_age_hours = 6.0       # ignore older items on first sight
+half_life_hours = 2.0     # news influence halves every 2h
+retain_hours = 48.0
+# dedupe_clusters = false     # count a same-story cluster once instead of once per outlet
+# cluster_jev_check = true    # ask Jev about borderline duplicates (metadata only)
+# [news.event_weight]         # e.g. listing = 0.0 (only after the report backs it)
+# [news.source_weight]
+
+[strategy]
+news_entry = 0.30         # news score needed to go long (with positive momentum)
+news_exit = 0.30          # news score below -0.30 forces exit
+# min_clusters = 1        # independent positive stories needed before an entry
+# reaction_gate = false   # block entries when positive news keeps failing to lift price
+# reaction_min_clusters = 3
+# reaction_z = -1.5
+
+[risk]
+max_asset_weight = 0.20   # max 20% of equity per asset
+max_gross = 0.60          # max 60% invested in total
+stop_loss_pct = 0.04      # exit if 4% below average entry
+daily_loss_limit_pct = 0.03  # go flat for the day after -3%
+cooldown_hours = 6.0      # no re-entry after a stop
+min_trade_usd = 10.0
+rebalance_band = 0.02     # ignore changes < 2% of equity
+# --- Optimization-plan knobs. Every default reproduces the original strategy. ---
+# sizing = "fixed"        # "vol": weight = news_score × risk_per_trade / stop distance
+# risk_per_trade = 0.005
+# stop = "fixed_pct"      # "atr": stop = stop_atr_mult × ATR14 (set from the report's MAE data)
+# stop_atr_mult = 2.0
+# max_heat = 0.024        # Σ weight × stop distance; default = max_gross × stop_loss_pct
+# weekly_loss_limit_pct = 0.05    # halts block entries, never force a sale (off unless set)
+# monthly_loss_limit_pct = 0.08
+# losing_streak_n = 2             # N losing round trips → no entries for streak_cooldown_hours
+# streak_cooldown_hours = 24.0
+
+[paper]
+starting_cash = 10000.0
+fee_rate = 0.001          # 0.1% taker
+slippage_rate = 0.0005    # 5 bps
+
+# [regime]                    # crypto market regime, refreshed hourly (keyless sources)
+# enabled = true
+# mode = "off"                # "off" = record and display only; "ceiling" | "block" after evidence
+
+# [challenge]                 # one adversarial Jev call before an entry
+# enabled = false
+# threshold = 0.7
+# action = "block"            # or "halve"
+
+# [settle]                    # score headlines / decisions / blocked entries after the fact
+# enabled = true
+# horizons = [1, 4, 24]
+# benchmark = "BTC"
+
+[[assets]]
+symbol = "BTC"
+name = "Bitcoin"
+pair = "BTCUSDT"
+
+[[assets]]
+symbol = "ETH"
+name = "Ethereum"
+pair = "ETHUSDT"
+
+[[assets]]
+symbol = "SOL"
+name = "Solana"
+pair = "SOLUSDT"

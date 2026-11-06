@@ -1,0 +1,79 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..800&display=swap" rel="stylesheet">
+<style>
+:root{--sea:#E6EEF1;--sea2:#D8E3E8;--ink:#15263B;--mute:#5B6B7C;--warm:#D2462F;--cold:#2E57C9;--line:#B9C8D1;--amber:#C98A12}
+*{box-sizing:border-box;margin:0}
+body{width:1440px;height:900px;overflow:hidden;background:var(--sea);color:var(--ink);font:14px/1.4 Archivo,sans-serif;font-variant-numeric:tabular-nums;display:grid;grid-template-columns:200px 1fr 340px}
+nav{background:var(--ink);color:#DCE6EC;padding:24px 18px;display:flex;flex-direction:column;gap:4px}
+nav b{font-stretch:75%;font-size:20px;letter-spacing:.02em;margin-bottom:28px;color:#fff}
+nav a{padding:9px 12px;border-radius:6px;color:#AFC0CC;text-decoration:none}
+nav a.on{background:#24395A;color:#fff}
+nav .foot{margin-top:auto;font-size:12px;color:#8FA3B3}
+nav .foot i{display:inline-block;width:8px;height:8px;border-radius:50%;background:#4CC38A;margin-right:6px}
+main{padding:28px 32px;display:flex;flex-direction:column;gap:22px}
+.top{display:flex;align-items:flex-end;gap:40px}
+.eq small{display:block;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute)}
+.eq strong{font-size:84px;font-weight:700;font-stretch:80%;line-height:.9;letter-spacing:-.02em}
+.eq em{font-style:normal;color:var(--warm);font-weight:600;margin-left:10px}
+.top svg{flex:1;height:70px}
+.btns{display:flex;gap:10px}
+button{font:600 13px Archivo;padding:10px 16px;border-radius:6px;border:1px solid var(--ink);background:transparent;color:var(--ink)}
+button.k{background:var(--ink);color:#fff}
+.areas{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+.area{border-top:2px solid var(--ink);padding-top:12px}
+.area h3{display:flex;justify-content:space-between;font-size:22px;font-stretch:80%}
+.area h3 span{font-size:14px;font-stretch:100%;color:var(--mute);font-weight:500}
+.fc{font-size:14px;margin:8px 0 10px;min-height:60px}
+.fc b{font-weight:700}
+.area svg{width:100%;height:120px;background:var(--sea2);border-radius:4px}
+.area .row{display:flex;justify-content:space-between;font-size:12px;color:var(--mute);margin-top:8px}
+.area.alert{opacity:1}.area.alert h3{color:var(--cold)}
+.log{border-top:1px solid var(--line);padding-top:10px}
+.log .head{display:flex;justify-content:space-between;font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td{padding:7px 4px;border-bottom:1px solid var(--line)}
+td.t{color:var(--mute);width:60px}
+.tag{font-size:11px;font-weight:700;padding:2px 6px;border-radius:3px;background:#fff}
+aside{background:#F2F6F8;border-left:1px solid var(--line);padding:28px 24px}
+aside h4{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute);margin-bottom:14px}
+.st{display:grid;grid-template-columns:14px 1fr auto;gap:10px;padding:11px 0;border-bottom:1px solid var(--line)}
+.st i{width:10px;height:10px;border-radius:50%;background:#2E9D6A;margin-top:4px}
+.st.deg i{background:var(--amber)}
+.st b{display:block}.st span{font-size:12px;color:var(--mute)}
+.st time{font-size:12px;color:var(--mute)}
+</style></head><body>
+<nav><b>JEV·TRADER</b><a class="on">Overview</a><a>Pipeline</a><a>News</a><a>Positions</a><a>Trades</a><div class="foot"><i></i>Bot alive · tick 4,112<br>PAPER · synthetic data</div></nav>
+<main>
+<div class="top">
+<div class="eq"><small>Paper equity</small><strong>$10,184.32</strong><em>+1.84% today</em></div>
+<svg viewBox="0 0 400 70" preserveAspectRatio="none"><polyline fill="none" stroke="#15263B" stroke-width="2" points="0,55 40,52 80,58 120,48 160,50 200,40 240,44 280,30 320,26 360,22 400,18"/><line x1="240" y1="0" x2="240" y2="70" stroke="#D2462F" stroke-dasharray="3 3"/></svg>
+<div class="btns"><button>Pause trading</button><button class="k">Flatten all</button></div>
+</div>
+<div class="areas">
+<div class="area"><h3>BTC <span>$80,485.80 · long 18%</span></h3>
+<p class="fc"><b>Bitcoin.</b> News southwesterly +0.42, rising. Momentum +1.8% above mean. Risk moderate. Holding long.</p>
+<svg viewBox="0 0 300 120"><path d="M0 80 C60 75 90 60 140 50 S240 40 300 35" fill="none" stroke="#15263B" stroke-width="2"/><line x1="0" y1="45" x2="300" y2="45" stroke="#9FB2BE" stroke-dasharray="4 4"/><g fill="#D2462F"><path d="M150 45a6 6 0 0 1 12 0z"/><path d="M168 45a6 6 0 0 1 12 0z"/><path d="M186 45a6 6 0 0 1 12 0z"/></g></svg>
+<div class="row"><span>entry +0.30 crossed 14:05</span><span>6 events</span></div></div>
+<div class="area alert"><h3>SOL <span>$148.22 · flat</span></h3>
+<p class="fc"><b>Solana.</b> Hack warning in force. News northerly −0.61, falling sharply. Exit executed. Cooldown until 20:10.</p>
+<svg viewBox="0 0 300 120"><path d="M0 40 C60 42 110 50 150 70 S240 95 300 100" fill="none" stroke="#15263B" stroke-width="2"/><line x1="0" y1="82" x2="300" y2="82" stroke="#9FB2BE" stroke-dasharray="4 4"/><g fill="#2E57C9"><path d="M190 82l6-10 6 10z"/><path d="M206 82l6-10 6 10z"/><path d="M222 82l6-10 6 10z"/></g></svg>
+<div class="row"><span>exit −0.30 crossed 14:10</span><span>hack · conf 0.94</span></div></div>
+<div class="area"><h3>ETH <span>$3,212.40 · flat</span></h3>
+<p class="fc"><b>Ethereum.</b> News variable +0.08. Momentum −0.4%. No signal. Waiting.</p>
+<svg viewBox="0 0 300 120"><path d="M0 62 C70 58 120 66 170 60 S250 58 300 61" fill="none" stroke="#15263B" stroke-width="2"/><line x1="0" y1="40" x2="300" y2="40" stroke="#9FB2BE" stroke-dasharray="4 4"/></svg>
+<div class="row"><span>no front in 48h</span><span>2 events</span></div></div>
+</div>
+<div class="log"><div class="head"><span>Events · 13:20 – 14:12</span><span>All assets ▾</span></div>
+<table><tr><td class="t">14:12</td><td><span class="tag">SOL</span> Solana DEX drained of $40M in exploit</td><td>hack · −0.88 · new 0.97</td></tr>
+<tr><td class="t">14:10</td><td><span class="tag">SOL</span> PAPER SELL 4.21 SOL @ 148.15 — hack alert</td><td>fill $623.71</td></tr>
+<tr><td class="t">14:05</td><td><span class="tag">BTC</span> Trump Media moves $342M in bitcoin to Crypto.com</td><td>macro · +0.36 · new 0.91</td></tr>
+<tr><td class="t">13:48</td><td><span class="tag">MKT</span> Here's what happened in crypto today</td><td>noise · ignored</td></tr></table></div>
+</main>
+<aside><h4>Station reports</h4>
+<div class="st"><i></i><div><b>Feeds</b><span>3/3 sources · 41 items</span></div><time>14:12:03</time></div>
+<div class="st deg"><i></i><div><b>Jev</b><span>p50 182ms · 1 timeout, retrying</span></div><time>14:12:04</time></div>
+<div class="st"><i></i><div><b>Prices</b><span>Binance · 3 pairs · 1h</span></div><time>14:12:04</time></div>
+<div class="st"><i></i><div><b>Signals</b><span>BTC +0.42 · ETH +0.08 · SOL −0.61</span></div><time>14:12:04</time></div>
+<div class="st"><i></i><div><b>Risk</b><span>gross 18% / 60% · day −0.4% / −3%</span></div><time>14:12:04</time></div>
+<div class="st"><i></i><div><b>Execution</b><span>1 fill this tick</span></div><time>14:12:05</time></div>
+</aside></body></html>

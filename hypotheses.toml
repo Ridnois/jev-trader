@@ -1,0 +1,148 @@
+# Hypothesis register (OPTIMIZATION-PLAN.md §4.6).
+# Every strategy change gets an entry here BEFORE it is tested. The baseline is
+# declared before results are seen. status: proposed | testing | accepted | rejected
+# `jev-trader report` lists these with their current evidence; `jev-trader backtest
+# --compare` produces the PASS / REVISE / REJECT verdict that decides them.
+
+[[hypothesis]]
+id = "H-001"
+statement = "Jev's news reading adds return beyond 1h momentum alone"
+change = "none (this is the product's core claim)"
+metric = "residual alpha of hourly strategy returns vs momentum-only, HAC t-stat"
+baseline = "momentum-only ablation (declared primary), BTC buy-and-hold (alternate)"
+pass_if = "verdict RESIDUAL_EDGE on the out-of-sample window"
+invalidate_if = "verdict BASELINE_EXPLAINED"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-002"
+statement = "Counting a same-story cluster once (instead of once per outlet) raises 4h hit rate"
+change = "news.dedupe_clusters = true"
+metric = "4h direction hit rate, out-of-sample, clustered"
+baseline = "current config"
+pass_if = "hit rate +3pp vs baseline, null percentile > 90, n >= 20 clusters"
+invalidate_if = "no hit-rate gain, or REJECT from the review gate"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-003"
+statement = "Requiring >=2 independent positive clusters before entry raises 4h hit rate"
+change = "strategy.min_clusters = 2"
+metric = "4h direction hit rate, out-of-sample, clustered"
+baseline = "current config"
+pass_if = "hit rate +5pp vs baseline, null percentile > 90, n >= 20 clusters"
+invalidate_if = "fewer trades with no hit-rate gain, or REJECT from the review gate"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-004"
+statement = "Volatility-scaled sizing with an ATR stop lowers drawdown without lowering return"
+change = "risk.sizing = \"vol\", risk.stop = \"atr\" (stop_atr_mult from the report's MAE-of-winners)"
+metric = "out-of-sample max drawdown and total return"
+baseline = "current config"
+pass_if = "max drawdown -20% relative, return not lower by more than noise"
+invalidate_if = "return falls with no drawdown gain, or REJECT"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-005"
+statement = "News-driven entries in RISK_OFF regimes fail more often (REGIME_MISMATCH pattern)"
+change = "regime.mode = \"block\""
+metric = "24h outcome tags of decisions by regime zone; counterfactual value of the regime gate"
+baseline = "current config (regime record-only)"
+pass_if = "RISK_OFF failure share beats the null with n >= 20 clusters, and review gate PASS"
+invalidate_if = "regime gate CORRECTLY_BLOCKED share not above chance"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-006"
+statement = "The adversarial challenge call blocks entries that would have failed"
+change = "challenge.enabled = true"
+metric = "counterfactual labels for gate 'challenge' at 24h"
+baseline = "current config (no challenge)"
+pass_if = "CORRECTLY_BLOCKED share > 60% with n >= 20 clusters"
+invalidate_if = "MISSED_OPPORTUNITY share >= 50%"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-007"
+statement = "When positive news has repeatedly failed to lift price, new positive news has lower expected value"
+change = "strategy.reaction_gate = true (min 3 clusters, z < -1.5)"
+metric = "4h forward return of entries blocked by 'news reaction'"
+baseline = "current config"
+pass_if = "blocked entries' mean 4h return < 0 beyond the null, n >= 20"
+invalidate_if = "blocked entries perform like unblocked ones"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-008"
+statement = "The news information coefficient peaks near 4h, not 2h"
+change = "news.half_life_hours = 4, market.momentum_window = 4"
+metric = "IC of sentiment x new_info vs z-scored forward return, by horizon"
+baseline = "current config (2h half-life, 20h SMA)"
+pass_if = "report shows IC(4h) > IC(1h) with null percentile > 90, then review gate PASS"
+invalidate_if = "IC indistinguishable from noise at every horizon"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-S01"
+statement = "Order-flow candidates (activity burst + trade-flow + book imbalance + 60s push) that pass the cost gate have positive markouts net of round-trip cost"
+change = "new `scalp` engine (config.scalp.toml); news tilts the flow threshold and vetoes only"
+metric = "mean net_bps of scalp_markouts.jsonl at 300s and 600s, taken candidates, clustered by burst"
+baseline = "zero (cost-adjusted); alternate: same candidates with the cost gate removed"
+pass_if = "mean net_bps > 0 at 600s with a block-bootstrap 90% CI above 0, n >= 100 candidates"
+invalidate_if = "mean net_bps <= 0 at both horizons with n >= 100"
+status = "testing"
+result = ""
+
+[[hypothesis]]
+id = "H-S02"
+statement = "Jev's entry review (adverse news / event risk veto, support-based sizing) improves scalper markouts"
+change = "scalp.jev_review = true vs false"
+metric = "net_bps at 600s: candidates Jev vetoed vs candidates it passed"
+baseline = "passed candidates' net_bps (vetoed ones are logged with markouts too)"
+pass_if = "vetoed candidates average at least 10 bps worse than passed ones, n >= 30 vetoes"
+invalidate_if = "no difference or vetoed candidates do better"
+status = "testing"
+result = ""
+
+[[hypothesis]]
+id = "H-S03"
+statement = "Mirrored short candidates (sellers in control, price falling) have positive markouts net of cost, like longs"
+change = "scalp.shorts = true (inventory shorts on spot)"
+metric = "mean net_bps at 600s of short candidates in scalp_markouts.jsonl (sign-corrected: a fall is a gain)"
+baseline = "zero (cost-adjusted); alternate: long candidates over the same period"
+pass_if = "mean net_bps > 0 at 600s, block-bootstrap 90% CI above 0, n >= 100 short candidates"
+invalidate_if = "mean net_bps <= 0 at both 300s and 600s with n >= 100"
+status = "testing"
+result = ""
+
+[[hypothesis]]
+id = "H-S04"
+statement = "Trailing the stop to break-even after fees once 1.5x cost in profit raises expectancy per trade"
+change = "scalp.trail_after_cost_mult = 1.5 vs 0"
+metric = "mean pnl_bps of round trips; share of trades that reached +1.5x cost and then closed at a loss (should be ~0 with trailing)"
+baseline = "replay of the same trades' entries with the original fixed stop (from the candidate's price path)"
+pass_if = "higher mean pnl_bps than the fixed-stop replay, n >= 50 trades"
+invalidate_if = "lower or equal mean pnl_bps, n >= 50"
+status = "testing"
+result = ""
+
+[[hypothesis]]
+id = "H-S05"
+statement = "Scalping the most volatile liquid pairs (ZEC, NEAR, UNI, WLD, AAVE, HYPE, SUI, SOL) yields more cost-clearing candidates than BTC/ETH/SOL, without worse net markouts"
+change = "config.scalp.toml assets: BTC/ETH/SOL -> ZEC/NEAR/UNI/WLD/AAVE/HYPE/SUI/SOL (scan 2026-11-05: 20-36% of 10m windows over the hurdle vs 3.5-6% for BTC/ETH)"
+metric = "candidates per day passing the cost gate; mean net_bps at 600s per asset"
+baseline = "SOL (kept in both universes) as the within-run control"
+pass_if = ">= 3x the cost-passing candidates per day of the old universe and mean net_bps not below SOL's, n >= 100"
+invalidate_if = "net_bps of the new coins below SOL's with n >= 100, or volatility rank collapses on the next scan"
+status = "testing"
+result = ""
