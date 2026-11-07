@@ -203,3 +203,71 @@ pass_if = "momentum sign agrees on >= 98% of ticks over 7 days and funding < 25%
 invalidate_if = "momentum sign disagrees on > 5% of ticks (perp basis matters) or funding eats > 50% of gross P&L"
 status = "testing"
 result = ""
+
+# --- P/B range engine (STRATEGY-PB.md). Not built yet; registered before any test. ---
+
+[[hypothesis]]
+id = "H-P01"
+statement = "The failed-breakout reclaim (Setup C long) on a valid 15m P/B range has positive expectancy after Hyperliquid fees and funding"
+change = "pb engine, Setup C long only, STRATEGY-PB.md §7 defaults"
+metric = "mean R per trade (net of fees/funding) of C-long candidates, taken or not (markouts.jsonl), clustered by day"
+baseline = "same-bar random entries in the same direction with identical stop/target geometry (declared primary); flat (alternate)"
+pass_if = "mean R > 0.3 with a 90% block-bootstrap interval above 0, n >= 60 candidates across >= 30 days, and beats the random-entry baseline"
+invalidate_if = "mean R <= 0 with n >= 60, or not distinguishable from the random-entry baseline"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-P02"
+statement = "Waiting for 3 touches and >= 12h of range raises win rate enough to pay for the setups it skips"
+change = "min_touches = 3, min_range_bars = 48 vs min_touches = 1, min_range_bars = 16"
+metric = "total R and mean R per candidate, all three setups, out-of-sample"
+baseline = "min_touches = 1, min_range_bars = 16 (declared primary)"
+pass_if = "total R higher with mean R +0.2, backtest --compare PASS"
+invalidate_if = "total R lower and mean R not higher, or REJECT"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-P03"
+statement = "Ranges whose edge sits on a weekly VAH/VAL/POC or on an earlier range's edge perform better"
+change = "confluence_mode = record → boost (size x1.5 on confluence, x0.75 without)"
+metric = "mean R of candidates with vs without confluence (record mode first)"
+baseline = "confluence_mode = record"
+pass_if = "confluence mean R - non-confluence mean R >= 0.3, block-permutation percentile > 90, n >= 30 in each group"
+invalidate_if = "difference <= 0 with n >= 30 per group"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-P04"
+statement = "The failed-breakout short (fake break above, close back inside) is weaker than the long, as the video claims"
+change = "c_short_size = 0.5 (vs 1.0 or 0.0)"
+metric = "mean R of C-short vs C-long candidates"
+baseline = "C-long"
+pass_if = "C-short mean R > 0 with n >= 40 → raise c_short_size to 1.0; C-short mean R <= 0 → set 0.0"
+invalidate_if = "n/a: this decides the size, both outcomes act"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-P05"
+statement = "Stopping for the UTC day after 3 losses lowers drawdown without lowering return"
+change = "max_daily_losses = 3 vs off"
+metric = "out-of-sample max drawdown and total R; settled R of the candidates the rule blocked"
+baseline = "max_daily_losses off"
+pass_if = "max drawdown -15% relative and blocked candidates' mean R <= 0"
+invalidate_if = "blocked candidates' mean R > 0.3 with n >= 20"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-P06"
+statement = "Breakouts only from small boxes (height/impulse <= 0.35) and range fades only from big ones beat taking every setup in every box"
+change = "small_box_frac = 0.35 gating vs no gating"
+metric = "mean R per setup type, by box-size bucket"
+baseline = "no box-size gating"
+pass_if = "gated mean R higher for both B and A, backtest --compare PASS"
+invalidate_if = "no gain or REJECT"
+status = "proposed"
+result = ""
