@@ -616,18 +616,13 @@ function evidenceView() {
   const groups = [["taken", "Taken"], ["jev_veto", "Jev vetoed"], ["cost", "Too small for fees"], ["other", "Other skips"], ["long", "All longs"], ["short", "All shorts"], ["all", "Everything"]];
   const mrow = ([g, label]) => `<tr><td><b>${label}</b></td>${[60, 300, 600].map((h) => { const m = markout(g, h); if (!m) return `<td class="n low">—</td>`; const lo = m.n < 30; return `<td class="n ${lo ? "low" : cls(per1k(m.mean_net_bps))}"><b>${susd(per1k(m.mean_net_bps))}</b><span class="sm">${pct(m.hit, 0)} won · n=${m.n}</span></td>`; }).join("")}</tr>`;
   const hyps = sn?.hypotheses || [];
-  const tk600 = markout("taken", 600), mk = sc?.status?.maker;
-  const days = sc?.summary?.session_start ? Math.max(1 / 24, (Date.now() - t(sc.summary.session_start)) / 864e5) : null;
-  const passes = sc?.summary ? (sc.summary.candidates || 0) - (sc.summary.blocked_by?.cost || 0) - (sc.summary.blocked_by?.spread || 0) : null;
-  const prog = {
-    "H-C01": tk600 ? [tk600.n, 150, `${tk600.n} of 150 taken trades with a 10-minute result`] : [0, 150, "No taken trades with a 10-minute result yet"],
-    "H-C02": mk ? [mk.filled + mk.missed, 100, `${mk.filled + mk.missed} of 100 orders · ${pct(mk.filled / Math.max(1, mk.filled + mk.missed), 0)} filled (needs ≥ 40%)`] : null,
-    "H-C03": days && passes != null ? [Math.min(7, days), 7, `${num(passes / days, 1)} chances per day passing every market check (needs ≥ 10) · ${num(days, 1)} of 7 days`] : null,
-  };
+  // The scalper's measurement loop (src/scalp/report.rs): each H-C test applied to the data.
+  const ss = sc?.scorecard;
+  const prog = Object.fromEntries((ss?.verdicts || []).map((x) => [x.id, [x.progress, x.need, x.detail, x.verdict]]));
   const oneHyp = (h) => {
     const p = prog[h.id];
     const tag = { testing: "wait", accepted: "ok", rejected: "no", proposed: "" }[h.status] ?? "";
-    return `<div class="hyp"><span class="id">${esc(h.id)}</span><div><h4>${esc(h.statement)}</h4><p><b>Passes if</b> ${esc(h.pass_if)}</p><p><b>Fails if</b> ${esc(h.invalidate_if)}</p>${h.result ? `<p><b>Result</b> ${esc(h.result)}</p>` : ""}</div><div class="prog"><span class="tag ${tag}">${esc(h.status)}</span>${p ? `<span>${esc(p[2])}</span>${meter(p[0], p[1])}` : ""}</div></div>`;
+    return `<div class="hyp"><span class="id">${esc(h.id)}</span><div><h4>${esc(h.statement)}</h4><p><b>Passes if</b> ${esc(h.pass_if)}</p><p><b>Fails if</b> ${esc(h.invalidate_if)}</p>${h.result ? `<p><b>Result</b> ${esc(h.result)}</p>` : ""}</div><div class="prog"><span class="tag ${tag}">${esc(h.status)}</span>${p ? `<span>${esc(p[2])}</span>${meter(p[0], p[1])}${p[3] && p[3] !== "testing" ? `<span class="tag ${p[3] === "pass" ? "ok" : "no"}">data says ${esc(p[3])}</span>` : ""}` : ""}</div></div>`;
   };
   const rank = { testing: 0, accepted: 1, rejected: 2, proposed: 3 };
   const group = (title, list) => {
@@ -638,12 +633,24 @@ function evidenceView() {
   };
   const isScalp = (h) => /^H-(C|S)/.test(h.id);
   const hypHTML = group("Scalper", hyps.filter(isScalp)) + group("News bot", hyps.filter((h) => !isScalp(h)));
+  const eg = [["passed every market check", "Passed every check"], ["placed as an order", "Placed as an order"], ["filled", "Filled orders"]];
+  const ecell = (g, h) => {
+    const e = (ss?.edge || []).find((x) => x.group === g && x.h === h);
+    if (!e) return `<td class="n low">—</td>`;
+    return `<td class="n ${e.net.low_n ? "low" : cls(per1k(e.net.mean))}"><b>${susd(per1k(e.net.mean))}</b><span class="sm">${e.net.lo != null ? `${susd(per1k(e.net.lo))} to ${susd(per1k(e.net.hi))}` : "no range yet"} · ${esc(e.verdict)}</span></td>`;
+  };
+  const erow = ([g, label]) => `<tr><td><b>${label}</b></td>${[60, 300, 600].map((h) => ecell(g, h)).join("")}</tr>`;
+  const sevTag = { high: "no", medium: "wait" };
+  const backlogHTML = (ss?.backlog || []).map((b) => `<div class="line"><span class="lbl"><span class="tag ${sevTag[b.severity] || ""}">${esc(b.severity)}</span></span><span><b>${esc(b.pattern)}</b> (n=${b.n}): ${esc(b.effect)}. ${esc(b.suggestion)}.</span></div>`).join("");
   const scd = sn?.scorecard;
   const headRows = (scd?.headlines || []).map((r) => `<tr class="${r.low_n ? "low" : ""}"><td>${r.h} h after</td><td class="n">${r.n_clusters}</td><td class="n">${sgn(r.ic, 2)}</td><td class="n">${pct(r.hit_rate, 0)}</td><td>${r.low_n ? "too few to judge" : r.null_pct != null ? `beats ${num(r.null_pct, 0)}% of random shuffles` : ""}</td></tr>`).join("");
   const rg = sn?.regime;
   v.innerHTML = `<header class="head"><h1>Is it working?</h1><p class="lede">Neither bot has proven an edge yet. Every decision is scored afterwards against what the price actually did, net of fees, and each bot has written tests (hypotheses) that say how much evidence is needed before trusting it. Grey figures rest on too few cases to mean anything.</p></header>
   <section class="sheet"><h2>Scalper: what each kind of decision would have made</h2><p class="say">Dollars per $1,000 trade after fees, 1, 5 and 10 minutes after the decision, whether or not it was taken. If the scalper is any good, "Taken" should beat the skipped groups and stay above $0.</p></section>
   <div class="tablewrap"><table><thead><tr><th>Decision</th><th class="n">1 min later</th><th class="n">5 min later</th><th class="n">10 min later</th></tr></thead><tbody>${sc?.summary ? groups.map(mrow).join("") : `<tr><td colspan="4" class="empty">No scalper data.</td></tr>`}</tbody></table></div>
+  <section class="sheet"><h2>Scalper: does the signal pay?</h2><p class="say">The same question with its uncertainty: dollars per $1,000 after fees, and a 95% range that counts each hour as one piece of evidence, because moves inside the same hour aren't independent. A range entirely below $0 means it loses money after fees. ${ss ? `${ss.candidates} chances over ${ss.hours} hours.` : ""} Fills, exits, each check and which inputs predict anything: <code>jev-trader --config config.scalp.toml scalp-report</code>.</p></section>
+  <div class="tablewrap"><table><thead><tr><th>Decision</th><th class="n">1 min later</th><th class="n">5 min later</th><th class="n">10 min later</th></tr></thead><tbody>${ss ? eg.map(erow).join("") : `<tr><td colspan="4" class="empty">No scalper data.</td></tr>`}</tbody></table></div>
+  <section class="sheet"><h2>Scalper: what the log says</h2><p class="say">Patterns with enough evidence (20 hours or 20 cases), as suggestions. Nothing here changes a setting.</p>${backlogHTML ? `<div class="verdict" style="margin-top:10px">${backlogHTML}</div>` : `<p class="empty">Nothing has enough evidence yet${ss ? ` (${ss.hours} hours of data so far)` : ""}.</p>`}</section>
   <section class="sheet"><h2>The tests</h2><p class="say">From <code>hypotheses.toml</code>. A strategy change is written here before it is tried.</p>${hypHTML || '<p class="empty">No hypotheses file found next to the dashboard.</p>'}</section>
   <section class="sheet"><h2>News bot: do headlines predict the price?</h2><p class="say">Each headline is scored a few hours later. Hit rate is how often the price moved the way Jev's reading pointed; IC is the correlation between reading and move (−1 to +1). Overlapping stories count once. ${scd ? `${scd.n_settled} scored so far.` : ""}</p>
   ${headRows ? `<div class="tablewrap" style="box-shadow:none;margin-top:10px"><table><thead><tr><th>Horizon</th><th class="n">Stories</th><th class="n">IC</th><th class="n">Hit rate</th><th></th></tr></thead><tbody>${headRows}</tbody></table></div>` : '<p class="empty">Nothing scored yet.</p>'}

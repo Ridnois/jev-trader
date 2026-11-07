@@ -18,6 +18,7 @@
 
 pub mod engine;
 pub mod features;
+pub mod report;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};

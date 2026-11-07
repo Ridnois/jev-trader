@@ -65,7 +65,7 @@ pub fn merge_pairs(v: &[(DateTime<Utc>, f64, f64)], window: Duration) -> Vec<(f6
     out
 }
 
-fn ranks(x: &[f64]) -> Vec<f64> {
+pub fn ranks(x: &[f64]) -> Vec<f64> {
     let mut idx: Vec<usize> = (0..x.len()).collect();
     idx.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
     let mut r = vec![0.0; x.len()];

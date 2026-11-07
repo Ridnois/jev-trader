@@ -78,6 +78,10 @@ enum Cmd {
     /// Score settled headlines, decisions and blocked trades (writes data/report.md
     /// and data/backlog.jsonl; suggestions only, never edits config.toml).
     Report,
+    /// Score the scalper: does the signal pay after costs, fills, exits, gates, which
+    /// inputs relate to the move, and each H-C hypothesis (writes <data_dir>/scalp_report.md
+    /// and scalp_backlog.jsonl; suggestions only, never edits a config).
+    ScalpReport,
     /// Replay cached Jev answers against historical klines (no Jev calls), with
     /// momentum-only / news-only / buy-and-hold baselines and a residual-edge verdict.
     Backtest {
@@ -193,6 +197,14 @@ async fn main() -> Result<()> {
             let md = run_report(&cfg, &cli.config)?;
             println!("{md}");
         }
+        Cmd::ScalpReport => {
+            let sc = scalp::report::scorecard(&scalp::report::load(&cfg.data_dir), &cfg.scalp);
+            let md = scalp::report::markdown(&sc, &hypotheses::load(&hyp_path(&cli.config))?);
+            status::write_atomic(&cfg.data_dir.join("scalp_report.md"), md.as_bytes())?;
+            let lines: String = sc.backlog.iter().filter_map(|b| serde_json::to_string(b).ok()).map(|l| l + "\n").collect();
+            status::write_atomic(&cfg.data_dir.join("scalp_backlog.jsonl"), lines.as_bytes())?;
+            println!("{md}");
+        }
         Cmd::Backtest { from, to, run_id, compare } => match compare {
             Some(p) => {
                 let (verdict, md) = backtest::compare(&http, &p[0], &p[1], from.as_deref(), to.as_deref()).await?;
@@ -225,8 +237,7 @@ fn run_report(cfg: &Config, config_path: &std::path::Path) -> Result<String> {
     let settled: Vec<settle::Settlement> = status::read_jsonl(&paths.settlements);
     let sc = report::scorecard(&settled, cfg, "paper · settled");
     let backlog = report::backlog(&sc);
-    let hyp_path = config_path.parent().unwrap_or(std::path::Path::new(".")).join("hypotheses.toml");
-    let hyps = hypotheses::load(&hyp_path)?;
+    let hyps = hypotheses::load(&hyp_path(config_path))?;
     let reviews: Vec<report::ReviewRecord> = status::read_jsonl(&paths.reviews);
     let hash = backtest::config_hash(config_path)?;
     let state = State::load_or_new(&paths.state, cfg.paper.starting_cash)?;
@@ -236,6 +247,11 @@ fn run_report(cfg: &Config, config_path: &std::path::Path) -> Result<String> {
     let lines: String = backlog.iter().filter_map(|b| serde_json::to_string(b).ok()).map(|l| l + "\n").collect();
     status::write_atomic(&paths.backlog, lines.as_bytes())?;
     Ok(md)
+}
+
+/// The hypothesis register sits next to the config.
+fn hyp_path(config_path: &std::path::Path) -> PathBuf {
+    config_path.parent().unwrap_or(std::path::Path::new(".")).join("hypotheses.toml")
 }
 
 fn jev_client(cfg: &Config) -> Result<JevClient> {

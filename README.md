@@ -94,6 +94,19 @@ jev-trader --config config.scalp.toml dashboard      # Scalper pages read data-h
 
 Files in `data-hl/`: `scalp_status.json` (live view), `scalp_candidates.jsonl` (every candidate with its gates and Jev review, taken or not), `scalp_markouts.jsonl` (each candidate's move after 60/300/600s, net of cost), `scalp_orders.jsonl` (maker entries: filled, partial or missed), `scalp_trades.jsonl` (round trips), `scalp_events.jsonl` (news). Hypotheses H-C01 to H-C04 say what these must show before the scalper is trusted.
 
+```sh
+jev-trader --config config.scalp.toml scalp-report   # → data-hl/scalp_report.md, data-hl/scalp_backlog.jsonl
+```
+
+`scalp-report` is the scalper's measurement loop. It answers:
+
+- **Does the signal pay?** Gross move, cost and net result at each markout horizon. It covers candidates that passed every market check, those placed as orders, those filled, and all of them.
+- **Where does the money go?** Maker fill rate, filled vs missed markouts (adverse selection), and maker-as-run vs a taker entry on every order. Then each exit reason vs holding to the time stop, and what each check stopped vs what was taken.
+- **Which inputs relate to the move?** Spearman IC of every logged feature, signed by side.
+- **Where does each H-C hypothesis stand?** Its pass and invalidate rules are applied to the data. `hypotheses.toml` keeps the human status.
+
+Means carry 95% intervals with errors clustered by UTC hour, the independent unit. Correlations carry a block-permutation null. The backlog suggests only; nothing edits a config. The dashboard's **Is it working?** page shows the same scorecard, recomputed at most once a minute.
+
 ## Measure before changing anything
 
 ```sh
@@ -115,7 +128,7 @@ cargo run --release -- backtest --compare config.toml alt.toml # PASS / REVISE /
 - **Departures** (home): what each bot is doing with whose money. The scalper and news bot sheets show the venue (paper / testnet / live), the result after fees, what's at risk right now (the loss if each stop hits), and the budgets that cap it: trades this hour, daily loss, open slots, exposure. An **Is it working?** sheet says plainly whether there's enough evidence yet. Below is the board: one row per coin for both bots, showing its side, status (WATCHING, IN TRADE, ORDER WAITING, HELD, REVIEW), what it's **waiting for** in plain words ("a rush of trades", "news above +0.30", "hourly limit") and its last result. Rows flip like split-flap characters when they change. Select a row to see every check in order, which one stopped it, and the live readings behind it.
 - **Scalper**: what it does in four sentences, any open trade on a stop/entry/target ruler, then three tabs. **Decisions** lists every chance it found, what stopped it ("Jev vetoed", "Too small for fees", "Hourly limit full"…), and what a $1,000 trade would have made 1, 5 and 10 minutes later after fees, whether or not it was taken. **Trades** tells each round trip as a story. **How it decides** shows the checks in order with how many chances each one stopped.
 - **News bot**: the same plain explanation. **Coins** shows each coin's news score on a scale with its buy and sell lines, the trend, the safety checks and the headlines driving it. **Headlines** shows Jev's four answers per headline, **Trades** lists the fills, and **Each look** shows the stages of the last tick with their timing.
-- **Is it working?**: the scalper's results grouped by what happened to each decision, in dollars per $1,000 after fees, with n. Figures resting on fewer than 30 cases are greyed. Then the tests from `hypotheses.toml`, grouped by bot, with progress toward each one's required sample. Finally the news bot's settled scorecard (IC and hit rate per horizon) and the market regime.
+- **Is it working?**: the scalper's results grouped by what happened to each decision, in dollars per $1,000 after fees, with n. Figures resting on fewer than 30 cases are greyed. Next, **does the signal pay?**: the same results with hour-clustered 95% ranges, followed by the scalper backlog from `scalp-report`. Then the tests from `hypotheses.toml`, grouped by bot, with progress toward each one's required sample. For scalper tests, this includes what the data says. Finally the news bot's settled scorecard (IC and hit rate per horizon) and the market regime.
 
 The rail always shows **whose money** each bot is using and a heartbeat per bot (green alive, amber stale or paused, red stopped).
 

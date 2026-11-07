@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::news::NewsEvent;
 use crate::regime::Regime;
 use crate::report::{self, Scorecard};
+use crate::scalp::report::ScalpScorecard;
 use crate::settle::Settlement;
 use crate::paper::{Fill, State};
 use crate::status::{
@@ -48,11 +49,13 @@ struct App {
     started_at: DateTime<Utc>,
     /// Scorecard is recomputed only when settlements.jsonl changes.
     scorecard: Mutex<Option<((u64, Option<SystemTime>), Arc<Scorecard>)>>,
+    /// The scalper's files grow every few seconds: its scorecard is recomputed at most once a minute.
+    scalp_scorecard: Mutex<Option<(std::time::Instant, Arc<ScalpScorecard>)>>,
 }
 
 pub async fn serve(cfg: Config, host: String, port: u16, scalp_dir: std::path::PathBuf) -> Result<()> {
     let paths = Paths::new(&cfg.data_dir);
-    let app = Arc::new(App { cfg, paths, scalp_dir, started_at: Utc::now(), scorecard: Mutex::new(None) });
+    let app = Arc::new(App { cfg, paths, scalp_dir, started_at: Utc::now(), scorecard: Mutex::new(None), scalp_scorecard: Mutex::new(None) });
     let router = Router::new()
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX.as_bytes()) }))
         .route("/app.css", get(|| async { asset("text/css; charset=utf-8", CSS.as_bytes()) }))
@@ -441,6 +444,7 @@ async fn scalp_handler(AxState(app): AxState<Arc<App>>, axum::extract::RawQuery(
         let x = t["pnl_usd"].as_f64().unwrap_or(0.0);
         (n + 1, w + (x > 0.0) as usize, p + x, b + t["pnl_bps"].as_f64().unwrap_or(0.0))
     });
+    let scorecard = scalp_scorecard(&app).await;
     let n_candidates = candidates.len();
     let session_start = candidates.first().map(|c| c["ts"].clone()).unwrap_or(Value::Null);
     // What the price did after each candidate (raw move and net of cost), keyed by id.
@@ -476,6 +480,7 @@ async fn scalp_handler(AxState(app): AxState<Arc<App>>, axum::extract::RawQuery(
         "status": status,
         "candidates": candidates,
         "trades": trades,
+        "scorecard": scorecard,
         "summary": {
             "session_start": session_start,
             "candidates": n_candidates,
@@ -484,6 +489,18 @@ async fn scalp_handler(AxState(app): AxState<Arc<App>>, axum::extract::RawQuery(
             "trades": { "n": n_tr, "wins": wins, "pnl_usd": pnl, "mean_bps": if n_tr > 0 { bps / n_tr as f64 } else { 0.0 } },
         },
     }))
+}
+
+async fn scalp_scorecard(app: &Arc<App>) -> Option<Arc<ScalpScorecard>> {
+    if let Some((t, sc)) = app.scalp_scorecard.lock().ok()?.as_ref()
+        && t.elapsed() < std::time::Duration::from_secs(60)
+    {
+        return Some(sc.clone());
+    }
+    let (dir, cfg) = (app.scalp_dir.clone(), app.cfg.scalp.clone());
+    let sc = Arc::new(tokio::task::spawn_blocking(move || crate::scalp::report::scorecard(&crate::scalp::report::load(&dir), &cfg)).await.ok()?);
+    *app.scalp_scorecard.lock().ok()? = Some((std::time::Instant::now(), sc.clone()));
+    Some(sc)
 }
 
 #[derive(Deserialize)]
