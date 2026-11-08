@@ -1,34 +1,29 @@
-//! Live execution on Hyperliquid perps, shared by the news bot (`run --live`) and
-//! the scalper (`scalp --live`). The decision path is the same as paper; only the
-//! fills differ: each one is a real order, booked from what the exchange reports.
+//! Live execution on Hyperliquid perps. The engine's decision path is the same as
+//! paper; only the fills differ: each one is a real order, booked from what the
+//! exchange reports.
 //!
 //! Safety:
-//! - armed only by `[exchange] mode = "live"` AND the `--live` flag;
+//! - armed only by `[exchange] mode = "live"` AND `run --live`;
 //! - the signer is an API agent wallet (can trade, cannot withdraw);
-//! - the live ledger lives in its own data_dir, records its network, and refuses a
-//!   paper ledger (and vice versa); it manages at most `max_capital_usd`;
-//! - marketable orders are IOC limits capped `max_slippage_bps` through the price;
-//!   exits are reduce-only, so they can never open or flip a position;
+//! - the live ledger lives in its own data_dir, records its network, and manages
+//!   at most `max_capital_usd`;
+//! - IOC orders are capped `max_slippage_bps` through the price; exits, take-profits
+//!   and backstop stops are reduce-only, so they can never open or flip a position;
 //! - fills are the source of truth: amounts and fees come from `userFills`;
-//! - the exchange's positions are compared with the ledger every check; a mismatch
-//!   puts that coin in REVIEW (no entries; exits continue);
-//! - an order whose outcome can't be confirmed sets `live_hold`, which blocks all
-//!   entries until a person checks the account and runs `jev-trader hl clear-hold`.
+//! - an order whose outcome can't be confirmed sets a hold that blocks all entries
+//!   until a person checks the account and runs `jev-trader hl clear-hold`.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use chrono::{DateTime, Utc};
-use tracing::{error, info, warn};
+use chrono::Utc;
+use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::decide::{self, Decision};
-use crate::hyperliquid::exchange::{Account, Exchange, OrderError, OrderReq, OrderState, Placed, Tif, sum_fills};
-use crate::paper::{Binding, Fill, Plan, Skip, State};
+use crate::hyperliquid::exchange::{Exchange, OrderError, OrderReq, OrderState, Placed, Tif, sum_fills};
 
-pub const MODE: &str = "live";
 /// Hyperliquid rejects orders worth less than $10; stay a little above it.
 pub const MIN_ORDER_USD: f64 = 10.5;
 
@@ -37,6 +32,9 @@ pub struct Live {
     pub max_slippage_bps: f64,
     /// Fallback taker fee (fraction) if the fill lookup fails.
     pub taker_fee: f64,
+    leverage: u32,
+    /// Coins whose leverage has been set this session.
+    levered: Mutex<HashSet<String>>,
 }
 
 /// A confirmed fill in ledger terms.
@@ -44,7 +42,6 @@ pub struct Live {
 pub struct Booked {
     pub sz: f64,
     pub price: f64,
-    pub notional: f64,
     pub fee_usd: f64,
     pub order_id: String,
 }
@@ -66,32 +63,34 @@ fn now_ms() -> i64 {
 impl Live {
     pub async fn connect(cfg: &Config) -> Result<Self> {
         let ex = Exchange::connect(&cfg.exchange).await?;
-        for a in &cfg.assets {
-            ex.asset(&a.coin)?;
+        for c in &cfg.watch {
+            ex.asset(c)?;
         }
-        if cfg.exchange.leverage > 0 {
-            for a in &cfg.assets {
-                let lev = cfg.exchange.leverage.min(ex.asset(&a.coin)?.max_leverage);
-                if let Err(e) = ex.update_leverage(&a.coin, lev, true).await {
-                    bail!("setting {} cross leverage to {lev}×: {e} (set [exchange] leverage = 0 to skip)", a.coin);
-                }
+        let live = Self { ex, max_slippage_bps: cfg.exchange.max_slippage_bps, taker_fee: cfg.costs.taker_bps / 1e4, leverage: cfg.exchange.leverage, levered: Mutex::new(HashSet::new()) };
+        for c in &cfg.watch {
+            if let Err(e) = live.ensure_leverage(c).await {
+                bail!("{e} (set [exchange] leverage = 0 to skip)");
             }
         }
-        info!(network = ex.network.name(), account = %ex.user, agent = %ex.agent_address(), "Hyperliquid exchange connected");
-        Ok(Self {
-            ex,
-            max_slippage_bps: cfg.exchange.max_slippage_bps,
-            taker_fee: cfg.scalp.fee_bps / 1e4,
-        })
+        info!(network = live.ex.network.name(), account = %live.ex.user, agent = %live.ex.agent_address(), "Hyperliquid exchange connected");
+        Ok(live)
+    }
+
+    /// Sets cross leverage on a coin once per session (catalyst trades can open on
+    /// coins outside the watch list).
+    pub async fn ensure_leverage(&self, coin: &str) -> std::result::Result<(), String> {
+        if self.leverage == 0 || self.levered.lock().unwrap().contains(coin) {
+            return Ok(());
+        }
+        let a = self.ex.asset(coin).map_err(|e| format!("{e:#}"))?;
+        let lev = self.leverage.min(a.max_leverage);
+        self.ex.update_leverage(coin, lev, true).await.map_err(|e| format!("setting {coin} cross leverage to {lev}×: {e}"))?;
+        self.levered.lock().unwrap().insert(coin.to_string());
+        Ok(())
     }
 
     pub fn venue(&self) -> &'static str {
         if self.ex.network == crate::config::Network::Testnet { "hyperliquid-testnet" } else { "hyperliquid" }
-    }
-
-    /// Rounds a size down to the coin's step.
-    pub fn floor_sz(&self, coin: &str, sz: f64) -> f64 {
-        self.ex.asset(coin).map(|a| a.floor_sz(sz)).unwrap_or(0.0)
     }
 
     pub fn step(&self, coin: &str) -> f64 {
@@ -146,11 +145,10 @@ impl Live {
         let px = a.round_px(if buy { ref_px * (1.0 + slip) } else { ref_px * (1.0 - slip) }, buy);
         let cloid = self.ex.new_cloid();
         let since = now_ms() - 5_000;
-        let req = OrderReq { coin: coin.into(), buy, px, sz, reduce_only, tif: Tif::Ioc, cloid: cloid.clone() };
+        let req = OrderReq { coin: coin.into(), buy, px, sz, reduce_only, tif: Tif::Ioc, cloid: cloid.clone(), trigger_px: None };
         let book = |sz: f64, px: f64, fee: Option<f64>, oid: u64| Booked {
             sz,
             price: px,
-            notional: sz * px,
             fee_usd: fee.unwrap_or(sz * px * self.taker_fee),
             order_id: oid.to_string(),
         };
@@ -189,16 +187,17 @@ impl Live {
 
     /// Posts a post-only (ALO) order. Returns its cloid. A rejection (e.g. it would
     /// have crossed) is an ordinary `Err`; "UNCONFIRMED" means it may be resting.
-    pub async fn post_maker(&self, coin: &str, buy: bool, px: f64, usd: f64) -> std::result::Result<(String, f64, f64), String> {
+    /// `sz` in coins; `reduce_only` for take-profit exits (no minimum size applies then).
+    pub async fn post_maker(&self, coin: &str, buy: bool, px: f64, sz: f64, reduce_only: bool) -> std::result::Result<(String, f64, f64), String> {
         let a = self.ex.asset(coin).map_err(|e| format!("{e:#}"))?;
         let px = a.round_px(px, !buy); // never round across the book
-        let sz = a.floor_sz(usd / px);
-        if sz * px < MIN_ORDER_USD {
+        let sz = a.floor_sz(sz);
+        if sz <= 0.0 || (!reduce_only && sz * px < MIN_ORDER_USD) {
             return Err(format!("{coin}: ${:.2} is below the exchange minimum", sz * px));
         }
         let cloid = self.ex.new_cloid();
         let since = now_ms() - 5_000;
-        let req = OrderReq { coin: coin.into(), buy, px, sz, reduce_only: false, tif: Tif::Alo, cloid: cloid.clone() };
+        let req = OrderReq { coin: coin.into(), buy, px, sz, reduce_only, tif: Tif::Alo, cloid: cloid.clone(), trigger_px: None };
         match self.ex.order(&req).await {
             Ok(Placed::Resting { .. }) | Ok(Placed::Filled { .. }) => Ok((cloid, px, sz)),
             Ok(Placed::Error(m)) => Err(format!("{coin}: {m}")),
@@ -208,6 +207,26 @@ impl Live {
                 Ok(Some(_)) => Ok((cloid, px, sz)),
                 Err(()) => Err(format!("UNCONFIRMED order {cloid} on {coin}: {m}")),
             },
+        }
+    }
+
+    /// A reduce-only stop-market resting on the exchange: protection if the process
+    /// dies. `buy` closes a short. Returns its cloid.
+    pub async fn post_backstop(&self, coin: &str, buy: bool, trigger: f64, sz: f64) -> std::result::Result<String, String> {
+        let a = self.ex.asset(coin).map_err(|e| format!("{e:#}"))?;
+        let trigger = a.round_px(trigger, buy);
+        // Worst accepted fill once triggered: 5% beyond the trigger.
+        let limit = a.round_px(if buy { trigger * 1.05 } else { trigger * 0.95 }, buy);
+        let sz = a.floor_sz(sz);
+        if sz <= 0.0 {
+            return Err(format!("{coin}: backstop size rounds to zero"));
+        }
+        let cloid = self.ex.new_cloid();
+        let req = OrderReq { coin: coin.into(), buy, px: limit, sz, reduce_only: true, tif: Tif::Ioc, cloid: cloid.clone(), trigger_px: Some(trigger) };
+        match self.ex.order(&req).await {
+            Ok(Placed::Error(m)) => Err(format!("{coin}: {m}")),
+            Ok(_) => Ok(cloid),
+            Err(e) => Err(format!("{coin}: {e}")),
         }
     }
 
@@ -239,146 +258,6 @@ impl Live {
     }
 }
 
-// ---------------------------------------------------------------- news bot
-
-/// Paper commands must never open a live ledger.
-pub fn refuse_live_ledger(state: &State) -> Result<()> {
-    if state.mode.as_deref() == Some(MODE) {
-        bail!("this data_dir holds a LIVE ledger: use the live config and `run --live`");
-    }
-    Ok(())
-}
-
-/// Loads the live ledger, or creates it from the allotted capital.
-pub async fn open_ledger(live: &Live, cfg: &Config, path: &Path) -> Result<State> {
-    if path.exists() {
-        let s = State::load_or_new(path, 0.0)?;
-        if s.mode.as_deref() != Some(MODE) {
-            bail!("{} is a paper ledger; give the live config its own data_dir", path.display());
-        }
-        if s.venue.as_deref() != Some(live.venue()) {
-            bail!("{} was created for {}, not {}; give this config its own data_dir", path.display(), s.venue.as_deref().unwrap_or("Binance"), live.venue());
-        }
-        return Ok(s);
-    }
-    let cap = cfg.exchange.max_capital_usd;
-    if !(cap.is_finite() && cap > 0.0) {
-        bail!("set [exchange] max_capital_usd to the most USDC the bot may trade with");
-    }
-    let acct = live.ex.account().await?;
-    for a in &cfg.assets {
-        let szi = acct.positions.get(&a.coin).copied().unwrap_or(0.0);
-        if szi != 0.0 {
-            bail!("the account already holds {szi} {} on Hyperliquid; close it or drop {} from the config, so the ledger starts in sync", a.coin, a.symbol);
-        }
-    }
-    let cash = cap.min(acct.withdrawable);
-    let min = cfg.risk.min_trade_usd.max(MIN_ORDER_USD);
-    if cash < min {
-        bail!("only {:.2} USDC withdrawable on Hyperliquid {} (account value {:.2}); need at least {min:.2}", acct.withdrawable, live.ex.network.name(), acct.account_value);
-    }
-    let mut s = State::new(cash);
-    s.mode = Some(MODE.into());
-    s.venue = Some(live.venue().into());
-    s.save(path)?;
-    info!(cash, cap, withdrawable = acct.withdrawable, "live ledger created");
-    Ok(s)
-}
-
-/// The account, and per-symbol REVIEW reasons when the exchange disagrees with the ledger.
-pub async fn reconcile(live: &Live, state: &State, cfg: &Config) -> Result<(Account, HashMap<String, String>)> {
-    let acct = live.ex.account().await?;
-    let mut review = HashMap::new();
-    for a in &cfg.assets {
-        if let Some(hold) = &state.live_hold {
-            review.insert(a.symbol.clone(), format!("exchange hold: {hold}"));
-            continue;
-        }
-        let want = state.positions.get(&a.symbol).map(|p| p.qty).unwrap_or(0.0);
-        let have = acct.positions.get(&a.coin).copied().unwrap_or(0.0);
-        if (have - want).abs() > live.step(&a.coin) * 0.5 + 1e-12 {
-            review.insert(a.symbol.clone(), format!("Hyperliquid holds {have} {}, ledger expects {want:.6}", a.coin));
-        }
-    }
-    Ok((acct, review))
-}
-
-/// Applies a decision with real orders. Returns fills and per-order errors.
-pub async fn execute(live: &Live, state: &mut State, d: &mut Decision, cfg: &Config, now: DateTime<Utc>, acct: &mut Account) -> (Vec<Fill>, Vec<String>) {
-    let e = d.equity_for_weights;
-    let order = decide::prepare(state, d, cfg, now);
-    let mut fills = Vec::new();
-    let mut errors = Vec::new();
-    for i in order {
-        let a = &mut d.assets[i];
-        let Some(px) = a.exec else { continue };
-        let Some(coin) = cfg.assets.iter().find(|x| x.symbol == a.symbol).map(|x| x.coin.clone()) else { continue };
-        let stop = decide::stop_for(state, a);
-        let skip = |a: &mut decide::AssetDecision, s: Skip| {
-            if (a.weight - a.current).abs() > 1e-9 {
-                a.binding = Some(Binding::from_skip(s));
-            }
-        };
-        let plan = match state.plan(&a.symbol, a.weight, px, e, cfg.paper.fee_rate, &cfg.risk) {
-            Ok(p) => p,
-            Err(s) => {
-                skip(a, s);
-                continue;
-            }
-        };
-        let min_usd = cfg.risk.min_trade_usd.max(MIN_ORDER_USD);
-        let (buy, sz, full_exit) = match plan {
-            Plan::Buy { notional } => {
-                let spend = notional.min(acct.withdrawable);
-                let sz = live.floor_sz(&coin, spend / px);
-                if sz * px < min_usd {
-                    skip(a, Skip::Cash);
-                    continue;
-                }
-                (true, sz, false)
-            }
-            Plan::Sell { qty, full_exit } => {
-                let have = acct.positions.get(&coin).copied().unwrap_or(0.0).max(0.0);
-                let q = if full_exit { have } else { live.floor_sz(&coin, qty.min(have)) };
-                if q <= 0.0 || (!full_exit && q * px < min_usd) {
-                    skip(a, Skip::MinTrade);
-                    continue;
-                }
-                (false, q, full_exit)
-            }
-        };
-        let b = match live.market_fill(&coin, buy, sz, px, !buy).await {
-            Ok(b) => b,
-            Err(m) => {
-                error!("{} order failed: {m}", a.symbol);
-                if m.starts_with("UNCONFIRMED") {
-                    state.live_hold = Some(format!("{m} · check Hyperliquid, then `jev-trader hl clear-hold`"));
-                }
-                errors.push(format!("{}: {m}", a.symbol));
-                continue;
-            }
-        };
-        let mut f = if buy {
-            acct.withdrawable -= b.notional + b.fee_usd;
-            *acct.positions.entry(coin.clone()).or_default() += b.sz;
-            state.book_buy(&a.symbol, b.sz, b.price, b.notional, b.notional + b.fee_usd, b.fee_usd, &a.reason, now, stop)
-        } else {
-            acct.withdrawable += b.notional - b.fee_usd;
-            *acct.positions.entry(coin.clone()).or_default() -= b.sz;
-            // A full exit closes the ledger position once less than one size step is left.
-            let dust = if full_exit { (live.step(&coin) * b.price).max(1e-6) * 1.01 } else { 1e-6 };
-            state.book_sell(&a.symbol, b.sz, b.price, b.notional, b.notional - b.fee_usd, b.fee_usd, &a.reason, now, &cfg.risk, dust)
-        };
-        f.order_id = Some(b.order_id.clone());
-        f.venue = Some(live.venue().into());
-        f.events = a.drivers.clone();
-        f.gates = a.gates.clone();
-        f.binding = a.binding.map(|b| format!("{b:?}"));
-        fills.push(f);
-    }
-    (fills, errors)
-}
-
 // ---------------------------------------------------------------- commands
 
 /// `jev-trader hl check`: keys, agent, account, coins, leverage. Sends no orders.
@@ -394,22 +273,15 @@ pub async fn check(cfg: &Config) -> Result<()> {
         }
     }
     println!("bot would manage {:.2} (max_capital_usd {:.2})", cfg.exchange.max_capital_usd.min(acct.withdrawable), cfg.exchange.max_capital_usd);
-    for a in &cfg.assets {
-        match ex.asset(&a.coin) {
-            Ok(info) => println!(
-                "{:<7} asset #{:<4} size step {} · max leverage {}× · position {}",
-                a.coin,
-                info.index,
-                info.step(),
-                info.max_leverage,
-                acct.positions.get(&a.coin).copied().unwrap_or(0.0)
-            ),
-            Err(e) => println!("{:<7} MISSING: {e:#}", a.coin),
+    for c in &cfg.watch {
+        match ex.asset(c) {
+            Ok(info) => println!("{c:<7} asset #{:<4} size step {} · max leverage {}× · position {}", info.index, info.step(), info.max_leverage, acct.positions.get(c).copied().unwrap_or(0.0)),
+            Err(e) => println!("{c:<7} MISSING: {e:#}"),
         }
     }
     // The agent must be approved for this account, or every order is rejected.
     // Hyperliquid has no dry-run order; an impossible cancel shows whether the signature is accepted.
-    match ex.cancel_by_cloid(&cfg.assets[0].coin, "0x00000000000000000000000000000000").await {
+    match ex.cancel_by_cloid(&cfg.watch[0], "0x00000000000000000000000000000000").await {
         Err(OrderError::Rejected(m)) if m.to_lowercase().contains("does not exist") || m.to_lowercase().contains("user or api wallet") => {
             println!("agent signature: REJECTED ({m}). Approve the agent for this account at app.hyperliquid.xyz/API")
         }
@@ -420,23 +292,11 @@ pub async fn check(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// `jev-trader hl clear-hold`: clears the hold set after an unconfirmed order, in
-/// both the news ledger and the scalper ledger of this data_dir.
+/// `jev-trader hl clear-hold`: clears the hold set after an unconfirmed order.
 pub fn clear_hold(cfg: &Config) -> Result<()> {
-    let paths = crate::status::Paths::new(&cfg.data_dir);
-    let mut any = false;
-    if paths.state.exists() {
-        let mut s = State::load_or_new(&paths.state, 0.0)?;
-        if let Some(h) = s.live_hold.take() {
-            s.save(&paths.state)?;
-            println!("news ledger: cleared {h}");
-            any = true;
-        }
-    }
-    if crate::scalp::clear_hold(&cfg.data_dir)? {
-        any = true;
-    }
-    if !any {
+    if crate::ledger::clear_hold(&crate::status::Files::new(&cfg.data_dir).ledger)? {
+        println!("hold cleared");
+    } else {
         println!("no hold set");
     }
     Ok(())

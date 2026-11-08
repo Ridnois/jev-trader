@@ -1,44 +1,31 @@
-mod backtest;
-mod hyperliquid;
-mod live;
-mod bot;
-mod breaker;
-mod cluster;
-mod decide;
-mod hypotheses;
-mod regime;
-mod scalp;
-mod report;
-mod settle;
-mod stats;
 mod config;
 mod dashboard;
+mod engine;
+mod features;
+mod feed;
+mod hyperliquid;
+mod intel;
 mod jev;
+mod ledger;
+mod live;
 mod market;
-mod news;
-mod paper;
-mod signals;
+mod report;
 mod status;
-mod validate;
+mod strategy;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Utc;
 use clap::{Parser, Subcommand};
 
 use config::Config;
-use jev::JevClient;
-use news::NewsItem;
-use paper::State;
-use status::Paths;
 
 #[derive(Parser)]
-#[command(about = "Crypto trading bots for Hyperliquid perps, powered by TypeSafe Jev")]
+#[command(about = "jev-trader v2: one engine on Hyperliquid perps where Jev's news reading and order flow must agree")]
 struct Cli {
-    #[arg(long, default_value = "config.toml")]
+    #[arg(long, global = true, default_value = "config.toml")]
     config: PathBuf,
     /// Secrets file loaded before .env.local (its values win), e.g. `.env.hl-testnet`.
     #[arg(long, global = true)]
@@ -49,259 +36,163 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run Jev on a single piece of text and print the extracted features.
-    Analyze { text: String },
-    /// Fetch configured news feeds and print headlines (no Jev calls).
-    News,
-    /// Run the news bot loop (paper unless armed).
+    /// Run the engine (paper unless armed).
     Run {
-        /// Run a single tick and exit.
-        #[arg(long)]
-        once: bool,
-        /// Arm real Hyperliquid orders. Needs `[exchange] mode = "live"` in the config too.
+        /// Arm real orders. Needs `[exchange] mode = "live"` in the config too.
         #[arg(long)]
         live: bool,
     },
-    /// Run the order-flow scalper (market data decides; Jev reviews entries against the news).
-    Scalp {
-        /// Arm real Hyperliquid orders (needs `[exchange] mode = "live"`; network = "testnet" trades fake money).
+    /// Fetch every news source once and show how each headline would be handled
+    /// (coin tag, noise, duplicate). No Jev calls.
+    News {
+        /// Also print the items that were filtered out.
         #[arg(long)]
-        live: bool,
+        all: bool,
     },
-    /// Hyperliquid tools: market scan, account check, clearing a hold.
-    Hl {
-        #[command(subcommand)]
-        cmd: HlCmd,
-    },
-    /// Show the paper account.
-    Status,
-    /// Score settled headlines, decisions and blocked trades (writes data/report.md
-    /// and data/backlog.jsonl; suggestions only, never edits config.toml).
+    /// Score one headline with Jev, the way the engine does.
+    Analyze { text: String },
+    /// Score the engine's logs: trades, headline edge, flow vs news, Jev spend
+    /// (writes <data_dir>/report.md).
     Report,
-    /// Score the scalper: does the signal pay after costs, fills, exits, gates, which
-    /// inputs relate to the move, and each H-C hypothesis (writes <data_dir>/scalp_report.md
-    /// and scalp_backlog.jsonl; suggestions only, never edits a config).
-    ScalpReport,
-    /// Replay cached Jev answers against historical klines (no Jev calls), with
-    /// momentum-only / news-only / buy-and-hold baselines and a residual-edge verdict.
-    Backtest {
-        /// Start (YYYY-MM-DD or RFC 3339). Default: first cached event.
-        #[arg(long)]
-        from: Option<String>,
-        /// End (YYYY-MM-DD or RFC 3339). Default: now.
-        #[arg(long)]
-        to: Option<String>,
-        /// Output folder name under data/backtests/ (resumable).
-        #[arg(long)]
-        run_id: Option<String>,
-        /// Review a change: `--compare base.toml candidate.toml` → PASS / REVISE / REJECT.
-        #[arg(long, num_args = 2, value_names = ["BASE", "CANDIDATE"])]
-        compare: Option<Vec<PathBuf>>,
-    },
     /// Serve the monitoring dashboard.
     Dashboard {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value_t = 8787)]
         port: u16,
-        /// Scalper data directory shown on the Scalper page.
-        #[arg(long, default_value = "data-hl")]
-        scalp_dir: PathBuf,
+    },
+    /// Hyperliquid tools.
+    Hl {
+        #[command(subcommand)]
+        cmd: HlCmd,
     },
 }
 
 #[derive(Subcommand)]
 enum HlCmd {
-    /// Rank liquid perps by how often a 10-minute move clears the round-trip cost at
-    /// this config's [scalp] fees (no key needed).
+    /// Rank liquid perps by how often a move over the holding horizon clears the cost.
     Scan {
-        /// How many of the highest-volume perps to test.
         #[arg(long, default_value_t = 30)]
         top: usize,
-        /// Skip perps with less 24h volume than this, millions of dollars.
-        #[arg(long, default_value_t = 5.0)]
+        /// Minimum 24h volume, $M.
+        #[arg(long, default_value_t = 10.0)]
         min_volume: f64,
         /// Hours of 1-minute candles (max 83).
         #[arg(long, default_value_t = 72)]
         hours: i64,
+        /// Window in minutes (catalyst trades hold up to hours; flow 30 min).
+        #[arg(long, default_value_t = 30)]
+        window: usize,
+        /// Hurdle as a multiple of the round-trip cost.
+        #[arg(long, default_value_t = 3.0)]
+        mult: f64,
     },
-    /// Check the account address, agent key, margin, coins and leverage of this
-    /// config's [exchange]. Sends no orders.
+    /// Check keys, agent approval, margin and coins. Sends no orders.
     Check,
-    /// Clear the hold set after an unconfirmed order, once you've checked
-    /// Hyperliquid and the live ledger agree.
+    /// Clear the hold set after an unconfirmed order, once you've checked Hyperliquid.
     ClearHold,
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    // Secrets: real environment wins, then --env-file, then .env.local, then .env (all git-ignored).
     if let Some(f) = &cli.env_file {
         dotenvy::from_filename(f).map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()))?;
     }
     let _ = dotenvy::from_filename(".env.local");
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
 
     let cfg = Config::load(&cli.config)?;
-    std::fs::create_dir_all(&cfg.data_dir)?;
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent("jev-trader/0.1")
-        .build()?;
-
+    let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).user_agent("Mozilla/5.0 (jev-trader)").build()?;
     match cli.cmd {
-        Cmd::News => {
-            for item in bot::fetch_all_news(&http, &cfg).await {
-                let when = item.published.map(|p| p.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "undated         ".into());
-                println!("{when}  [{}]  {}", item.source, item.title);
-            }
-        }
-        Cmd::Status => print_status(&http, &cfg).await?,
-        Cmd::Analyze { text } => {
-            let jev = jev_client(&cfg)?;
-            let item = NewsItem {
-                id: "cli".into(),
-                title: text,
-                summary: String::new(),
-                source: "cli".into(),
-                published: Some(Utc::now()),
+        Cmd::Run { live } => {
+            let live = match (cfg.exchange.mode, live) {
+                (config::ExecMode::Live, true) => Some(live::Live::connect(&cfg).await?),
+                (config::ExecMode::Paper, false) => None,
+                (config::ExecMode::Live, false) => anyhow::bail!("this config sends real orders ([exchange] mode = \"live\"); add --live to confirm"),
+                (config::ExecMode::Paper, true) => anyhow::bail!("--live given but the config is paper; use a live config (see config.live.toml)"),
             };
-            let t0 = std::time::Instant::now();
-            let ev = news::analyze(&jev, &item, &cfg.assets, Utc::now()).await?;
-            println!("{}", serde_json::to_string_pretty(&ev)?);
-            eprintln!("latency: {:?}", t0.elapsed());
+            engine::run(cfg.clone(), jev_client(&cfg)?, live).await?;
         }
-        Cmd::Run { once, live } => {
-            let paths = Paths::new(&cfg.data_dir);
-            let live = arm(&cfg, live).await?;
-            let ctx = bot::Ctx { jev: jev_client(&cfg)?, cfg, http, paths, live };
-            bot::run(ctx, once).await?;
+        Cmd::News { all } => news_dry_run(&http, &cfg, all).await?,
+        Cmd::Analyze { text } => {
+            let files = status::Files::new(&std::env::temp_dir());
+            let gate = intel::JevGate::new(jev_client(&cfg)?, 10, &files);
+            let names: Vec<String> = hyperliquid::perp_universe(&http, cfg.api()).await.map(|p| p.into_iter().map(|x| x.coin).collect()).unwrap_or_else(|_| cfg.watch.clone());
+            let tag = intel::tagger::Tagger::new(&names).tag(&text, "");
+            println!("local tag: {tag:?}");
+            let mut q = indexmap::IndexMap::new();
+            q.insert("s0".to_string(), jev::Question::score("h0: effect on the tagged asset's price over the next few hours", &["Strong drop", "Drop", "No effect", "Rise", "Strong rise"]));
+            q.insert("n0".to_string(), jev::Question::noul("h0 is a new, concrete, market-moving fact (not opinion, analysis, recap, or a report of price moves)"));
+            let subject = tag.coins.first().cloned().unwrap_or_else(|| "crypto market".into());
+            let state = serde_json::json!({ "task": "Each item is a crypto news headline tagged with the asset it concerns", "items": { "h0": format!("[{subject}] {text}") } });
+            let r = gate.ask("cli", 1, &state, &q).await?;
+            let (s, conf) = r.score_expected("s0")?;
+            println!("impact {:+.2} (conf {conf:.2}) · new fact {:.2} · tokens {:?}", s * 2.0 - 1.0, r.noul("n0")?, r.usage.map(|u| (u.input_tokens, u.output_tokens)));
         }
-        Cmd::Scalp { live } => {
-            let live = arm(&cfg, live).await?;
-            scalp::run(cfg.clone(), jev_client(&cfg)?, live).await?;
+        Cmd::Report => {
+            let sc = report::scorecard(&cfg.data_dir, cfg.catalyst.min_impact);
+            let md = report::markdown(&sc);
+            std::fs::create_dir_all(&cfg.data_dir)?;
+            status::write_atomic(&status::Files::new(&cfg.data_dir).report, md.as_bytes())?;
+            println!("{md}");
         }
+        Cmd::Dashboard { host, port } => dashboard::serve(cfg, host, port).await?,
         Cmd::Hl { cmd } => match cmd {
-            HlCmd::Scan { top, min_volume, hours } => println!("{}", hyperliquid::scan(&http, cfg.api(), &cfg.scalp, top, min_volume, hours.clamp(1, 83)).await?),
+            HlCmd::Scan { top, min_volume, hours, window, mult } => println!("{}", hyperliquid::scan(&http, cfg.api(), &cfg.costs, top, min_volume, hours.clamp(1, 83), window, mult).await?),
             HlCmd::Check => live::check(&cfg).await?,
             HlCmd::ClearHold => live::clear_hold(&cfg)?,
         },
-        Cmd::Report => {
-            let md = run_report(&cfg, &cli.config)?;
-            println!("{md}");
-        }
-        Cmd::ScalpReport => {
-            let sc = scalp::report::scorecard(&scalp::report::load(&cfg.data_dir), &cfg.scalp);
-            let md = scalp::report::markdown(&sc, &hypotheses::load(&hyp_path(&cli.config))?);
-            status::write_atomic(&cfg.data_dir.join("scalp_report.md"), md.as_bytes())?;
-            let lines: String = sc.backlog.iter().filter_map(|b| serde_json::to_string(b).ok()).map(|l| l + "\n").collect();
-            status::write_atomic(&cfg.data_dir.join("scalp_backlog.jsonl"), lines.as_bytes())?;
-            println!("{md}");
-        }
-        Cmd::Backtest { from, to, run_id, compare } => match compare {
-            Some(p) => {
-                let (verdict, md) = backtest::compare(&http, &p[0], &p[1], from.as_deref(), to.as_deref()).await?;
-                println!("{md}");
-                eprintln!("verdict: {verdict}");
-            }
-            None => {
-                let b = backtest::run(&http, &cfg, from.as_deref(), to.as_deref(), run_id).await?;
-                println!("{}", b.markdown);
-                eprintln!("verdict: {} · written to {}", b.verdict, b.dir.display());
-            }
-        },
-        Cmd::Dashboard { host, port, scalp_dir } => dashboard::serve(cfg, host, port, scalp_dir).await?,
     }
     Ok(())
 }
 
-/// Real orders need both the config (`mode = "live"`) and the `--live` flag.
-async fn arm(cfg: &Config, live: bool) -> Result<Option<live::Live>> {
-    match (cfg.exchange.mode, live) {
-        (config::ExecMode::Live, true) => Ok(Some(live::Live::connect(cfg).await?)),
-        (config::ExecMode::Paper, false) => Ok(None),
-        (config::ExecMode::Live, false) => anyhow::bail!("this config sends real orders ([exchange] mode = \"live\"); add --live to confirm"),
-        (config::ExecMode::Paper, true) => anyhow::bail!("--live given but the config is paper; set [exchange] mode = \"live\" in a separate config"),
+fn jev_client(cfg: &Config) -> Result<jev::JevClient> {
+    jev::JevClient::from_env(&cfg.jev.model, Duration::from_millis(cfg.jev.timeout_ms))
+}
+
+/// `news`: every source once, through the local tagger. Shows what Jev would see.
+async fn news_dry_run(http: &reqwest::Client, cfg: &Config, all: bool) -> Result<()> {
+    let names: Vec<String> = hyperliquid::perp_universe(http, cfg.api()).await.map(|p| p.into_iter().map(|x| x.coin).collect()).unwrap_or_else(|_| cfg.watch.clone());
+    let tagger = Arc::new(intel::tagger::Tagger::new(&names));
+    let now = chrono::Utc::now();
+    let max_age = chrono::Duration::minutes(cfg.news.max_age_min);
+    let mut fetched = Vec::new();
+    for v in &cfg.news.announcements {
+        fetched.push((v.clone(), intel::sources::fetch_announcements(http, v).await));
     }
-}
-
-fn run_report(cfg: &Config, config_path: &std::path::Path) -> Result<String> {
-    let paths = Paths::new(&cfg.data_dir);
-    let settled: Vec<settle::Settlement> = status::read_jsonl(&paths.settlements);
-    let sc = report::scorecard(&settled, cfg, "paper · settled");
-    let backlog = report::backlog(&sc);
-    let hyps = hypotheses::load(&hyp_path(config_path))?;
-    let reviews: Vec<report::ReviewRecord> = status::read_jsonl(&paths.reviews);
-    let hash = backtest::config_hash(config_path)?;
-    let state = State::load_or_new(&paths.state, cfg.paper.starting_cash)?;
-    let tokens = (state.tokens.calls, state.tokens.input, state.tokens.output);
-    let md = report::markdown(&sc, &backlog, &hyps, &reviews, &hash, tokens);
-    status::write_atomic(&paths.report, md.as_bytes())?;
-    let lines: String = backlog.iter().filter_map(|b| serde_json::to_string(b).ok()).map(|l| l + "\n").collect();
-    status::write_atomic(&paths.backlog, lines.as_bytes())?;
-    Ok(md)
-}
-
-/// The hypothesis register sits next to the config.
-fn hyp_path(config_path: &std::path::Path) -> PathBuf {
-    config_path.parent().unwrap_or(std::path::Path::new(".")).join("hypotheses.toml")
-}
-
-fn jev_client(cfg: &Config) -> Result<JevClient> {
-    JevClient::from_env(&cfg.jev.model, Duration::from_millis(cfg.jev.timeout_ms))
-}
-
-async fn print_status(http: &reqwest::Client, cfg: &Config) -> Result<()> {
-    let state = State::load_or_new(&Paths::new(&cfg.data_dir).state, cfg.paper.starting_cash)?;
-    let start = state.starting_cash.unwrap_or(cfg.paper.starting_cash);
-    if state.mode.as_deref() == Some(live::MODE) {
-        println!("LIVE ledger ({}){}", state.venue.as_deref().unwrap_or("unknown venue"), state.live_hold.as_ref().map(|h| format!(" · HOLD: {h}")).unwrap_or_default());
+    for u in &cfg.news.rss {
+        fetched.push((intel::sources::source_name(u), intel::sources::fetch_rss(http, u).await));
     }
-    let mut prices = HashMap::new();
-    for a in &cfg.assets {
-        if let Ok(c) = market::klines(http, cfg.api(), &a.coin, &cfg.market.interval, 1).await
-            && validate::candles(&c).is_ok()
-            && let Some(last) = c.last()
-        {
-            prices.insert(a.symbol.clone(), last.close);
+    let (mut fresh, mut to_jev) = (0, 0);
+    for (name, r) in fetched {
+        match r {
+            Err(e) => println!("!! {name}: {e:#}"),
+            Ok(items) => {
+                let recent: Vec<_> = items.into_iter().filter(|i| i.published.is_some_and(|p| now - p < max_age)).collect();
+                println!("== {name}: {} fresh", recent.len());
+                for i in recent {
+                    fresh += 1;
+                    let t = tagger.tag(&i.title, &i.summary);
+                    let verdict = if t.noise && i.kind == intel::sources::Kind::News {
+                        "noise"
+                    } else if t.recap && i.kind == intel::sources::Kind::News {
+                        "recap"
+                    } else if t.coins.is_empty() && !t.market && i.kind != intel::sources::Kind::Official {
+                        "untradable"
+                    } else {
+                        to_jev += 1;
+                        "→ Jev"
+                    };
+                    if all || verdict == "→ Jev" {
+                        let age = i.published.map(|p| (now - p).num_minutes()).unwrap_or(0);
+                        println!("  {verdict:<10} {age:>4}m  [{}{}] {}", t.coins.join(","), if t.market { " mkt" } else { "" }, i.title);
+                    }
+                }
+            }
         }
     }
-    let verified = state.equity_verified(&prices);
-    let equity = state.equity(&prices);
-    if verified.is_none() {
-        println!("REVIEW: a held position has no price; equity below values it at entry");
-    }
-    println!("equity  ${equity:.2}  (start ${start:.2}, {:+.2}%)", (equity / start - 1.0) * 100.0);
-    println!("cash    ${:.2}", state.cash);
-    if state.funding_usd != 0.0 {
-        println!("funding ${:+.2} since start", state.funding_usd);
-    }
-    for (sym, p) in &state.positions {
-        let px = prices.get(sym).copied().unwrap_or(p.entry);
-        println!(
-            "{sym:<6} qty {:.6}  entry {:.2}  now {:.2}  pnl {:+.2}%  weight {:.1}%",
-            p.qty,
-            p.entry,
-            px,
-            (px / p.entry - 1.0) * 100.0,
-            p.qty * px / equity * 100.0
-        );
-    }
-    let brk = breaker::update(&mut state.clone(), verified, Utc::now(), &cfg.risk);
-    if brk.blocks_entries() {
-        println!("breaker: {:?} · {}{}", brk.state, brk.reason, brk.active_until.map(|u| format!(" until {u}")).unwrap_or_default());
-    }
-    if !state.pending.is_empty() {
-        println!("{} headlines waiting for a Jev retry", state.pending.len());
-    }
-    println!("Jev today: {} calls · {}/{} tokens", state.tokens.calls, state.tokens.input, state.tokens.output);
-    println!("{} news events in memory", state.events.len());
+    println!("\n{fresh} fresh items in the last {} min; {to_jev} would go to Jev (before duplicate removal), at about 180 tokens each in batches.", cfg.news.max_age_min);
     Ok(())
 }

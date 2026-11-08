@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ScalpConfig;
+use crate::config::FlowConfig;
 
 #[derive(Debug, Clone, Default)]
 struct Sec {
@@ -155,7 +155,7 @@ impl AssetMarket {
         self.secs.iter().rev().find(|b| b.sec <= sec && b.mid > 0.0).map(|b| b.mid)
     }
 
-    pub fn features(&mut self, now_ms: i64, cfg: &ScalpConfig) -> Option<Features> {
+    pub fn features(&mut self, now_ms: i64, cfg: &FlowConfig) -> Option<Features> {
         if self.bid <= 0.0 {
             return None;
         }
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn flow_activity_and_returns() {
-        let cfg = ScalpConfig { baseline_secs: 600, vol_window_secs: 120, ..Default::default() };
+        let cfg = FlowConfig { baseline_secs: 600, vol_window_secs: 120, ..Default::default() };
         let mut m = AssetMarket::default();
         let t0 = 1_000_000_000i64;
         // 10 quiet minutes: one trade per second, balanced, flat price with tiny noise.
@@ -296,6 +296,6 @@ mod tests {
     fn ignores_bad_quotes() {
         let mut m = AssetMarket::default();
         m.on_book(101.0, 1.0, 100.0, 1.0, 1);
-        assert!(m.features(2, &ScalpConfig::default()).is_none());
+        assert!(m.features(2, &FlowConfig::default()).is_none());
     }
 }

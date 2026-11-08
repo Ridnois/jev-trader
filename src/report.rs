@@ -1,557 +1,310 @@
-//! 1.3 / 1.4: statistics over settled records, with noise defences, as a markdown
-//! report (`jev-trader report`), a dashboard scorecard, and an improvement backlog.
-//! Every figure carries its n; effects carry their percentile within a
-//! block-permutation null. Suggestions only: nothing here edits config.toml.
+//! `jev-trader report`: is the engine making money, and is the news reading
+//! worth its tokens? Reads the engine's logs only; never edits a config.
+//!
+//! 1. Trades by kind (catalyst / flow): n, win rate, net $ and bps after fees.
+//! 2. Headline markouts: does Jev's signed impact predict the move at 5/15/60/240
+//!    min after costs, for every catalyst-grade headline (taken or not)? By source
+//!    and by kind (listing vs news).
+//! 3. Flow markouts: do flow candidates that agree with the news beat those that
+//!    don't? (Answers whether the news filter is what makes flow trades pay.)
+//! 4. Jev spend: calls, tokens, tokens per headline, by purpose.
+//!
+//! Means carry 95% intervals with errors clustered by UTC hour (nearby samples are
+//! not independent). Figures with fewer than `MIN_N` independent hours are marked thin.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value;
 
-use crate::config::Config;
-use crate::hypotheses::Hypothesis;
-use crate::settle::{Kind, Settlement};
-use crate::stats;
+use crate::status::{Files, read_jsonl};
 
-/// n below which a weight suggestion is never made.
-pub const MIN_SUGGEST: usize = 20;
-/// n below which a statistic is shown greyed out.
-pub const MIN_SOLID: usize = 30;
-/// n below which a cohort is hidden.
-pub const MIN_SHOW: usize = 5;
-const NULL_ITERS: usize = 1000;
+pub const MIN_N: usize = 20;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct IcRow {
-    pub h: u32,
-    pub n_raw: usize,
-    pub n_clusters: usize,
-    pub ic: Option<f64>,
-    pub null_pct: Option<f64>,
-    pub p: Option<f64>,
-    pub hit_rate: Option<f64>,
-    pub hit_null_pct: Option<f64>,
-    pub low_n: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Cohort {
-    pub dim: String,
-    pub key: String,
-    pub n_clusters: usize,
-    pub ic: Option<f64>,
-    pub p: Option<f64>,
-    pub hit_rate: Option<f64>,
-    pub low_n: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GateValue {
-    pub gate: String,
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Est {
     pub n: usize,
-    pub missed: usize,
-    pub correctly_blocked: usize,
-    /// Mean 24h return of the blocked entries (positive = the gate cost money).
-    pub mean_ret: f64,
-    pub low_n: bool,
+    /// Independent clusters (UTC hours).
+    pub clusters: usize,
+    pub mean: Option<f64>,
+    pub lo: Option<f64>,
+    pub hi: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct DecisionStats {
-    pub n: usize,
-    pub n_clusters: usize,
-    pub hit_rate: Option<f64>,
-    /// Mean direction-adjusted 24h return per decision.
-    pub expectancy: Option<f64>,
-    pub tags: BTreeMap<String, usize>,
-    pub regime_mismatch: usize,
-    pub low_n: bool,
+impl Est {
+    pub fn thin(&self) -> bool {
+        self.clusters < MIN_N
+    }
+
+    /// "pays", "loses", "unclear", or "too little data".
+    pub fn verdict(&self) -> &'static str {
+        match (self.thin(), self.lo, self.hi) {
+            (true, _, _) => "too little data",
+            (_, Some(lo), _) if lo > 0.0 => "pays",
+            (_, _, Some(hi)) if hi < 0.0 => "loses",
+            _ => "unclear",
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct StopCalibration {
-    pub stop_pct: f64,
-    /// Long entries (taken or blocked) that were up at 24h.
-    pub n_winners: usize,
-    /// Share of those winners whose MAE first went below the stop.
-    pub share_below_stop: Option<f64>,
-    pub mae_q50: Option<f64>,
-    pub mae_q90: Option<f64>,
-    pub low_n: bool,
+/// Mean with an hour-clustered 95% interval. `v` = (unix hour, value).
+pub fn est(v: &[(i64, f64)]) -> Est {
+    let n = v.len();
+    if n == 0 {
+        return Est::default();
+    }
+    let mean = v.iter().map(|x| x.1).sum::<f64>() / n as f64;
+    let mut by: BTreeMap<i64, f64> = BTreeMap::new();
+    for (h, x) in v {
+        *by.entry(*h).or_default() += x - mean;
+    }
+    let g = by.len();
+    if g < 2 {
+        return Est { n, clusters: g, mean: Some(mean), lo: None, hi: None };
+    }
+    let var = by.values().map(|s| s * s).sum::<f64>() / (n as f64 * n as f64) * g as f64 / (g as f64 - 1.0);
+    let t = t975(g - 1);
+    let se = var.sqrt();
+    Est { n, clusters: g, mean: Some(mean), lo: Some(mean - t * se), hi: Some(mean + t * se) }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Scorecard {
+fn t975(df: usize) -> f64 {
+    const T: [f64; 10] = [12.71, 4.30, 3.18, 2.78, 2.57, 2.45, 2.36, 2.31, 2.26, 2.23];
+    match df {
+        0 => f64::NAN,
+        1..=10 => T[df - 1],
+        11..=20 => 2.13,
+        21..=40 => 2.04,
+        _ => 1.98,
+    }
+}
+
+/// Spearman rank correlation.
+pub fn spearman(x: &[f64], y: &[f64]) -> Option<f64> {
+    if x.len() != y.len() || x.len() < 5 {
+        return None;
+    }
+    let rank = |v: &[f64]| {
+        let mut idx: Vec<usize> = (0..v.len()).collect();
+        idx.sort_by(|a, b| v[*a].total_cmp(&v[*b]));
+        let mut r = vec![0.0; v.len()];
+        let mut i = 0;
+        while i < idx.len() {
+            let mut j = i;
+            while j + 1 < idx.len() && v[idx[j + 1]] == v[idx[i]] {
+                j += 1;
+            }
+            for k in i..=j {
+                r[idx[k]] = (i + j) as f64 / 2.0;
+            }
+            i = j + 1;
+        }
+        r
+    };
+    let (rx, ry) = (rank(x), rank(y));
+    let n = rx.len() as f64;
+    let (mx, my) = (rx.iter().sum::<f64>() / n, ry.iter().sum::<f64>() / n);
+    let cov: f64 = rx.iter().zip(&ry).map(|(a, b)| (a - mx) * (b - my)).sum();
+    let vx: f64 = rx.iter().map(|a| (a - mx).powi(2)).sum();
+    let vy: f64 = ry.iter().map(|b| (b - my).powi(2)).sum();
+    (vx > 0.0 && vy > 0.0).then(|| cov / (vx * vy).sqrt())
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Row {
     pub label: String,
-    pub generated_at: DateTime<Utc>,
-    pub n_settled: usize,
-    pub n_failed: usize,
-    pub headlines: Vec<IcRow>,
-    pub cohorts: Vec<Cohort>,
-    pub decisions: DecisionStats,
-    pub gates: Vec<GateValue>,
-    pub stop: StopCalibration,
-    pub reaction_fcr: (f64, f64),
+    pub est: Est,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BacklogEntry {
-    pub ts: DateTime<Utc>,
-    pub pattern: String,
-    pub n: usize,
-    pub effect: String,
-    pub null_percentile: Option<f64>,
-    /// low | medium | high
-    pub severity: String,
-    pub suggestion: String,
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Scorecard {
+    pub trades: Vec<Row>,
+    pub trade_usd: BTreeMap<String, f64>,
+    pub win_rate: BTreeMap<String, f64>,
+    /// Strong headlines (catalyst-grade), net bps per horizon in the impact's direction.
+    pub events: Vec<Row>,
+    pub events_ic: BTreeMap<i64, Option<f64>>,
+    pub events_by_source: Vec<Row>,
+    pub events_by_kind: Vec<Row>,
+    pub flow: Vec<Row>,
+    pub jev: Value,
+    pub summary: Vec<String>,
 }
 
-/// Headline signal strength: signed sentiment × new_info.
-fn headline_x(s: &Settlement) -> f64 {
-    s.rec.sentiment.unwrap_or(0.0) * s.rec.new_info.unwrap_or(0.0)
+fn hour_of(v: &Value, key: &str) -> i64 {
+    v[key].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d| d.timestamp() / 3600).unwrap_or(0)
 }
 
-/// (t0, x, y) per asset → independent clusters (window = horizon), pooled.
-fn clustered(
-    rows: &[(&Settlement, f64, f64)],
-    window: Duration,
-) -> (Vec<f64>, Vec<f64>, f64) {
-    let mut by_asset: BTreeMap<&str, Vec<(DateTime<Utc>, f64, f64)>> = BTreeMap::new();
-    for (s, x, y) in rows {
-        by_asset.entry(s.rec.asset.as_str()).or_default().push((s.rec.t0, *x, *y));
-    }
-    let (mut xs, mut ys) = (Vec::new(), Vec::new());
-    let (mut first, mut last) = (None::<DateTime<Utc>>, None::<DateTime<Utc>>);
-    for (_, mut v) in by_asset {
-        v.sort_by_key(|r| r.0);
-        first = Some(first.map_or(v[0].0, |f| f.min(v[0].0)));
-        last = Some(last.map_or(v[v.len() - 1].0, |l| l.max(v[v.len() - 1].0)));
-        for (x, y) in stats::merge_pairs(&v, window) {
-            xs.push(x);
-            ys.push(y);
+pub fn scorecard(dir: &Path, min_impact: f64) -> Scorecard {
+    let f = Files::new(dir);
+    let trades: Vec<Value> = read_jsonl(&f.trades);
+    let marks: Vec<Value> = read_jsonl(&f.markouts);
+    let usage: Vec<Value> = read_jsonl(&f.jev_usage);
+    let news: Vec<Value> = read_jsonl(&f.news);
+    let first_seen: BTreeMap<String, i64> = news.iter().filter_map(|e| Some((e["id"].as_str()?.to_string(), hour_of(e, "first_seen")))).collect();
+    let mut sc = Scorecard::default();
+
+    // 1. Trades.
+    for kind in ["catalyst", "flow", "all"] {
+        let rows: Vec<&Value> = trades.iter().filter(|t| kind == "all" || t["kind"] == kind).collect();
+        let v: Vec<(i64, f64)> = rows.iter().map(|t| (hour_of(t, "opened"), t["pnl_bps"].as_f64().unwrap_or(0.0))).collect();
+        sc.trades.push(Row { label: kind.into(), est: est(&v) });
+        sc.trade_usd.insert(kind.into(), rows.iter().map(|t| t["pnl_usd"].as_f64().unwrap_or(0.0)).sum());
+        if !rows.is_empty() {
+            sc.win_rate.insert(kind.into(), rows.iter().filter(|t| t["pnl_usd"].as_f64().unwrap_or(0.0) > 0.0).count() as f64 / rows.len() as f64);
         }
     }
-    let span_days = match (first, last) {
-        (Some(f), Some(l)) => ((l - f).num_hours() as f64 / 24.0).max(1.0),
-        _ => 1.0,
+
+    // 2. Headlines.
+    let ev: Vec<&Value> = marks.iter().filter(|m| m["type"] == "event").collect();
+    let hour = |m: &Value| first_seen.get(m["id"].as_str().unwrap_or("")).copied().unwrap_or(0);
+    for h in [5, 15, 60, 240] {
+        let at: Vec<&&Value> = ev.iter().filter(|m| m["h_min"] == h).collect();
+        let strong: Vec<(i64, f64)> = at.iter().filter(|m| m["impact"].as_f64().unwrap_or(0.0).abs() >= min_impact).map(|m| (hour(m), m["net_bps"].as_f64().unwrap_or(0.0))).collect();
+        sc.events.push(Row { label: format!("{h} min"), est: est(&strong) });
+        // IC: signed strength vs the raw move (unsigned by side).
+        let x: Vec<f64> = at.iter().map(|m| m["impact"].as_f64().unwrap_or(0.0) * m["new_info"].as_f64().unwrap_or(0.0)).collect();
+        let y: Vec<f64> = at.iter().map(|m| if m["side"] == "short" { -1.0 } else { 1.0 } * m["ret_bps"].as_f64().unwrap_or(0.0)).collect();
+        sc.events_ic.insert(h, spearman(&x, &y));
+    }
+    let strong60: Vec<&&Value> = ev.iter().filter(|m| m["h_min"] == 60 && m["impact"].as_f64().unwrap_or(0.0).abs() >= min_impact).collect();
+    for (key, out) in [("source", &mut sc.events_by_source), ("kind", &mut sc.events_by_kind)] {
+        let mut g: BTreeMap<String, Vec<(i64, f64)>> = BTreeMap::new();
+        for m in &strong60 {
+            g.entry(m[key].as_str().unwrap_or("?").to_string()).or_default().push((hour(m), m["net_bps"].as_f64().unwrap_or(0.0)));
+        }
+        let mut rows: Vec<Row> = g.into_iter().map(|(k, v)| Row { label: k, est: est(&v) }).collect();
+        rows.sort_by(|a, b| b.est.n.cmp(&a.est.n));
+        *out = rows;
+    }
+
+    // 3. Flow: aligned with news vs not, at each horizon.
+    let fl: Vec<&Value> = marks.iter().filter(|m| m["type"] == "flow").collect();
+    let mut hs: Vec<i64> = fl.iter().filter_map(|m| m["h_secs"].as_i64()).collect();
+    hs.sort();
+    hs.dedup();
+    for h in hs {
+        for (label, aligned) in [("agrees with news", true), ("no news support", false)] {
+            let v: Vec<(i64, f64)> = fl
+                .iter()
+                .filter(|m| m["h_secs"] == h && m["aligned"].as_bool() == Some(aligned))
+                .map(|m| (m["id"].as_str().and_then(|s| s.rsplit('-').next()).and_then(|t| t.parse::<i64>().ok()).unwrap_or(0) / 3_600_000, m["net_bps"].as_f64().unwrap_or(0.0)))
+                .collect();
+            sc.flow.push(Row { label: format!("{}s · {label}", h), est: est(&v) });
+        }
+    }
+
+    // 4. Jev spend.
+    let mut by: BTreeMap<String, (u64, u64, u64, u64)> = BTreeMap::new();
+    for u in &usage {
+        let e = by.entry(u["purpose"].as_str().unwrap_or("?").to_string()).or_default();
+        e.0 += 1;
+        e.1 += u["input"].as_u64().unwrap_or(0) + u["output"].as_u64().unwrap_or(0);
+        e.2 += u["items"].as_u64().unwrap_or(0);
+        e.3 += u64::from(u["ok"].as_bool() != Some(true));
+    }
+    let days = {
+        let ts: Vec<i64> = usage.iter().map(|u| hour_of(u, "ts")).filter(|h| *h > 0).collect();
+        match (ts.iter().min(), ts.iter().max()) {
+            (Some(a), Some(b)) => ((b - a) as f64 / 24.0).max(1.0 / 24.0),
+            _ => 0.0,
+        }
     };
-    (xs, ys, span_days)
-}
+    let total: u64 = by.values().map(|v| v.1).sum();
+    sc.jev = serde_json::json!({
+        "by_purpose": by.iter().map(|(k, v)| (k.clone(), serde_json::json!({ "calls": v.0, "tokens": v.1, "items": v.2, "failed": v.3, "tokens_per_item": if v.2 > 0 { Some(v.1 as f64 / v.2 as f64) } else { None } }))).collect::<BTreeMap<_, _>>(),
+        "total_tokens": total,
+        "days": days,
+        "tokens_per_day": if days > 0.0 { Some(total as f64 / days) } else { None },
+        "v1_tokens_per_headline": 751,
+    });
 
-/// Block length (in clusters) covering at least 24h.
-fn block_len(n: usize, span_days: f64) -> usize {
-    ((n as f64 / span_days).ceil() as usize).max(2)
-}
-
-fn ic_row(rows: &[(&Settlement, f64, f64)], h: u32) -> IcRow {
-    let (x, y, span) = clustered(rows, Duration::hours(h as i64));
-    let n = x.len();
-    let block = block_len(n, span);
-    let ic = stats::spearman(&x, &y);
-    let null_pct = if n >= MIN_SHOW { stats::null_percentile(&x, &y, block, NULL_ITERS, stats::spearman) } else { None };
-    let hit = stats::hit_rate(&x, &y);
-    let hit_null = if n >= MIN_SHOW { stats::null_percentile(&x, &y, block, NULL_ITERS, stats::hit_rate) } else { None };
-    IcRow {
-        h,
-        n_raw: rows.len(),
-        n_clusters: n,
-        ic,
-        null_pct,
-        p: null_pct.map(stats::p_two_sided),
-        hit_rate: hit,
-        hit_null_pct: hit_null,
-        low_n: n < MIN_SOLID,
-    }
-}
-
-pub fn scorecard(settled: &[Settlement], cfg: &Config, label: &str) -> Scorecard {
-    let ok: Vec<&Settlement> = settled.iter().filter(|s| s.status == "SETTLED").collect();
-    let n_failed = settled.len() - ok.len();
-    let heads: Vec<&Settlement> = ok.iter().copied().filter(|s| s.rec.kind == Kind::Headline && s.rec.event.as_deref() != Some("noise")).collect();
-
-    let mut headlines = Vec::new();
-    for &h in &cfg.settle.horizons {
-        let rows: Vec<(&Settlement, f64, f64)> =
-            heads.iter().filter_map(|s| s.horizon(h).and_then(|r| r.z).map(|z| (*s, headline_x(s), z))).collect();
-        headlines.push(ic_row(&rows, h));
-    }
-
-    // Breakdowns at 4h (or the middle horizon).
-    let bh = if cfg.settle.horizons.contains(&4) { 4 } else { cfg.settle.horizons[cfg.settle.horizons.len() / 2] };
-    let mut cohorts = Vec::new();
-    let dims: [(&str, fn(&Settlement) -> Option<String>); 4] = [
-        ("event", |s| s.rec.event.clone()),
-        ("source", |s| s.rec.source.clone()),
-        ("asset", |s| Some(s.rec.asset.clone())),
-        ("regime", |s| s.rec.regime_at_signal.clone()),
-    ];
-    for (dim, key) in dims {
-        let mut groups: BTreeMap<String, Vec<(&Settlement, f64, f64)>> = BTreeMap::new();
-        for s in &heads {
-            if let (Some(k), Some(z)) = (key(s), s.horizon(bh).and_then(|r| r.z)) {
-                groups.entry(k).or_default().push((*s, headline_x(s), z));
-            }
-        }
-        for (k, rows) in groups {
-            let r = ic_row(&rows, bh);
-            if r.n_clusters < MIN_SHOW {
-                continue;
-            }
-            cohorts.push(Cohort { dim: dim.into(), key: k, n_clusters: r.n_clusters, ic: r.ic, p: r.p, hit_rate: r.hit_rate, low_n: r.low_n });
-        }
-    }
-
-    // Decisions at 24h (or the longest horizon).
-    let dh = cfg.settle.horizons.iter().copied().max().unwrap_or(24);
-    let decs: Vec<&Settlement> = ok.iter().copied().filter(|s| s.rec.kind == Kind::Decision).collect();
-    let mut tags = BTreeMap::new();
-    let mut drets = Vec::new();
-    let mut drows = Vec::new();
-    for s in &decs {
-        if let Some(r) = s.horizon(dh) {
-            *tags.entry(r.tag.clone()).or_insert(0) += 1;
-            drets.push(s.rec.direction as f64 * r.ret);
-            drows.push((*s, s.rec.direction as f64, r.ret));
-        }
-    }
-    let (dx, dy, _) = clustered(&drows, Duration::hours(dh as i64));
-    let decisions = DecisionStats {
-        n: decs.len(),
-        n_clusters: dx.len(),
-        hit_rate: stats::hit_rate(&dx, &dy),
-        expectancy: (!drets.is_empty()).then(|| stats::mean(&drets)),
-        tags,
-        regime_mismatch: decs.iter().filter(|s| s.regime_mismatch).count(),
-        low_n: dx.len() < MIN_SOLID,
-    };
-
-    // Gate values from counterfactuals.
-    let mut gmap: BTreeMap<String, Vec<&Settlement>> = BTreeMap::new();
-    for s in ok.iter().copied().filter(|s| s.rec.kind == Kind::Counterfactual) {
-        gmap.entry(s.rec.blocked_by.clone().unwrap_or_else(|| "?".into())).or_default().push(s);
-    }
-    let gates = gmap
-        .into_iter()
-        .map(|(gate, v)| {
-            let rs: Vec<&crate::settle::HorizonResult> = v.iter().filter_map(|s| s.horizon(dh)).collect();
-            let missed = rs.iter().filter(|r| r.label.as_deref() == Some("MISSED_OPPORTUNITY")).count();
-            GateValue {
-                gate,
-                n: rs.len(),
-                missed,
-                correctly_blocked: rs.len() - missed,
-                mean_ret: stats::mean(&rs.iter().map(|r| r.ret).collect::<Vec<_>>()),
-                low_n: rs.len() < MIN_SOLID,
-            }
-        })
-        .collect();
-
-    // Stop calibration from MAE of winners (long entries, taken or blocked).
-    let maes: Vec<f64> = ok
-        .iter()
-        .filter(|s| matches!(s.rec.kind, Kind::Decision | Kind::Counterfactual) && s.rec.direction > 0)
-        .filter_map(|s| s.horizon(dh))
-        .filter(|r| r.ret > 0.0)
-        .map(|r| r.mae)
-        .collect();
-    let stop_pct = cfg.risk.stop_loss_pct;
-    let stop = StopCalibration {
-        stop_pct,
-        n_winners: maes.len(),
-        share_below_stop: (!maes.is_empty()).then(|| maes.iter().filter(|m| **m <= -stop_pct).count() as f64 / maes.len() as f64),
-        mae_q50: stats::quantile(&maes, 0.5),
-        mae_q90: stats::quantile(&maes, 0.1),
-        low_n: maes.len() < MIN_SOLID,
-    };
-
-    Scorecard {
-        label: label.into(),
-        generated_at: Utc::now(),
-        n_settled: ok.len(),
-        n_failed,
-        headlines,
-        cohorts,
-        decisions,
-        gates,
-        stop,
-        reaction_fcr: stats::false_confirmation_rate(cfg.strategy.reaction_min_clusters.max(1), cfg.strategy.reaction_z, 0.3, 4000),
-    }
-}
-
-/// Improvement backlog: patterns with enough evidence, as suggestions.
-pub fn backlog(sc: &Scorecard) -> Vec<BacklogEntry> {
-    let now = sc.generated_at;
-    let mut out = Vec::new();
-    for c in &sc.cohorts {
-        if (c.dim == "event" || c.dim == "source") && c.n_clusters >= MIN_SUGGEST && c.p.is_some_and(|p| p > 0.1) {
-            out.push(BacklogEntry {
-                ts: now,
-                pattern: format!("{} '{}' carries no measurable signal", c.dim, c.key),
-                n: c.n_clusters,
-                effect: format!("IC {:+.3}", c.ic.unwrap_or(0.0)),
-                null_percentile: c.p.map(|p| (1.0 - p / 2.0) * 100.0),
-                severity: "medium".into(),
-                suggestion: format!("consider news.{}_weight.\"{}\" = 0 (via the review gate)", c.dim, c.key),
-            });
-        }
-    }
-    for g in &sc.gates {
-        if g.n >= MIN_SUGGEST && g.missed * 2 > g.n && g.mean_ret > 0.0 {
-            out.push(BacklogEntry {
-                ts: now,
-                pattern: format!("gate '{}' blocks more winners than losers", g.gate),
-                n: g.n,
-                effect: format!("{} missed / {} correctly blocked, mean blocked 24h return {:+.2}%", g.missed, g.correctly_blocked, g.mean_ret * 100.0),
-                null_percentile: None,
-                severity: "high".into(),
-                suggestion: format!("review whether '{}' should be loosened; write a hypothesis first", g.gate),
-            });
-        }
-    }
-    if sc.stop.n_winners >= MIN_SUGGEST && sc.stop.share_below_stop.is_some_and(|s| s > 0.3) {
-        out.push(BacklogEntry {
-            ts: now,
-            pattern: "fixed stop cuts off winning trades".into(),
-            n: sc.stop.n_winners,
-            effect: format!(
-                "{:.0}% of winners went below −{:.1}% first; MAE q90 {:.1}%",
-                sc.stop.share_below_stop.unwrap_or(0.0) * 100.0,
-                sc.stop.stop_pct * 100.0,
-                sc.stop.mae_q90.unwrap_or(0.0) * 100.0
-            ),
-            null_percentile: None,
-            severity: "high".into(),
-            suggestion: "test risk.stop = \"atr\" with stop_atr_mult set from the MAE q90 (hypothesis H-004)".into(),
+    // Plain-language summary.
+    let all = &sc.trades[2].est;
+    sc.summary.push(match all.verdict() {
+        "too little data" => format!("Trading result: {} trades over {} hours, too few to judge (need {MIN_N}+ independent hours).", all.n, all.clusters),
+        v => format!("Trading result: {} trades, {:+.1} bps per trade after fees ({}).", all.n, all.mean.unwrap_or(0.0), v),
+    });
+    if let Some(r) = sc.events.iter().find(|r| r.label == "60 min") {
+        sc.summary.push(match r.est.verdict() {
+            "too little data" => format!("Headline edge: {} strong headlines marked out, too few to judge.", r.est.n),
+            v => format!("Headline edge: strong headlines move {:+.1} bps net in Jev's direction after 60 min ({v}).", r.est.mean.unwrap_or(0.0)),
         });
     }
-    for r in &sc.headlines {
-        if r.n_clusters >= MIN_SUGGEST && r.p.is_some_and(|p| p > 0.1) {
-            out.push(BacklogEntry {
-                ts: now,
-                pattern: format!("headline IC at {}h is indistinguishable from noise", r.h),
-                n: r.n_clusters,
-                effect: format!("IC {:+.3}", r.ic.unwrap_or(0.0)),
-                null_percentile: r.null_pct,
-                severity: "low".into(),
-                suggestion: "do not tune news thresholds for this horizon".into(),
-            });
-        }
+    let fa = sc.flow.iter().rev().find(|r| r.label.contains("agrees"));
+    let fb = sc.flow.iter().rev().find(|r| r.label.contains("no news"));
+    if let (Some(a), Some(b)) = (fa, fb) {
+        sc.summary.push(format!(
+            "News filter on flow: candidates that agree with the news {:+.1} bps vs {:+.1} bps without support at the longest horizon (n {} vs {}).",
+            a.est.mean.unwrap_or(f64::NAN),
+            b.est.mean.unwrap_or(f64::NAN),
+            a.est.n,
+            b.est.n
+        ));
     }
-    out
+    sc
 }
 
-fn f(x: Option<f64>, digits: usize) -> String {
-    x.map(|v| format!("{v:+.digits$}")).unwrap_or_else(|| "—".into())
+fn fmt_est(e: &Est) -> String {
+    let m = e.mean.map(|m| format!("{m:+.1}")).unwrap_or_else(|| "–".into());
+    let ci = match (e.lo, e.hi) {
+        (Some(lo), Some(hi)) => format!("[{lo:+.1}, {hi:+.1}]"),
+        _ => "–".into(),
+    };
+    format!("{m} | {ci} | {} | {} | {}", e.n, e.clusters, e.verdict())
 }
 
-fn pctf(x: Option<f64>) -> String {
-    x.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or_else(|| "—".into())
-}
-
-fn grey(low: bool) -> &'static str {
-    if low { " *(n<30)*" } else { "" }
-}
-
-fn verdict(p: Option<f64>) -> &'static str {
-    match p {
-        Some(p) if p <= 0.1 => "",
-        Some(_) => " · indistinguishable from noise",
-        None => " · too few clusters for a null test",
+pub fn markdown(sc: &Scorecard) -> String {
+    let mut s = String::from("# jev-trader v2 report\n\n");
+    for l in &sc.summary {
+        s += &format!("- {l}\n");
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReviewRecord {
-    pub ts: DateTime<Utc>,
-    pub verdict: String,
-    pub candidate_hash: String,
-    pub candidate: String,
-}
-
-pub fn markdown(
-    sc: &Scorecard,
-    backlog: &[BacklogEntry],
-    hyps: &[Hypothesis],
-    reviews: &[ReviewRecord],
-    current_hash: &str,
-    tokens: (u64, u64, u64),
-) -> String {
-    let mut s = String::new();
-    let _ = writeln!(s, "# jev-trader report\n");
-    let _ = writeln!(
-        s,
-        "*{} · generated {} · {} settled records ({} failed).* Statistics with n < 30 are marked; cohorts with n < 5 are hidden. Percentiles are within a block-permutation null ({} shuffles, blocks ≥ 24h).\n",
-        sc.label,
-        sc.generated_at.format("%Y-%m-%d %H:%M UTC"),
-        sc.n_settled,
-        sc.n_failed,
-        NULL_ITERS
-    );
-    if let Some(r) = reviews.iter().rev().find(|r| r.candidate_hash == current_hash) {
-        if r.verdict == "REJECT" {
-            let _ = writeln!(s, "> **The current config was applied against a REJECT verdict** ({}, {}).\n", r.candidate, r.ts.format("%Y-%m-%d"));
+    s += "\n## Trades (bps per trade after fees)\n\n| kind | mean | 95% CI | n | hours | verdict | net $ | win rate |\n|---|---|---|---|---|---|---|---|\n";
+    for r in &sc.trades {
+        s += &format!("| {} | {} | {:+.2} | {} |\n", r.label, fmt_est(&r.est), sc.trade_usd.get(&r.label).unwrap_or(&0.0), sc.win_rate.get(&r.label).map(|w| format!("{:.0}%", w * 100.0)).unwrap_or_else(|| "–".into()));
+    }
+    s += "\n## Strong headlines: net bps in Jev's direction, taken or not\n\n| horizon | mean | 95% CI | n | hours | verdict | IC (all headlines) |\n|---|---|---|---|---|---|---|\n";
+    for r in &sc.events {
+        let h: i64 = r.label.split(' ').next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        s += &format!("| {} | {} | {} |\n", r.label, fmt_est(&r.est), sc.events_ic.get(&h).copied().flatten().map(|x| format!("{x:+.2}")).unwrap_or_else(|| "–".into()));
+    }
+    for (title, rows) in [("By source (60 min)", &sc.events_by_source), ("By kind (60 min)", &sc.events_by_kind)] {
+        s += &format!("\n### {title}\n\n| | mean | 95% CI | n | hours | verdict |\n|---|---|---|---|---|---|\n");
+        for r in rows {
+            s += &format!("| {} | {} |\n", r.label, fmt_est(&r.est));
         }
     }
-
-    let _ = writeln!(s, "## Headlines: does sentiment predict the move?\n");
-    let _ = writeln!(s, "IC = Spearman of sentiment × new_info against the vol-normalised forward return, after merging overlapping windows per asset.\n");
-    let _ = writeln!(s, "| Horizon | n (clusters / raw) | IC | null pct | hit rate | hit null pct |\n|---|---|---|---|---|---|");
-    for r in &sc.headlines {
-        let _ = writeln!(
-            s,
-            "| {}h | {} / {}{} | {} | {}{} | {} | {} |",
-            r.h,
-            r.n_clusters,
-            r.n_raw,
-            grey(r.low_n),
-            f(r.ic, 3),
-            r.null_pct.map(|p| format!("{p:.0}")).unwrap_or_else(|| "—".into()),
-            verdict(r.p),
-            pctf(r.hit_rate),
-            r.hit_null_pct.map(|p| format!("{p:.0}")).unwrap_or_else(|| "—".into()),
-        );
+    s += "\n## Flow candidates: does agreeing with the news help? (net bps)\n\n| horizon · group | mean | 95% CI | n | hours | verdict |\n|---|---|---|---|---|---|\n";
+    for r in &sc.flow {
+        s += &format!("| {} | {} |\n", r.label, fmt_est(&r.est));
     }
-    if !sc.cohorts.is_empty() {
-        let _ = writeln!(s, "\n### Breakdown (4h)\n\n| Cohort | n | IC | p | hit rate |\n|---|---|---|---|---|");
-        for c in &sc.cohorts {
-            let _ = writeln!(s, "| {} = {} | {}{} | {} | {} | {} |", c.dim, c.key, c.n_clusters, grey(c.low_n), f(c.ic, 3), c.p.map(|p| format!("{p:.2}")).unwrap_or_else(|| "—".into()), pctf(c.hit_rate));
-        }
-    }
-
-    let d = &sc.decisions;
-    let _ = writeln!(s, "\n## Decisions\n");
-    let _ = writeln!(
-        s,
-        "{} decisions in {} independent clusters{} · hit rate {} · expectancy {} per decision (24h, direction-adjusted) · {} regime mismatches.\n",
-        d.n,
-        d.n_clusters,
-        grey(d.low_n),
-        pctf(d.hit_rate),
-        d.expectancy.map(|e| format!("{:+.2}%", e * 100.0)).unwrap_or_else(|| "—".into()),
-        d.regime_mismatch
-    );
-    if !d.tags.is_empty() {
-        let _ = writeln!(s, "| Outcome (24h) | n |\n|---|---|");
-        for (t, n) in &d.tags {
-            let _ = writeln!(s, "| {t} | {n} |");
-        }
-    }
-
-    let _ = writeln!(s, "\n## Gate values (blocked entries, settled as if taken)\n");
-    if sc.gates.is_empty() {
-        let _ = writeln!(s, "No blocked entries settled yet.");
-    } else {
-        let _ = writeln!(s, "| Gate | n | missed | correctly blocked | mean blocked 24h return |\n|---|---|---|---|---|");
-        for g in &sc.gates {
-            let _ = writeln!(s, "| {} | {}{} | {} | {} | {:+.2}% |", g.gate, g.n, grey(g.low_n), g.missed, g.correctly_blocked, g.mean_ret * 100.0);
-        }
-    }
-
-    let st = &sc.stop;
-    let _ = writeln!(s, "\n## Stop calibration\n");
-    let _ = writeln!(
-        s,
-        "{} winning long entries{}. Share whose MAE first went below −{:.1}%: {}. MAE median {}, 90th percentile {}.",
-        st.n_winners,
-        grey(st.low_n),
-        st.stop_pct * 100.0,
-        pctf(st.share_below_stop),
-        st.mae_q50.map(|m| format!("{:.2}%", m * 100.0)).unwrap_or_else(|| "—".into()),
-        st.mae_q90.map(|m| format!("{:.2}%", m * 100.0)).unwrap_or_else(|| "—".into()),
-    );
-    let _ = writeln!(
-        s,
-        "\nNews-reaction gate on pure noise: false confirmation {:.1}% (i.i.d.), {:.1}% (AR(1) φ=0.3).",
-        sc.reaction_fcr.0 * 100.0,
-        sc.reaction_fcr.1 * 100.0
-    );
-
-    let _ = writeln!(s, "\n## Improvement backlog (suggestions only)\n");
-    if backlog.is_empty() {
-        let _ = writeln!(s, "Nothing has n ≥ {MIN_SUGGEST} and a clear effect yet.");
-    }
-    for b in backlog {
-        let _ = writeln!(s, "- **[{}] {}** — n={}, {}{}. → {}", b.severity, b.pattern, b.n, b.effect, b.null_percentile.map(|p| format!(", null pct {p:.0}")).unwrap_or_default(), b.suggestion);
-    }
-
-    let _ = writeln!(s, "\n## Hypotheses\n");
-    for status in ["testing", "proposed", "accepted", "rejected"] {
-        let v: Vec<&Hypothesis> = hyps.iter().filter(|h| h.status == status).collect();
-        if v.is_empty() {
-            continue;
-        }
-        let _ = writeln!(s, "**{status}**\n");
-        for h in v {
-            let _ = writeln!(s, "- `{}` {} — change `{}`; pass if {}{}", h.id, h.statement, h.change, h.pass_if, if h.result.is_empty() { String::new() } else { format!(" · result: {}", h.result) });
-        }
-        let _ = writeln!(s);
-    }
-    let _ = writeln!(s, "## Jev usage today\n\n{} calls · {} input / {} output tokens.", tokens.0, tokens.1, tokens.2);
+    s += &format!("\n## Jev spend\n\n```json\n{}\n```\n", serde_json::to_string_pretty(&sc.jev).unwrap_or_default());
+    s += "\nIntervals cluster by UTC hour. \"too little data\" = fewer than 20 independent hours. Suggestions only; nothing here changes a config.\n";
     s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settle::{HorizonResult, Record};
 
-    fn settled(i: i64, x: f64, z: f64, kind: Kind) -> Settlement {
-        let t0 = DateTime::from_timestamp(i * 7200, 0).unwrap();
-        Settlement {
-            rec: Record {
-                id: format!("{i}"),
-                kind,
-                asset: "BTC".into(),
-                t0,
-                direction: if x > 0.0 { 1 } else { -1 },
-                stop_pct: 0.04,
-                event: Some("macro".into()),
-                source: Some("s".into()),
-                sentiment: Some(x),
-                sentiment_conf: Some(1.0),
-                new_info: Some(1.0),
-                cluster_id: None,
-                news_score: None,
-                blocked_by: (kind == Kind::Counterfactual).then(|| "pause".into()),
-                regime_at_signal: None,
-                attempts: 0,
-            },
-            status: "SETTLED".into(),
-            error: None,
-            entry_time: Some(t0),
-            entry_price: Some(100.0),
-            vol: Some(0.01),
-            horizons: [1u32, 4, 24]
-                .iter()
-                .map(|&h| HorizonResult { h, ret: z * 0.01, excess: None, z: Some(z), mfe: 0.01, mae: -0.05, stop_hit_h: None, tag: "WORKED".into(), label: (kind == Kind::Counterfactual).then(|| "MISSED_OPPORTUNITY".into()) })
-                .collect(),
-            regime_at_exit: None,
-            regime_mismatch: false,
-            settled_at: t0,
-        }
+    #[test]
+    fn clustered_interval_and_verdicts() {
+        let v: Vec<(i64, f64)> = (0..40).map(|i| (i, 10.0 + (i % 3) as f64)).collect();
+        let e = est(&v);
+        assert_eq!(e.clusters, 40);
+        assert_eq!(e.verdict(), "pays");
+        let neg: Vec<(i64, f64)> = (0..40).map(|i| (i, -5.0 + (i % 2) as f64)).collect();
+        assert_eq!(est(&neg).verdict(), "loses");
+        let thin: Vec<(i64, f64)> = (0..100).map(|i| (i / 50, 5.0)).collect();
+        assert_eq!(est(&thin).verdict(), "too little data", "100 samples in 2 hours are 2 observations");
     }
 
     #[test]
-    fn clusters_overlap_and_reports() {
-        let cfg = crate::decide::tests::cfg();
-        let mut rng = stats::Rng::new(1);
-        let v: Vec<Settlement> = (0..300)
-            .map(|i| {
-                let x = rng.normal();
-                settled(i, x, x + 0.3 * rng.normal(), if i % 10 == 0 { Kind::Counterfactual } else { Kind::Headline })
-            })
-            .collect();
-        let sc = scorecard(&v, &cfg, "test");
-        let h1 = &sc.headlines[0];
-        assert!(h1.n_clusters <= h1.n_raw);
-        let h24 = &sc.headlines[2];
-        assert!(h24.n_clusters < h1.n_clusters / 5, "24h windows on 2h spacing merge heavily");
-        assert!(h1.ic.unwrap() > 0.5 && h1.null_pct.unwrap() > 95.0);
-        assert_eq!(sc.gates[0].gate, "pause");
-        assert!(sc.stop.share_below_stop.unwrap() > 0.9);
-        let b = backlog(&sc);
-        let md = markdown(&sc, &b, &[], &[], "", (0, 0, 0));
-        assert!(md.contains("## Gate values"));
+    fn spearman_basics() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert!((spearman(&x, &[2.0, 4.0, 6.0, 8.0, 10.0]).unwrap() - 1.0).abs() < 1e-12);
+        assert!((spearman(&x, &[5.0, 4.0, 3.0, 2.0, 1.0]).unwrap() + 1.0).abs() < 1e-12);
+        assert!(spearman(&x[..3], &x[..3]).is_none());
     }
 }

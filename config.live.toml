@@ -1,104 +1,19 @@
-# News bot, LIVE on Hyperliquid perps: same strategy as config.toml, real orders.
-# Check first:  jev-trader --config config.live.toml hl check
-# Run:          jev-trader --config config.live.toml run --live
-loop_interval_secs = 60
-data_dir = "data-live"   # separate ledger: never shares state with paper
-
-[jev]
-model = "jev-latest"
-concurrency = 8
-timeout_ms = 3000
-# max_attempts = 5            # per headline, with exponential backoff, then spiked
-# breaker_ticks = 10          # Jev circuit breaker: >50% failed calls over 10 ticks
-# breaker_fail_ratio = 0.5    #   (with at least breaker_min_calls) blocks entries
-# breaker_min_calls = 4
-
-[market]
-# Hyperliquid perp candles (public, no key), from [exchange] network.
-interval = "1h"
-momentum_window = 20      # close vs 20-candle SMA
-
-[news]
-feeds = [
-  "https://www.coindesk.com/arc/outboundfeeds/rss/",
-  "https://cointelegraph.com/rss",
-  "https://decrypt.co/feed",
-]
-max_age_hours = 6.0       # ignore older items on first sight
-half_life_hours = 2.0     # news influence halves every 2h
-retain_hours = 48.0
-# dedupe_clusters = false     # count a same-story cluster once instead of once per outlet
-# cluster_jev_check = true    # ask Jev about borderline duplicates (metadata only)
-# [news.event_weight]         # e.g. listing = 0.0 (only after the report backs it)
-# [news.source_weight]
-
-[strategy]
-news_entry = 0.30         # news score needed to go long (with positive momentum)
-news_exit = 0.30          # news score below -0.30 forces exit
-# min_clusters = 1        # independent positive stories needed before an entry
-# reaction_gate = false   # block entries when positive news keeps failing to lift price
-# reaction_min_clusters = 3
-# reaction_z = -1.5
-
-[risk]
-max_asset_weight = 0.20   # max 20% of equity per asset
-max_gross = 0.60          # max 60% invested in total
-stop_loss_pct = 0.04      # exit if 4% below average entry
-daily_loss_limit_pct = 0.03  # go flat for the day after -3%
-cooldown_hours = 6.0      # no re-entry after a stop
-min_trade_usd = 10.0
-rebalance_band = 0.02     # ignore changes < 2% of equity
-# --- Optimization-plan knobs. Every default reproduces the original strategy. ---
-# sizing = "fixed"        # "vol": weight = news_score × risk_per_trade / stop distance
-# risk_per_trade = 0.005
-# stop = "fixed_pct"      # "atr": stop = stop_atr_mult × ATR14 (set from the report's MAE data)
-# stop_atr_mult = 2.0
-# max_heat = 0.024        # Σ weight × stop distance; default = max_gross × stop_loss_pct
-# weekly_loss_limit_pct = 0.05    # halts block entries, never force a sale (off unless set)
-# monthly_loss_limit_pct = 0.08
-# losing_streak_n = 2             # N losing round trips → no entries for streak_cooldown_hours
-# streak_cooldown_hours = 24.0
-
-[paper]
-starting_cash = 10000.0
-fee_rate = 0.00045        # Hyperliquid perps taker, tier 0 (checked 2026-11-06)
-slippage_rate = 0.0005    # 5 bps (conservative for BTC/ETH/SOL)
-# Funding on open longs is accrued every tick at Hyperliquid's hourly rate.
-
-# [regime]                    # crypto market regime, refreshed hourly (keyless sources)
-# enabled = true
-# mode = "off"                # "off" = record and display only; "ceiling" | "block" after evidence
-
-# [challenge]                 # one adversarial Jev call before an entry
-# enabled = false
-# threshold = 0.7
-# action = "block"            # or "halve"
-
-# [settle]                    # score headlines / decisions / blocked entries after the fact
-# enabled = true
-# horizons = [1, 4, 24]
-# benchmark = "BTC"
+# v2 LIVE on Hyperliquid MAINNET: real money. Start only after `report` shows the
+# paper engine pays after fees with enough data, and testnet plumbing has been checked.
+#   jev-trader --config config.live.toml hl check
+#   jev-trader --config config.live.toml run --live
+data_dir = "data-v2-live"
+watch = ["BTC", "ETH", "SOL", "HYPE", "XRP", "ZEC", "SUI", "DOGE", "ENA", "kPEPE"]
 
 [exchange]
-mode = "live"             # real orders; also needs `run --live`
+mode = "live"
 network = "mainnet"
-account_env = "HL_ACCOUNT_ADDRESS"      # your main Hyperliquid address (public)
-agent_key_env = "HL_AGENT_PRIVATE_KEY"  # API agent wallet key: trades, cannot withdraw
-max_capital_usd = 0       # YOU choose this; 0 refuses to start
-max_slippage_bps = 30     # IOC limit at most 0.3% through the price
-leverage = 1              # cross 1× on each coin, matching the ledger's sizing
+max_capital_usd = 0          # YOU choose the amount; 0 refuses to start
+max_slippage_bps = 30
+leverage = 1
+backstop_stop = true         # reduce-only stop-market on the exchange in case the process dies
+backstop_mult = 1.5
 
-[[assets]]
-symbol = "BTC"
-name = "Bitcoin"
-coin = "BTC"
-
-[[assets]]
-symbol = "ETH"
-name = "Ethereum"
-coin = "ETH"
-
-[[assets]]
-symbol = "SOL"
-name = "Solana"
-coin = "SOL"
+[risk]
+max_positions = 2
+daily_loss_pct = 0.015

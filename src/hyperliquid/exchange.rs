@@ -61,6 +61,9 @@ pub struct OrderReq {
     pub reduce_only: bool,
     pub tif: Tif,
     pub cloid: String,
+    /// Some(px): a stop-market trigger order (tpsl "sl") instead of a limit; `px`
+    /// is then the worst fill price accepted once it triggers.
+    pub trigger_px: Option<f64>,
 }
 
 /// Per-order result of a placement.
@@ -230,7 +233,11 @@ impl Exchange {
             ("p", Mp::str(float_to_wire(o.px)?)),
             ("s", Mp::str(float_to_wire(o.sz)?)),
             ("r", Mp::Bool(o.reduce_only)),
-            ("t", Mp::map(vec![("limit", Mp::map(vec![("tif", Mp::str(o.tif.wire()))]))])),
+            ("t", match o.trigger_px {
+                // Key order matches the SDK's order_type_to_wire (tested in sign.rs).
+                Some(t) => Mp::map(vec![("trigger", Mp::map(vec![("isMarket", Mp::Bool(true)), ("triggerPx", Mp::str(float_to_wire(t)?)), ("tpsl", Mp::str("sl"))]))]),
+                None => Mp::map(vec![("limit", Mp::map(vec![("tif", Mp::str(o.tif.wire()))]))]),
+            }),
             ("c", Mp::str(o.cloid.clone())),
         ]))
     }
@@ -305,6 +312,10 @@ impl Exchange {
 }
 
 fn parse_placed(st: &Value) -> Option<Placed> {
+    // Trigger orders may answer with a bare status string.
+    if let Some(t) = st.as_str() {
+        return Some(if t.contains("waitingFor") || t == "success" { Placed::Resting { oid: 0 } } else { Placed::Error(t.to_string()) });
+    }
     if let Some(e) = st["error"].as_str() {
         return Some(Placed::Error(e.to_string()));
     }

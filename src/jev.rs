@@ -10,14 +10,10 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_URL: &str = "https://api.typesafe.ai/v1/systemone";
 
-/// A typed question. Option order matters for `Score`, so maps keep insertion order.
+/// A typed question (the engine uses Score and Noul). Score levels keep their order.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Question {
-    Choice {
-        instructions: String,
-        criteria: IndexMap<String, String>,
-    },
     Score {
         instructions: String,
         criteria: Vec<String>,
@@ -28,19 +24,6 @@ pub enum Question {
 }
 
 impl Question {
-    pub fn choice<K: Into<String>, V: Into<String>>(
-        instructions: &str,
-        options: impl IntoIterator<Item = (K, V)>,
-    ) -> Self {
-        Question::Choice {
-            instructions: instructions.into(),
-            criteria: options
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect(),
-        }
-    }
-
     pub fn score(instructions: &str, levels: &[&str]) -> Self {
         Question::Score {
             instructions: instructions.into(),
@@ -93,16 +76,6 @@ impl Response {
         self.answers
             .get(id)
             .ok_or_else(|| anyhow!("missing answer '{id}'"))
-    }
-
-    /// (choice, confidence)
-    pub fn choice(&self, id: &str) -> Result<(&str, f64)> {
-        match self.get(id)? {
-            Answer::Choice {
-                choice, confidence, ..
-            } => Ok((choice.as_str(), *confidence)),
-            other => bail!("answer '{id}' is not a choice: {other:?}"),
-        }
     }
 
     /// Expected level normalised to 0..=1 (computed from the probability
@@ -245,7 +218,7 @@ mod tests {
           "usage": {"input_tokens":428,"output_tokens":73}
         }"#;
         let r: Response = serde_json::from_str(json).unwrap();
-        assert_eq!(r.choice("department").unwrap().0, "technical");
+        assert!(matches!(r.answers["department"], Answer::Choice { .. }));
         let (s, c) = r.score_expected("frustration").unwrap();
         assert!((s - 0.335).abs() < 1e-9 && c == 0.5);
         assert_eq!(r.noul("is_urgent").unwrap(), 0.99);

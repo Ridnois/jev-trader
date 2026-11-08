@@ -3,32 +3,68 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Departures · Jev trader</title>
+<title>Jev trader v2</title>
 <link rel="preload" href="/fonts/barlow-condensed-600.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/fonts/barlow-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<div class="shell">
-  <nav class="rail" aria-label="Primary">
-    <a class="brand" href="#board"><span>Jev</span> trader</a>
-    <ul class="nav">
-      <li><a href="#board" data-view="board">Departures</a></li>
-      <li><a href="#scalper" data-view="scalper">Scalper</a></li>
-      <li><a href="#news" data-view="news">News bot</a></li>
-      <li><a href="#evidence" data-view="evidence">Is it working?</a></li>
-    </ul>
-    <section class="whose" id="whose" aria-label="Whose money"></section>
-    <div class="beats" role="status" aria-live="polite">
-      <p class="beat" id="beat-scalp"><i></i><span><b>Scalper</b><small>Connecting…</small></span></p>
-      <p class="beat" id="beat-news"><i></i><span><b>News bot</b><small>Connecting…</small></span></p>
-    </div>
-  </nav>
-  <main class="page" id="page">
-    <div id="notices"></div>
-    <section id="view"></section>
-  </main>
-</div>
+<header class="top">
+  <div class="brand"><b>Jev</b> trader <small>v2</small></div>
+  <div class="venue" id="venue">…</div>
+  <p class="beat" id="beat" role="status" aria-live="polite"><i></i><span>Connecting…</span></p>
+  <div class="controls">
+    <button id="pause" type="button">Pause entries</button>
+    <button id="flatten" type="button" class="danger">Flatten all</button>
+  </div>
+</header>
+<main>
+  <section class="notices" id="notices"></section>
+
+  <section class="kpis" id="kpis" aria-label="Money"></section>
+
+  <section class="card verdict" aria-labelledby="h-verdict">
+    <h2 id="h-verdict">Is it working?</h2>
+    <ul id="summary"></ul>
+  </section>
+
+  <div class="grid2">
+    <section class="card" aria-labelledby="h-open">
+      <h2 id="h-open">Open trades and waiting headlines</h2>
+      <div id="open"></div>
+    </section>
+    <section class="card" aria-labelledby="h-coins">
+      <h2 id="h-coins">Coins <small>news bias × order flow</small></h2>
+      <div id="coins"></div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="h-news">
+    <h2 id="h-news">What Jev is reading</h2>
+    <div class="funnel" id="funnel"></div>
+    <div id="news"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card" aria-labelledby="h-trades">
+      <h2 id="h-trades">Trades</h2>
+      <div id="trades"></div>
+    </section>
+    <section class="card" aria-labelledby="h-cands">
+      <h2 id="h-cands">Catalyst decisions</h2>
+      <div id="cands"></div>
+    </section>
+  </div>
+
+  <section class="card" aria-labelledby="h-evidence">
+    <h2 id="h-evidence">Evidence <small>net of costs, 95% ranges clustered by hour</small></h2>
+    <div id="evidence"></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-sources">
+    <h2 id="h-sources">Sources</h2>
+    <div id="sources"></div>
+  </section>
+</main>
 <script src="/app.js"></script>
 </body>
 </html>

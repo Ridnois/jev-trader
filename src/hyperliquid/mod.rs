@@ -1,8 +1,8 @@
 //! Hyperliquid: the only venue. Public market data (no key) lives here: perp
-//! universe with volume, funding and open interest, candles for the news bot,
-//! settlement, backtests and the regime, and `jev-trader hl scan`, which ranks
-//! coins by how often a 10-minute move clears the round-trip cost at these fees.
-//! Signed trading is in `exchange` (client) and `crate::live` (ledger glue).
+//! universe with volume, funding and open interest, candles (ATR, markouts), and
+//! `jev-trader hl scan`, which ranks coins by how often a move over the holding
+//! horizon clears the round-trip cost. Signed trading is in `exchange` (client)
+//! and `crate::live` (ledger glue).
 //!
 //! Why Hyperliquid: the deepest on-chain perp book at 1.5 bps maker / 4.5 bps taker
 //! (tier 0), real shorts without borrowing, and funding / open interest in the same
@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::config::{EntryMode, ScalpConfig};
+use crate::config::Costs;
 use crate::market::Candle;
 
 /// Which Hyperliquid chain to talk to. Market data and orders always use the same one.
@@ -58,8 +58,6 @@ pub struct PerpCtx {
     pub coin: String,
     pub day_volume_usd: f64,
     pub open_interest_usd: f64,
-    /// Open interest in coins.
-    pub open_interest: f64,
     /// Hourly funding rate as a fraction (positive = longs pay shorts).
     pub funding_1h: f64,
     pub mark_px: f64,
@@ -128,7 +126,6 @@ pub async fn perp_universe(http: &reqwest::Client, api: &str) -> Result<Vec<Perp
             coin: a["name"].as_str().unwrap_or_default().to_string(),
             day_volume_usd: num(&c["dayNtlVlm"]),
             open_interest_usd: num(&c["openInterest"]) * mark,
-            open_interest: num(&c["openInterest"]),
             funding_1h: num(&c["funding"]),
             mark_px: mark,
             impact_spread_bps: spread,
@@ -198,22 +195,18 @@ pub fn hurdle_stats(closes: &[(i64, f64)], window: usize, hurdle_bps: f64) -> (f
     (hit, moves[moves.len() / 2], moves.len())
 }
 
-/// Round-trip cost at the config's fees with this spread (no funding), bps.
-pub fn trading_cost_bps(sc: &ScalpConfig, spread_bps: f64) -> f64 {
-    match sc.entry {
-        EntryMode::Taker => 2.0 * sc.fee_bps + 2.0 * sc.slippage_bps + spread_bps,
-        EntryMode::Maker => sc.maker_fee_bps + sc.fee_bps + sc.slippage_bps + 0.5 * spread_bps,
-    }
+/// Round trip with a taker entry and a maker take-profit, plus the spread and one slippage, bps.
+pub fn trading_cost_bps(c: &Costs, spread_bps: f64) -> f64 {
+    c.taker_bps + c.maker_bps + c.slippage_bps + spread_bps
 }
 
-/// `jev-trader hl scan`: rank liquid perps by how often a 10-minute move clears
-/// `cost_mult` × round-trip cost at this config's fees.
-pub async fn scan(http: &reqwest::Client, api: &str, sc: &ScalpConfig, top: usize, min_volume_musd: f64, hours: i64) -> Result<String> {
+/// `jev-trader hl scan`: rank liquid perps by how often a `window`-minute move
+/// clears `mult` × round-trip cost at this config's fees.
+pub async fn scan(http: &reqwest::Client, api: &str, costs: &Costs, top: usize, min_volume_musd: f64, hours: i64, window: usize, mult: f64) -> Result<String> {
     let mut uni = perp_universe(http, api).await?;
     uni.retain(|p| p.day_volume_usd >= min_volume_musd * 1e6 && p.mark_px > 0.0);
     uni.sort_by(|a, b| b.day_volume_usd.total_cmp(&a.day_volume_usd));
     uni.truncate(top);
-    let window = 10usize;
     let mut rows = Vec::new();
     for p in &uni {
         let closes = match closes_1m(http, api, &p.coin, hours * 60).await {
@@ -224,36 +217,21 @@ pub async fn scan(http: &reqwest::Client, api: &str, sc: &ScalpConfig, top: usiz
             }
         };
         let spread = if p.impact_spread_bps.is_finite() { p.impact_spread_bps } else { 1.0 };
-        let cost = trading_cost_bps(sc, spread);
-        let (hit, median, n) = hurdle_stats(&closes, window, sc.cost_mult * cost);
+        let cost = trading_cost_bps(costs, spread);
+        let (hit, median, n) = hurdle_stats(&closes, window, mult * cost);
         rows.push((hit, p.clone(), cost, median, n));
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await; // stay far under the rate limit
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     }
     rows.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut out = format!(
-        "Hyperliquid perps, last {hours}h of 1m candles, {window}-minute windows. Hurdle = {:.1} × round-trip cost ({} entry: maker {:.1} / taker {:.1} bps, slippage {:.1}).\n\n",
-        sc.cost_mult,
-        if sc.entry == EntryMode::Maker { "maker" } else { "taker" },
-        sc.maker_fee_bps,
-        sc.fee_bps,
-        sc.slippage_bps
-    );
-    out += &format!("{:<8} {:>9} {:>8} {:>10} {:>7} {:>6} {:>9} {:>8} {:>5}\n", "coin", "vol24 $M", "OI $M", "fund bp/h", "spread", "cost", "median10m", "clears", "n");
+    let mut out = format!("Hyperliquid perps, last {hours}h of 1m candles, {window}-minute windows. Hurdle = {mult:.1} × round trip (taker in {:.1}, maker out {:.1}, slippage {:.1} bps + spread).\n\n", costs.taker_bps, costs.maker_bps, costs.slippage_bps);
+    out += &format!("{:<8} {:>9} {:>8} {:>10} {:>7} {:>6} {:>9} {:>8} {:>5}\n", "coin", "vol24 $M", "OI $M", "fund bp/h", "spread", "cost", "median", "clears", "n");
     for (hit, p, cost, median, n) in &rows {
         out += &format!(
             "{:<8} {:>9.1} {:>8.1} {:>+10.3} {:>7.2} {:>6.1} {:>9.1} {:>7.0}% {:>5}\n",
-            p.coin,
-            p.day_volume_usd / 1e6,
-            p.open_interest_usd / 1e6,
-            p.funding_1h * 1e4,
-            p.impact_spread_bps,
-            cost,
-            median,
-            hit * 100.0,
-            n
+            p.coin, p.day_volume_usd / 1e6, p.open_interest_usd / 1e6, p.funding_1h * 1e4, p.impact_spread_bps, cost, median, hit * 100.0, n
         );
     }
-    out += "\n`clears` = share of 10-minute moves at least the hurdle at these fees.\nIt measures room for an edge, not an edge. Put a universe change in hypotheses.toml before trading it.\n";
+    out += "\n`clears` = share of windows whose move is at least the hurdle. Room for an edge, not an edge.\n";
     Ok(out)
 }
 
@@ -275,11 +253,8 @@ mod tests {
     }
 
     #[test]
-    fn maker_entry_is_cheaper_than_taker() {
-        let mk = ScalpConfig { entry: EntryMode::Maker, maker_fee_bps: 1.5, fee_bps: 4.5, slippage_bps: 1.0, ..Default::default() };
-        let tk = ScalpConfig { entry: EntryMode::Taker, ..mk.clone() };
-        assert!((trading_cost_bps(&mk, 1.0) - 7.5).abs() < 1e-12);
-        assert!((trading_cost_bps(&tk, 1.0) - 12.0).abs() < 1e-12);
+    fn round_trip_cost() {
+        assert!((trading_cost_bps(&Costs::default(), 1.0) - 8.0).abs() < 1e-12);
     }
 
     #[test]

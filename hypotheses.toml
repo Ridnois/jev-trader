@@ -1,273 +1,49 @@
-# Hypothesis register (OPTIMIZATION-PLAN.md §4.6).
-# Every strategy change gets an entry here BEFORE it is tested. The baseline is
-# declared before results are seen. status: proposed | testing | accepted | rejected
-# `jev-trader report` lists these with their current evidence; `jev-trader backtest
-# --compare` produces the PASS / REVISE / REJECT verdict that decides them.
+# v2 hypothesis register. Write a change here BEFORE testing it; decide it from
+# `jev-trader report` (net of costs, 95% ranges clustered by UTC hour, ≥ 20 hours).
+# v1's register (H-001…, H-C01…, H-P01…) is in git tag v1.
+# status: proposed | testing | accepted | rejected
 
 [[hypothesis]]
-id = "H-001"
-statement = "Jev's news reading adds return beyond 1h momentum alone"
-change = "none (this is the product's core claim)"
-metric = "residual alpha of hourly strategy returns vs momentum-only, HAC t-stat"
-baseline = "momentum-only ablation (declared primary), BTC buy-and-hold (alternate)"
-pass_if = "verdict RESIDUAL_EDGE on the out-of-sample window"
-invalidate_if = "verdict BASELINE_EXPLAINED"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-002"
-statement = "Counting a same-story cluster once (instead of once per outlet) raises 4h hit rate"
-change = "news.dedupe_clusters = true"
-metric = "4h direction hit rate, out-of-sample, clustered"
-baseline = "current config"
-pass_if = "hit rate +3pp vs baseline, null percentile > 90, n >= 20 clusters"
-invalidate_if = "no hit-rate gain, or REJECT from the review gate"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-003"
-statement = "Requiring >=2 independent positive clusters before entry raises 4h hit rate"
-change = "strategy.min_clusters = 2"
-metric = "4h direction hit rate, out-of-sample, clustered"
-baseline = "current config"
-pass_if = "hit rate +5pp vs baseline, null percentile > 90, n >= 20 clusters"
-invalidate_if = "fewer trades with no hit-rate gain, or REJECT from the review gate"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-004"
-statement = "Volatility-scaled sizing with an ATR stop lowers drawdown without lowering return"
-change = "risk.sizing = \"vol\", risk.stop = \"atr\" (stop_atr_mult from the report's MAE-of-winners)"
-metric = "out-of-sample max drawdown and total return"
-baseline = "current config"
-pass_if = "max drawdown -20% relative, return not lower by more than noise"
-invalidate_if = "return falls with no drawdown gain, or REJECT"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-005"
-statement = "News-driven entries in RISK_OFF regimes fail more often (REGIME_MISMATCH pattern)"
-change = "regime.mode = \"block\""
-metric = "24h outcome tags of decisions by regime zone; counterfactual value of the regime gate"
-baseline = "current config (regime record-only)"
-pass_if = "RISK_OFF failure share beats the null with n >= 20 clusters, and review gate PASS"
-invalidate_if = "regime gate CORRECTLY_BLOCKED share not above chance"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-006"
-statement = "The adversarial challenge call blocks entries that would have failed"
-change = "challenge.enabled = true"
-metric = "counterfactual labels for gate 'challenge' at 24h"
-baseline = "current config (no challenge)"
-pass_if = "CORRECTLY_BLOCKED share > 60% with n >= 20 clusters"
-invalidate_if = "MISSED_OPPORTUNITY share >= 50%"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-007"
-statement = "When positive news has repeatedly failed to lift price, new positive news has lower expected value"
-change = "strategy.reaction_gate = true (min 3 clusters, z < -1.5)"
-metric = "4h forward return of entries blocked by 'news reaction'"
-baseline = "current config"
-pass_if = "blocked entries' mean 4h return < 0 beyond the null, n >= 20"
-invalidate_if = "blocked entries perform like unblocked ones"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-008"
-statement = "The news information coefficient peaks near 4h, not 2h"
-change = "news.half_life_hours = 4, market.momentum_window = 4"
-metric = "IC of sentiment x new_info vs z-scored forward return, by horizon"
-baseline = "current config (2h half-life, 20h SMA)"
-pass_if = "report shows IC(4h) > IC(1h) with null percentile > 90, then review gate PASS"
-invalidate_if = "IC indistinguishable from noise at every horizon"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-S01"
-statement = "Order-flow candidates (activity burst + trade-flow + book imbalance + 60s push) that pass the cost gate have positive markouts net of round-trip cost"
-change = "new `scalp` engine (config.scalp.toml); news tilts the flow threshold and vetoes only"
-metric = "mean net_bps of scalp_markouts.jsonl at 300s and 600s, taken candidates, clustered by burst"
-baseline = "zero (cost-adjusted); alternate: same candidates with the cost gate removed"
-pass_if = "mean net_bps > 0 at 600s with a block-bootstrap 90% CI above 0, n >= 100 candidates"
-invalidate_if = "mean net_bps <= 0 at both horizons with n >= 100"
+id = "V2-01"
+statement = "Strong, fresh, concrete headlines (Jev |impact| ≥ 0.45, new fact ≥ 0.6, seen ≤ 20 min) move price in Jev's direction by more than the round-trip cost within 60 min"
+metric = "report: strong headlines, 60 min, mean net bps"
+pass_if = "95% range above 0 with ≥ 20 independent hours"
+invalidate_if = "95% range below 0, or mean ≤ 0 after 40 hours"
 status = "testing"
 result = ""
 
 [[hypothesis]]
-id = "H-S02"
-statement = "Jev's entry review (adverse news / event risk veto, support-based sizing) improves scalper markouts"
-change = "scalp.jev_review = true vs false"
-metric = "net_bps at 600s: candidates Jev vetoed vs candidates it passed"
-baseline = "passed candidates' net_bps (vetoed ones are logged with markouts too)"
-pass_if = "vetoed candidates average at least 10 bps worse than passed ones, n >= 30 vetoes"
-invalidate_if = "no difference or vetoed candidates do better"
+id = "V2-02"
+statement = "Catalyst trades (headline + flow confirmation + not chased) pay after fees"
+metric = "report: trades, catalyst, mean bps"
+pass_if = "verdict 'pays'"
+invalidate_if = "verdict 'loses', or V2-01 rejected"
 status = "testing"
 result = ""
 
 [[hypothesis]]
-id = "H-S03"
-statement = "Mirrored short candidates (sellers in control, price falling) have positive markouts net of cost, like longs"
-change = "scalp.shorts = true (inventory shorts on spot)"
-metric = "mean net_bps at 600s of short candidates in scalp_markouts.jsonl (sign-corrected: a fall is a gain)"
-baseline = "zero (cost-adjusted); alternate: long candidates over the same period"
-pass_if = "mean net_bps > 0 at 600s, block-bootstrap 90% CI above 0, n >= 100 short candidates"
-invalidate_if = "mean net_bps <= 0 at both 300s and 600s with n >= 100"
+id = "V2-03"
+statement = "Flow candidates that agree with the news bias beat those without news support"
+metric = "report: flow, longest horizon, agree vs no support"
+pass_if = "agree minus no-support > 0 with non-overlapping ranges, and agree > 0"
+invalidate_if = "no difference after 40 hours: then disable [flow]"
 status = "testing"
 result = ""
 
 [[hypothesis]]
-id = "H-S04"
-statement = "Trailing the stop to break-even after fees once 1.5x cost in profit raises expectancy per trade"
-change = "scalp.trail_after_cost_mult = 1.5 vs 0"
-metric = "mean pnl_bps of round trips; share of trades that reached +1.5x cost and then closed at a loss (should be ~0 with trailing)"
-baseline = "replay of the same trades' entries with the original fixed stop (from the candidate's price path)"
-pass_if = "higher mean pnl_bps than the fixed-stop replay, n >= 50 trades"
-invalidate_if = "lower or equal mean pnl_bps, n >= 50"
+id = "V2-04"
+statement = "Exchange listing announcements (Binance/Upbit/Bybit/OKX) carry more edge than outlet news"
+metric = "report: strong headlines by kind, 60 min"
+pass_if = "listing mean net bps above news with ≥ 20 hours each"
+invalidate_if = "listing ≤ news"
 status = "testing"
 result = ""
 
 [[hypothesis]]
-id = "H-S05"
-statement = "Scalping the most volatile liquid pairs (ZEC, NEAR, UNI, WLD, AAVE, HYPE, SUI, SOL) yields more cost-clearing candidates than BTC/ETH/SOL, without worse net markouts"
-change = "config.scalp.toml assets: BTC/ETH/SOL -> ZEC/NEAR/UNI/WLD/AAVE/HYPE/SUI/SOL (scan 2026-11-05: 20-36% of 10m windows over the hurdle vs 3.5-6% for BTC/ETH)"
-metric = "candidates per day passing the cost gate; mean net_bps at 600s per asset"
-baseline = "SOL (kept in both universes) as the within-run control"
-pass_if = ">= 3x the cost-passing candidates per day of the old universe and mean net_bps not below SOL's, n >= 100"
-invalidate_if = "net_bps of the new coins below SOL's with n >= 100, or volatility rank collapses on the next scan"
-status = "testing"
-result = ""
-
-# --- Crypto / low-fee redesign (CRYPTO-REDESIGN.md, 2026-11-06) ---
-
-[[hypothesis]]
-id = "H-C01"
-statement = "The order-flow signal that could not pay Binance spot costs (~22 bps round trip) is net-positive at Hyperliquid perp costs (~7.5 bps maker-in / taker-out)"
-change = "config.hl.toml: feed = hyperliquid, perps = true, entry = maker, fee 4.5 / maker 1.5 bps"
-metric = "mean net_bps at 300s and 600s of TAKEN candidates (scalp_markouts.jsonl), and paper trade P&L after fees and funding"
-baseline = "the same markouts with the Binance spot cost (22 bps + spread) subtracted instead"
-pass_if = "mean net_bps at 600s > 0 with a 95% interval above 0 (clustered by hour), n >= 150 taken candidates"
-invalidate_if = "mean net_bps at 600s <= 0 with n >= 150"
-status = "testing"
-result = ""
-
-[[hypothesis]]
-id = "H-C02"
-statement = "Maker entries save fees without losing the edge to adverse selection (filled orders are not systematically the ones the market runs over)"
-change = "entry = maker, maker_timeout_secs = 20 (strict trade-through fills, scalp_orders.jsonl)"
-metric = "fill rate; markouts of filled vs missed maker orders; net P&L vs a taker-entry counterfactual of the same candidates"
-baseline = "entry = taker on the same candidates (cost 12 bps vs 7.5)"
-pass_if = "fill rate >= 40% and filled orders' 600s markout minus missed orders' >= -4.5 bps (less than the fee saved), n >= 100 orders"
-invalidate_if = "filled orders underperform missed ones by more than the 4.5 bps fee saving, or fill rate < 25%"
-status = "testing"
-result = ""
-
-[[hypothesis]]
-id = "H-C03"
-statement = "The Hyperliquid universe from `hl scan` (ZEC, HYPE, SOL, NEAR, ETH, XRP, kPEPE, ENA) gives enough cost-clearing candidates per day to matter"
-change = "config.scalp.toml assets (scan 2026-11-06: 42-75% of 10m windows clear 2x cost vs 6-37% at Binance spot cost)"
-metric = "candidates per day passing every market gate, per coin"
-baseline = "SOL (also in the Binance universe) as the within-run control"
-pass_if = ">= 10 market-gate passes per day across the universe over 7 days"
-invalidate_if = "< 3 per day over 7 days"
-status = "testing"
-result = ""
-
-[[hypothesis]]
-id = "H-C04"
-statement = "Extreme perp funding is a contrarian tilt for the scalper (crowded side pays and unwinds)"
-change = "none yet: funding_bps_1h, open_interest_usd and premium_bps are recorded with every candidate"
-metric = "net_bps at 600s of candidates whose side opposes funding beyond +/- 0.5 bps/h vs those that go with it"
-baseline = "candidates with |funding| < 0.125 bps/h (Hyperliquid's resting rate)"
-pass_if = "opposing-funding candidates beat with-funding ones by >= 3 bps at 600s, null percentile > 90, n >= 40 each"
-invalidate_if = "no difference with n >= 40 each; then funding stays record-only"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-V01"
-statement = "Moving the news bot from Binance spot to Hyperliquid perps doesn't change its decisions, only its costs (taker 10 -> 4.5 bps, plus hourly funding on longs)"
-change = "config.toml: candles, regime and settlement from Hyperliquid; [paper] fee_rate 0.001 -> 0.00045; funding accrued on open longs (2026-11-06)"
-metric = "per-tick target weights vs the same ticks priced on Binance spot candles; funding paid as a share of gross P&L"
-baseline = "settled scorecard before 2026-11-06 (Binance-priced)"
-pass_if = "momentum sign agrees on >= 98% of ticks over 7 days and funding < 25% of gross P&L"
-invalidate_if = "momentum sign disagrees on > 5% of ticks (perp basis matters) or funding eats > 50% of gross P&L"
-status = "testing"
-result = ""
-
-# --- P/B range engine (STRATEGY-PB.md). Not built yet; registered before any test. ---
-
-[[hypothesis]]
-id = "H-P01"
-statement = "The failed-breakout reclaim (Setup C long) on a valid 15m P/B range has positive expectancy after Hyperliquid fees and funding"
-change = "pb engine, Setup C long only, STRATEGY-PB.md §7 defaults"
-metric = "mean R per trade (net of fees/funding) of C-long candidates, taken or not (markouts.jsonl), clustered by day"
-baseline = "same-bar random entries in the same direction with identical stop/target geometry (declared primary); flat (alternate)"
-pass_if = "mean R > 0.3 with a 90% block-bootstrap interval above 0, n >= 60 candidates across >= 30 days, and beats the random-entry baseline"
-invalidate_if = "mean R <= 0 with n >= 60, or not distinguishable from the random-entry baseline"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-P02"
-statement = "Waiting for 3 touches and >= 12h of range raises win rate enough to pay for the setups it skips"
-change = "min_touches = 3, min_range_bars = 48 vs min_touches = 1, min_range_bars = 16"
-metric = "total R and mean R per candidate, all three setups, out-of-sample"
-baseline = "min_touches = 1, min_range_bars = 16 (declared primary)"
-pass_if = "total R higher with mean R +0.2, backtest --compare PASS"
-invalidate_if = "total R lower and mean R not higher, or REJECT"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-P03"
-statement = "Ranges whose edge sits on a weekly VAH/VAL/POC or on an earlier range's edge perform better"
-change = "confluence_mode = record → boost (size x1.5 on confluence, x0.75 without)"
-metric = "mean R of candidates with vs without confluence (record mode first)"
-baseline = "confluence_mode = record"
-pass_if = "confluence mean R - non-confluence mean R >= 0.3, block-permutation percentile > 90, n >= 30 in each group"
-invalidate_if = "difference <= 0 with n >= 30 per group"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-P04"
-statement = "The failed-breakout short (fake break above, close back inside) is weaker than the long, as the video claims"
-change = "c_short_size = 0.5 (vs 1.0 or 0.0)"
-metric = "mean R of C-short vs C-long candidates"
-baseline = "C-long"
-pass_if = "C-short mean R > 0 with n >= 40 → raise c_short_size to 1.0; C-short mean R <= 0 → set 0.0"
-invalidate_if = "n/a: this decides the size, both outcomes act"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-P05"
-statement = "Stopping for the UTC day after 3 losses lowers drawdown without lowering return"
-change = "max_daily_losses = 3 vs off"
-metric = "out-of-sample max drawdown and total R; settled R of the candidates the rule blocked"
-baseline = "max_daily_losses off"
-pass_if = "max drawdown -15% relative and blocked candidates' mean R <= 0"
-invalidate_if = "blocked candidates' mean R > 0.3 with n >= 20"
-status = "proposed"
-result = ""
-
-[[hypothesis]]
-id = "H-P06"
-statement = "Breakouts only from small boxes (height/impulse <= 0.35) and range fades only from big ones beat taking every setup in every box"
-change = "small_box_frac = 0.35 gating vs no gating"
-metric = "mean R per setup type, by box-size bucket"
-baseline = "no box-size gating"
-pass_if = "gated mean R higher for both B and A, backtest --compare PASS"
-invalidate_if = "no gain or REJECT"
+id = "V2-05"
+statement = "Jev's priced-in review improves catalyst trades (halved / vetoed trades would have done worse)"
+metric = "candidates.jsonl review fields joined to event markouts"
+pass_if = "vetoed headlines' 60-min markout below entered ones"
+invalidate_if = "no difference after 30 reviews: set catalyst.review = false and save the calls"
 status = "proposed"
 result = ""
