@@ -113,6 +113,7 @@ Means carry 95% intervals with errors clustered by UTC hour, the independent uni
 cargo run --release -- report                                  # settled scorecard → data/report.md, data/backlog.jsonl
 cargo run --release -- backtest --from 2026-11-01              # replay cached Jev answers, no Jev calls
 cargo run --release -- backtest --compare config.toml alt.toml # PASS / REVISE / REJECT for a change
+cargo run --release -- --config config.scalp.toml scalp-backtest --from 2026-10-01  # scalper rules on 15m candles, no news
 ```
 
 - **report** clusters overlapping windows before computing anything. It gives each figure with its n, and each effect with its percentile within a block-permutation null. It covers IC and hit rate per horizon, decision outcomes, what each gate cost or saved (blocked entries settled as if taken), and stop calibration from the MAE of winners. Its backlog only makes suggestions; nothing edits `config.toml`.

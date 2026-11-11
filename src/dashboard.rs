@@ -51,11 +51,42 @@ struct App {
     scorecard: Mutex<Option<((u64, Option<SystemTime>), Arc<Scorecard>)>>,
     /// The scalper's files grow every few seconds: its scorecard is recomputed at most once a minute.
     scalp_scorecard: Mutex<Option<(std::time::Instant, Arc<ScalpScorecard>)>>,
+    http: reqwest::Client,
+    /// The one backtest started from the page (at most one runs at a time).
+    bt_job: Mutex<Option<BtJob>>,
+}
+
+#[derive(Clone, Serialize)]
+struct BtJob {
+    id: String,
+    /// "scalp" (scalper rules on candles) or "news" (cached Jev answers).
+    kind: &'static str,
+    config: String,
+    from: String,
+    to: Option<String>,
+    started_at: DateTime<Utc>,
+    finished_at: Option<DateTime<Utc>>,
+    /// "running" | "done" | "failed"
+    state: &'static str,
+    error: Option<String>,
+    verdict: Option<String>,
+    #[serde(skip)]
+    dir: std::path::PathBuf,
 }
 
 pub async fn serve(cfg: Config, host: String, port: u16, scalp_dir: std::path::PathBuf) -> Result<()> {
     let paths = Paths::new(&cfg.data_dir);
-    let app = Arc::new(App { cfg, paths, scalp_dir, started_at: Utc::now(), scorecard: Mutex::new(None), scalp_scorecard: Mutex::new(None) });
+    let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).user_agent("jev-trader/0.1").build()?;
+    let app = Arc::new(App {
+        cfg,
+        paths,
+        scalp_dir,
+        started_at: Utc::now(),
+        scorecard: Mutex::new(None),
+        scalp_scorecard: Mutex::new(None),
+        http,
+        bt_job: Mutex::new(None),
+    });
     let router = Router::new()
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX.as_bytes()) }))
         .route("/app.css", get(|| async { asset("text/css; charset=utf-8", CSS.as_bytes()) }))
@@ -63,6 +94,8 @@ pub async fn serve(cfg: Config, host: String, port: u16, scalp_dir: std::path::P
         .route("/fonts/{name}", get(font_handler))
         .route("/api/snapshot", get(snapshot_handler))
         .route("/api/scalp", get(scalp_handler))
+        .route("/api/backtests", get(backtests_handler).post(backtest_start_handler))
+        .route("/api/backtests/{id}", get(backtest_handler))
         .route("/api/control/pause", post(pause_handler))
         .route("/api/control/flatten", post(flatten_handler))
         .with_state(app);
@@ -444,6 +477,38 @@ async fn scalp_handler(AxState(app): AxState<Arc<App>>, axum::extract::RawQuery(
         let x = t["pnl_usd"].as_f64().unwrap_or(0.0);
         (n + 1, w + (x > 0.0) as usize, p + x, b + t["pnl_bps"].as_f64().unwrap_or(0.0))
     });
+    // Per coin, over every round trip on file (before the list is cut for the page).
+    let mut by_coin: std::collections::BTreeMap<String, serde_json::Map<String, Value>> = Default::default();
+    for t in &trades {
+        let Some(a) = t["asset"].as_str() else { continue };
+        let e = by_coin.entry(a.to_string()).or_default();
+        let add = |e: &mut serde_json::Map<String, Value>, k: &str, x: f64| {
+            let v = e.get(k).and_then(Value::as_f64).unwrap_or(0.0) + x;
+            e.insert(k.into(), json!(v));
+        };
+        let pnl = t["pnl_usd"].as_f64().unwrap_or(0.0);
+        add(e, "n", 1.0);
+        add(e, "wins", (pnl > 0.0) as u8 as f64);
+        add(e, "pnl_usd", pnl);
+        add(e, "fees_usd", t["fees_usd"].as_f64().unwrap_or(0.0));
+        add(e, "bps_sum", t["pnl_bps"].as_f64().unwrap_or(0.0));
+        add(e, "hold_secs_sum", t["hold_secs"].as_f64().unwrap_or(0.0));
+        add(e, "notional_sum", t["notional"].as_f64().unwrap_or(0.0));
+        let side = if t["side"] == "short" { "short" } else { "long" };
+        add(e, &format!("{side}_n"), 1.0);
+        add(e, &format!("{side}_pnl"), pnl);
+        e.insert("last_closed".into(), t["closed"].clone());
+    }
+    for c in &candidates {
+        let Some(a) = c["asset"].as_str() else { continue };
+        let e = by_coin.entry(a.to_string()).or_default();
+        let n = e.get("chances").and_then(Value::as_f64).unwrap_or(0.0) + 1.0;
+        e.insert("chances".into(), json!(n));
+        if c["taken"].as_bool() == Some(true) {
+            let n = e.get("taken").and_then(Value::as_f64).unwrap_or(0.0) + 1.0;
+            e.insert("taken".into(), json!(n));
+        }
+    }
     let scorecard = scalp_scorecard(&app).await;
     let n_candidates = candidates.len();
     let session_start = candidates.first().map(|c| c["ts"].clone()).unwrap_or(Value::Null);
@@ -466,7 +531,7 @@ async fn scalp_handler(AxState(app): AxState<Arc<App>>, axum::extract::RawQuery(
         }
     }
     trades.reverse();
-    trades.truncate(100);
+    trades.truncate(500);
     // Each round trip carries the decision that opened it, so the page can tell the whole story.
     for t in trades.iter_mut() {
         if let Some(c) = t["candidate_id"].as_str().and_then(|id| by_id.get(id)) {
@@ -487,6 +552,7 @@ async fn scalp_handler(AxState(app): AxState<Arc<App>>, axum::extract::RawQuery(
             "blocked_by": blocked,
             "markouts": markout_rows,
             "trades": { "n": n_tr, "wins": wins, "pnl_usd": pnl, "mean_bps": if n_tr > 0 { bps / n_tr as f64 } else { 0.0 } },
+            "by_coin": by_coin,
         },
     }))
 }
@@ -501,6 +567,256 @@ async fn scalp_scorecard(app: &Arc<App>) -> Option<Arc<ScalpScorecard>> {
     let sc = Arc::new(tokio::task::spawn_blocking(move || crate::scalp::report::scorecard(&crate::scalp::report::load(&dir), &cfg)).await.ok()?);
     *app.scalp_scorecard.lock().ok()? = Some((std::time::Instant::now(), sc.clone()));
     Some(sc)
+}
+
+/// Settings files in the working directory that parse as a config: each can be backtested.
+/// Its cached Jev answers (`<data_dir>/events.jsonl`) are what the replay reads.
+fn bt_sources() -> Vec<(String, Config)> {
+    let mut v: Vec<(String, Config)> = std::fs::read_dir(".")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".toml") {
+                return None;
+            }
+            Config::load(&e.path()).ok().map(|c| (name, c))
+        })
+        .collect();
+    v.sort_by(|a, b| (a.0 != "config.toml", &a.0).cmp(&(b.0 != "config.toml", &b.0)));
+    v
+}
+
+/// Every folder that can hold runs: the dashboard's own, then each settings file's.
+fn bt_roots(app: &App, sources: &[(String, Config)]) -> Vec<std::path::PathBuf> {
+    let mut roots = vec![app.paths.backtests.clone()];
+    for (_, c) in sources {
+        let r = Paths::new(&c.data_dir).backtests;
+        if !roots.iter().any(|x| x == &r) {
+            roots.push(r);
+        }
+    }
+    roots
+}
+
+fn bt_safe_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 80 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Which step a running job is on, read from the files `backtest::run` writes in order.
+fn bt_stage(dir: &std::path::Path) -> u8 {
+    if let Some(p) = read_json::<serde_json::Value>(&dir.join("progress.json")) {
+        return p["stage"].as_u64().unwrap_or(0) as u8;
+    }
+    if dir.join("summary.json").exists() {
+        4
+    } else if dir.join("equity_news_only.jsonl").exists() {
+        3
+    } else if dir.join("equity_momentum_only.jsonl").exists() {
+        2
+    } else if dir.join("equity_strategy.jsonl").exists() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Backtest runs (newest first), the settings files that can be backtested with a
+/// per-day count of their cached headlines, and the job started from the page.
+async fn backtests_handler(AxState(app): AxState<Arc<App>>) -> Json<serde_json::Value> {
+    use serde_json::json;
+    let sources = bt_sources();
+    let mut runs: Vec<(Option<SystemTime>, serde_json::Value)> = Vec::new();
+    for root in bt_roots(&app, &sources) {
+        for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            let id = e.file_name().to_string_lossy().into_owned();
+            if !e.path().join("equity_strategy.jsonl").exists() || runs.iter().any(|r| r.1["id"] == id.as_str()) {
+                continue;
+            }
+            let summary: Option<serde_json::Value> = read_json(&e.path().join("summary.json"));
+            let source: Option<serde_json::Value> = read_json(&e.path().join("source.json"));
+            runs.push((e.metadata().and_then(|m| m.modified()).ok(), json!({ "id": id, "kind": summary.as_ref().and_then(|s| s["kind"].as_str()).unwrap_or("news"), "summary": summary, "config": source.and_then(|s| s["config"].as_str().map(String::from)) })));
+        }
+    }
+    runs.sort_by(|a, b| b.0.cmp(&a.0));
+    let sources_json: Vec<serde_json::Value> = sources
+        .iter()
+        .map(|(file, c)| {
+            let events = crate::status::load_events(&Paths::new(&c.data_dir).events);
+            let mut days: std::collections::BTreeMap<String, usize> = Default::default();
+            for e in &events {
+                *days.entry(e.seen_at().format("%Y-%m-%d").to_string()).or_default() += 1;
+            }
+            json!({
+                "file": file,
+                "data_dir": c.data_dir.display().to_string(),
+                "assets": c.assets.iter().map(|a| a.symbol.clone()).collect::<Vec<_>>(),
+                "events": events.len(),
+                "days": days,
+                "scalp": {
+                    "interval": c.scalp.revert_interval, "z": c.scalp.revert_z, "bars": c.scalp.revert_bars,
+                    "hold_secs": c.scalp.hold_secs, "stop_bps": c.scalp.revert_stop_bps, "position_pct": c.scalp.position_pct,
+                    "shorts": c.scalp.shorts, "fee_bps": c.scalp.fee_bps, "slippage_bps": c.scalp.slippage_bps,
+                    "earliest": crate::scalp::backtest::earliest_start(c, Utc::now()),
+                },
+            })
+        })
+        .collect();
+    let job = app.bt_job.lock().ok().and_then(|j| j.clone()).map(|j| {
+        let stage = if j.state == "running" { bt_stage(&j.dir) } else { 4 };
+        let mut v = json!(j);
+        v["stage"] = json!(stage);
+        v
+    });
+    Json(json!({
+        "synthetic": app.cfg.data_dir.join("SYNTHETIC").exists(),
+        "runs": runs.into_iter().map(|r| r.1).collect::<Vec<_>>(),
+        "sources": sources_json,
+        "job": job,
+        "now": Utc::now(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct BtStartReq {
+    /// "scalp" (default) or "news".
+    strategy: Option<String>,
+    config: String,
+    /// YYYY-MM-DD, inclusive.
+    from: String,
+    /// YYYY-MM-DD, exclusive; omitted = up to the last closed hour.
+    to: Option<String>,
+    name: Option<String>,
+}
+
+/// Starts `jev-trader backtest` for one settings file and window, in the background.
+/// It writes only under `<data_dir>/backtests/<name>/`; it never trades or calls Jev.
+async fn backtest_start_handler(AxState(app): AxState<Arc<App>>, Json(req): Json<BtStartReq>) -> Response {
+    let bad = |m: String| (StatusCode::BAD_REQUEST, m).into_response();
+    let Some((file, cfg)) = bt_sources().into_iter().find(|(f, _)| *f == req.config) else {
+        return bad(format!("{} isn't a settings file in the dashboard's folder", req.config));
+    };
+    let day = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d");
+    let Ok(from) = day(&req.from) else { return bad(format!("bad start date '{}'", req.from)) };
+    let to = match req.to.as_deref() {
+        Some(s) => match day(s) {
+            Ok(d) => Some(d),
+            Err(_) => return bad(format!("bad end date '{s}'")),
+        },
+        None => None,
+    };
+    let kind: &'static str = match req.strategy.as_deref().unwrap_or("scalp") {
+        "scalp" => "scalp",
+        "news" => "news",
+        other => return bad(format!("unknown strategy '{other}'")),
+    };
+    let today = Utc::now().date_naive();
+    let earliest = if kind == "scalp" { crate::scalp::backtest::earliest_start(&cfg, Utc::now()).date_naive() + chrono::Duration::days(1) } else { today - chrono::Duration::days(205) };
+    if from < earliest {
+        return bad(format!("Hyperliquid's candles for this strategy reach back to {earliest}: start on or after that"));
+    }
+    // Same rule as the page: at least 48 closed hours.
+    let end = to.map(|d| d.and_hms_opt(0, 0, 0).expect("midnight").and_utc()).unwrap_or_else(|| Utc::now() - chrono::Duration::hours(1));
+    if end - from.and_hms_opt(0, 0, 0).expect("midnight").and_utc() < chrono::Duration::hours(48) {
+        return bad("the window needs at least two days of closed hours".into());
+    }
+    let id = match req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) if bt_safe_id(n) => n.to_string(),
+        Some(_) => return bad("names use letters, digits, - and _ only".into()),
+        None => format!("{}{}_{}", if kind == "scalp" { "scalp_" } else { "" }, from.format("%Y%m%d"), to.unwrap_or(today).format("%Y%m%d")),
+    };
+    let dir = Paths::new(&cfg.data_dir).backtests.join(&id);
+    let job = {
+        let Ok(mut slot) = app.bt_job.lock() else { return StatusCode::INTERNAL_SERVER_ERROR.into_response() };
+        if slot.as_ref().is_some_and(|j| j.state == "running") {
+            return (StatusCode::CONFLICT, "a backtest is already running".to_string()).into_response();
+        }
+        // Same name replaces that run: clear what the progress steps read.
+        for f in ["equity_strategy.jsonl", "equity_momentum_only.jsonl", "equity_news_only.jsonl", "equity_hold.jsonl", "summary.json", "report.md", "progress.json"] {
+            std::fs::remove_file(dir.join(f)).ok();
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("source.json"), serde_json::json!({ "config": file, "kind": kind }).to_string())) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("can't write {}: {e}", dir.display())).into_response();
+        }
+        let j = BtJob {
+            id: id.clone(),
+            kind,
+            config: file,
+            from: from.to_string(),
+            to: to.map(|d| d.to_string()),
+            started_at: Utc::now(),
+            finished_at: None,
+            state: "running",
+            error: None,
+            verdict: None,
+            dir,
+        };
+        *slot = Some(j.clone());
+        j
+    };
+    info!(run = %job.id, config = %job.config, "backtest started from dashboard");
+    let (app2, http) = (app.clone(), app.http.clone());
+    let job_out = job.clone();
+    let (from_s, to_s, run_id) = (job.from.clone(), job.to.clone(), job.id.clone());
+    tokio::spawn(async move {
+        // The replay is CPU-bound: keep it off the request workers.
+        let dir = job.dir.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Handle::current();
+            if kind == "scalp" {
+                let at = |d: &str| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map(|d| d.and_hms_opt(0, 0, 0).expect("midnight").and_utc());
+                let (Ok(f), to) = (at(&from_s), to_s.as_deref().map(at).transpose().ok().flatten()) else { return Err(anyhow::anyhow!("bad dates")) };
+                rt.block_on(crate::scalp::backtest::run(&http, &cfg, f, to, &run_id, &dir)).map(|o| o.verdict)
+            } else {
+                rt.block_on(crate::backtest::run(&http, &cfg, Some(&from_s), to_s.as_deref(), Some(run_id))).map(|b| b.verdict)
+            }
+        })
+        .await;
+        let mut slot = app2.bt_job.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(j) = slot.as_mut() {
+            j.finished_at = Some(Utc::now());
+            match res {
+                Ok(Ok(v)) => {
+                    j.state = "done";
+                    j.verdict = Some(v.to_string());
+                }
+                Ok(Err(e)) => {
+                    j.state = "failed";
+                    j.error = Some(format!("{e:#}"));
+                }
+                Err(e) => {
+                    j.state = "failed";
+                    j.error = Some(format!("the backtest stopped unexpectedly: {e}"));
+                }
+            }
+            info!(run = %j.id, state = j.state, "backtest finished");
+        }
+    });
+    (StatusCode::ACCEPTED, Json(job_out)).into_response()
+}
+
+/// One run: hourly equity per simulated variant and the strategy's fills.
+async fn backtest_handler(AxState(app): AxState<Arc<App>>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    // The id names a folder: no separators, no dots.
+    if !bt_safe_id(&id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(d) = bt_roots(&app, &bt_sources()).into_iter().map(|r| r.join(&id)).find(|d| d.join("equity_strategy.jsonl").exists()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut equity = serde_json::Map::new();
+    for v in ["strategy", "momentum_only", "news_only", "hold"] {
+        let e: Vec<(DateTime<Utc>, f64)> = read_jsonl(&d.join(format!("equity_{v}.jsonl")));
+        if !e.is_empty() {
+            equity.insert(v.into(), serde_json::json!(e));
+        }
+    }
+    let summary: Option<serde_json::Value> = read_json(&d.join("summary.json"));
+    let source: Option<serde_json::Value> = read_json(&d.join("source.json"));
+    let trades: Vec<serde_json::Value> = read_jsonl(&d.join("trades_strategy.jsonl"));
+    Json(serde_json::json!({ "id": id, "summary": summary, "source": source, "equity": equity, "trades": trades }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

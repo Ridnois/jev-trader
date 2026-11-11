@@ -404,6 +404,24 @@ The rail holds the wordmark ("Jev" in amber, "trader" in Rail Ink), the nav, the
 ### Controls: Pause and Flatten
 Outline buttons with condensed caps and a 16px stroke icon: 1.5px border, 5px corners, 8px 14px padding, 1px press. Pause/Resume is the ink outline. Flatten is the red outline (Cancelled Red border and text, Red Wash on hover). Pressing it swaps in a confirm pair: a filled red "Yes, sell everything" (Red Deep on hover) and a borderless Cancel. Filled red appears nowhere else. A right-aligned note under the buttons says the controls are news-bot only.
 
+### Backtest chart
+The only equity chart in the product, and it lives on its own page, never above the board. One inline SVG drawn at the sheet's pixel width: the strategy in a 2px Ink line, momentum-only in a 1.5px dashed Board Steel line, news-only dotted in Mute (both toggled by outlined chips with a line swatch). Fills sit on the curve as 5px triangles in paper voice: Cleared Green pointing up below the line for a buy, Cancelled Red pointing down above it for a sell, a 1.5px sheet stroke to separate them, and an Ink stroke when picked. Dragging across the chart marks a stretch with an amber brush (the selection color): outside it fades under 72% sheet, Ink hairlines mark its edges, and the area between the curve and the stretch's starting level (dashed Board Steel) fills Green Wash above and Red Wash below. The bar strip shows profit or loss per hour, day or week (picked from the visible span) in green or red ink around a Rule zero line. The readout row above (condensed caps label, 28px figure for the stretch result) and the trades table both follow the stretch. The hover tooltip is an Ink card with flap-voice green and red, the one place paper-page figures sit on black.
+
+### New backtest
+A white sheet that opens in place above the runs from an outline **New backtest** button in the page header. It is open by default, titled "Run your first backtest", when no runs exist. Three fields are split by hairlines, each under a condensed-caps label:
+- **Settings to test:** radio rows (1px Rule ring, 5px corners), with the file name in Barlow 600 and a muted line naming its cached headlines, coins and data folder. The checked row takes Sheet Recess and a 1.5px Ink ring. Settings with no cached headlines fold under a disclosure.
+- **Window:** preset chips, the headline strip, and From / Through native date inputs. The strip is an inline SVG showing one Ink bar per day with cached headlines (height ∝ √count), under the chosen window drawn as an amber-outlined, amber-tinted box. Dragging selects days. The scale reaches back to the earlier of the window start and the first headline (at least 30 days, at most the ~205 days Hyperliquid serves) and holds still during a drag. A plain sentence below says what will run and warns in Amber Ink when no headlines fall inside or the verdict can't clear its evidence bar.
+- **Name** (optional): the placeholder shows the date-based default, and an amber line warns when a name replaces an existing run.
+
+The filled Ink **Run backtest** button is disabled until the form is valid, with the reason in Cancelled Red beside it. While a run works, a progress sheet replaces the form, using the trace's check marks: green done, amber-wash for the current step, outlined dash for the rest. Elapsed time sits at the right. The finished run opens on its own; a failure becomes a red-wash notice with "Edit and try again". A Strategy field comes first, as two radio cards: **Scalper** (the default: its live rules on 15m candles, no news; the strip shows plain days back to the earliest candle after the warm-up, and the plan sentence states the cost assumptions) and **News bot** (cached Jev answers, with the headline strip). Scalper runs compare against holding every coin, and their verdict panel shows trades, win rate, the result per $1,000 trade with its t-statistic, and the listed assumptions.
+
+### The scalper page
+The only page rendered with React (18.3.1) and htm (3.1.1). Both load from unpkg at pinned versions with SRI hashes, and only when the page opens. If they can't load, the older plain view shows under a warn notice. Tailwind is not used: its CDN sends no CORS headers, so its integrity can't be checked. Every style lives in app.css under `.sc-*`, in this system's tokens.
+- **Account:** one sheet with Balance (28px figure, plus its change since the start), Closed trades, Open now and Today, labelled by its venue tag.
+- **Coins:** a table with one row per coin, sortable by any column (condensed-caps heads, a chevron caret that shows on hover and on the active sort). Balance is closed plus open P&L, drawn as a diverging bar on a Hairline Rule track with a Board Steel zero tick, green to the right and red to the left, scaled to the largest coin. Each row carries a checkbox: selected coins share one filter with the Coin facet below, and a selected row holds Sheet Recess. Win rates on fewer than 10 trades render muted.
+- **Open now:** one sheet per position, with the stop/entry/target ruler, open P&L at 28px and time left. Resting orders sit beside them with a wait tag.
+- **Activity toolbar:** a search field (1.5px Rule ring that turns Ink on focus), then faceted filters as dashed Board Steel buttons that turn solid Ink once something is chosen. Each opens a popover of checkbox options with counts and a Clear row, and closes on Escape or an outside click. Then comes a segmented time control (All / Last hour / Last 6 h / Today) on a translucent sheet well, and a quiet Reset with the active count. A live summary line gives the matching count, the total after fees and the win rate.
+
 ### Navigation, tabs, chips, tables, notices
 - **Nav items** are condensed caps in Rail Mute; hover lifts to Graphite Sunk, the current page sits on Graphite Lifted in white with a 2px amber inset bar on the left.
 - **Tabs** sit on a 1.5px steel-dk baseline; the selected tab is Ink with a 3px ink underline, counts in Small Barlow beside the label.
@@ -412,7 +430,7 @@ Outline buttons with condensed caps and a 16px stroke icon: 1.5px border, 5px co
 - **Notices** are sheets with a 16px icon; warn notices sit on Amber Wash, bad notices on Red Wash, with dark text in the same hue.
 
 ### Pages
-Four hash routes share the shell: **#board** (Departures: sheets plus flap board), **#scalper** (lede, tabs for Decisions with filter chips, Trades, How it decides), **#news** (lede with controls, tabs for Coins, Headlines, Trades, Each look), **#evidence** (Is it working?: markout table, hypothesis tests, headline scoring). Only the board uses flaps; the other pages are sheets, tabs and tables.
+Five hash routes share the shell: **#board** (Departures: sheets plus flap board), **#scalper** (an Account sheet, a sortable Coins table, Open now, then a filtered Trades / Decisions / How it decides section; see The scalper page), **#news** (lede with controls, tabs for Coins, Headlines, Trades, Each look), **#evidence** (Is it working?: markout table, hypothesis tests, headline scoring), **#backtest** (Backtests: one white sheet with a readout row, an equity chart over a profit-or-loss bar strip on one time axis, then the run's trades and its verdict). Only the board uses flaps; the other pages are sheets, tabs and tables.
 
 ## Do's and Don'ts
 
@@ -430,5 +448,5 @@ Four hash routes share the shell: **#board** (Departures: sheets plus flap board
 - **Don't** color sheets, the board housing or the rail by state; state lives in lamps, flap lettering and the faint row tint.
 - **Don't** set sentences in condensed caps, or flap lettering in Barlow.
 - **Don't** leave `will-change` or idle animations on flap cells; the board is still unless a value changes.
-- **Don't** add new writing controls beyond Pause and Flatten, or browser controls for the scalper.
+- **Don't** add new writing controls beyond Pause and Flatten, or browser controls for the scalper. The one exception is **Run backtest**: it writes only under `<data_dir>/backtests/`, never trades and never calls Jev.
 - **Don't** use hard offset shadows or glows other than the lamp halo and heartbeat ring.

@@ -8,7 +8,7 @@ web
 
 ## Stack
 
-Rust server + plain HTML/JS: a `jev-trader dashboard` subcommand (axum) serves one static page with a live event stream (SSE). Single binary, no Node toolchain.
+Rust server + plain HTML/JS: a `jev-trader dashboard` subcommand (axum) serves one static page with a live event stream (SSE). Single binary, no Node toolchain. Exception: the Scalper page loads React and htm from unpkg (pinned, SRI-checked) when opened, and falls back to a plain view offline.
 
 ## Users
 

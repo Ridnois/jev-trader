@@ -180,8 +180,11 @@ pub fn simulate(cfg: &Config, events: &[NewsEvent], m: &Market, variant: Variant
         ),
     };
     let trades_path = dir.join(format!("trades_{vname}.jsonl"));
+    let equity_path = dir.join(format!("equity_{vname}.jsonl"));
     if step == 0 {
         std::fs::remove_file(&trades_path).ok();
+        // Equity is appended once at the end: a rerun must not stack a second copy on the first.
+        std::fs::remove_file(&equity_path).ok();
     }
 
     let mut sorted: Vec<&NewsEvent> = events.iter().collect();
@@ -260,7 +263,7 @@ pub fn simulate(cfg: &Config, events: &[NewsEvent], m: &Market, variant: Variant
     }
     std::fs::remove_file(&ck_path).ok();
     for (ts, eq) in &res.equity {
-        append_jsonl(&dir.join(format!("equity_{vname}.jsonl")), &(ts, eq));
+        append_jsonl(&equity_path, &(ts, eq));
     }
     Ok(res)
 }

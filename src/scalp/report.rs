@@ -33,7 +33,8 @@ const ALL: &str = "every candidate";
 
 /// Inputs logged with every candidate. `true` = directional: multiplied by the
 /// side's sign, so positive means "in the trade's favour" (for funding: the side pays).
-const FEATURES: [(&str, bool, fn(&Features) -> f64); 10] = [
+const FEATURES: [(&str, bool, fn(&Features) -> f64); 11] = [
+    ("stretch", true, |f| -f.z_rev),
     ("flow", true, |f| f.flow),
     ("obi", true, |f| f.obi),
     ("micro_bps", true, |f| f.micro_bps),
@@ -45,8 +46,9 @@ const FEATURES: [(&str, bool, fn(&Features) -> f64); 10] = [
     ("exp_move_bps", false, |f| f.exp_move_bps),
     ("spread_bps", false, |f| f.spread_bps),
 ];
-/// The inputs the entry gates trade on (burst, flow, book, push).
-const ENTRY_INPUTS: [&str; 4] = ["activity", "flow", "obi", "ret_60s_bps"];
+/// The input the entry gate trades on: z against the 3-day mean, signed so that
+/// positive is the fade's side (for a long, how far below the mean).
+const ENTRY_INPUTS: [&str; 1] = ["stretch"];
 
 // ---------------------------------------------------------------- input records
 
@@ -789,7 +791,7 @@ mod tests {
             let side = if i % 2 == 0 { Side::Long } else { Side::Short };
             let filled = i % 3 == 0;
             let ret = edge + if filled { -8.0 } else { 4.0 } + 5.0 * rng.normal();
-            let features = Features { ts_ms: i as i64 * 450_000, spread_bps: 1.0, flow: rng.normal(), ..Default::default() };
+            let features = Features { ts_ms: i as i64 * 450_000, spread_bps: 1.0, z_rev: rng.normal(), ..Default::default() };
             cands.push(Cand { id: id.clone(), asset: "SOL".into(), side, features, eval: Eval { ok: true }, taken: true, blocked_by: None });
             marks.push(Markout { id: id.clone(), h_secs: 600, ret_bps: ret, net_bps: ret - 7.5, cost_bps: 7.5 });
             orders.push(Order { candidate_id: id, outcome: if filled { "filled" } else { "missed" }.into() });
@@ -815,6 +817,6 @@ mod tests {
         let sc = scorecard(&logs(-2.0), &cfg);
         assert_eq!(sc.verdicts[0].verdict, "invalidated");
         assert!(sc.backlog.iter().any(|b| b.pattern.starts_with("the signal loses")));
-        assert!(sc.backlog.iter().any(|b| b.pattern == "entry input 'flow' shows no relation to the 600s move"));
+        assert!(sc.backlog.iter().any(|b| b.pattern == "entry input 'stretch' shows no relation to the 600s move"));
     }
 }

@@ -1,21 +1,21 @@
-//! `jev-trader scalp`: an order-flow scalper on Hyperliquid perps.
+//! `jev-trader scalp`: a mean-reversion trader on Hyperliquid perps (the module
+//! keeps its old name; the order-flow rules were retired 2026-11-10, H-C05/H-R01).
 //!
-//! - **Pace:** market events. A websocket keeps best bid/ask, every trade and the
-//!   perp context (funding, open interest); the engine evaluates every `eval_ms`.
-//! - **Decision:** microstructure (activity burst, trade-flow and book imbalance,
-//!   short push, no chasing) plus a cost gate: the typical move over the holding
-//!   period must pay for the round trip (fees, spread, funding) several times over.
-//!   The same gates, mirrored, open shorts: a perp short is a plain sell. 1× notional.
+//! - **Pace:** a websocket keeps best bid/ask, trades and the perp context; a bars
+//!   task refreshes 15m candles as each closes; the engine evaluates every `eval_ms`.
+//! - **Decision:** a 15m close more than `revert_z` std from the mean of the previous
+//!   `revert_bars` closes is faded: bought when stretched low, sold when high. One
+//!   candidate per coin per bar. 1× notional, a perp short is a plain sell.
 //! - **Fills:** paper fills on the real feed, or (`--live`) real orders: post-only
 //!   entries that count only once the exchange reports the fill, reduce-only IOC exits.
-//! - **Exits:** take profit, stop (trailing to break-even after fees once in
-//!   profit), flow reversal, hack alert (longs), time stop.
+//! - **Exits:** hard stop (`revert_stop_bps`), hack alert (longs), time stop.
 //! - **Thought process:** news never starts a trade. The slow news loop tilts the
 //!   flow threshold and vetoes on hacks; at entry time Jev reviews the proposed
 //!   trade against recent headlines and can block it or halve its size.
 //! - **Evidence:** every candidate (taken or not) is logged with its gates and Jev's
 //!   review, then marked out at fixed horizons net of costs.
 
+pub mod backtest;
 pub mod engine;
 pub mod features;
 pub mod report;
@@ -560,6 +560,44 @@ async fn news_task(cfg: Config, jev: JevClient, store: Arc<Mutex<NewsStore>>, fi
     }
 }
 
+/// Refreshes each coin's mean-reversion z just after every `revert_interval`
+/// candle closes (retrying every 20s on failure). Stale bars block entries.
+async fn bars_task(api: &'static str, sc: ScalpConfig, coins: Vec<(String, String)>, markets: Markets) {
+    let http = match reqwest::Client::builder().timeout(Duration::from_secs(15)).user_agent("jev-trader/0.1").build() {
+        Ok(h) => h,
+        Err(e) => return error!("bars task: http client: {e}"),
+    };
+    let Some(ims) = crate::market::interval_ms(&sc.revert_interval) else {
+        return error!("bars task: bad revert_interval {:?}", sc.revert_interval);
+    };
+    loop {
+        let mut failed = false;
+        for (coin, sym) in &coins {
+            let now_ms = Utc::now().timestamp_millis();
+            match crate::market::klines(&http, api, coin, &sc.revert_interval, sc.revert_bars + 3).await {
+                Ok(c) => {
+                    let snap = crate::market::split_closed(c, now_ms, ims);
+                    let closes: Vec<f64> = snap.closed.iter().map(|c| c.close).collect();
+                    let z = features::revert_z(&closes, sc.revert_bars);
+                    let mut m = markets.lock().unwrap();
+                    let am = m.entry(sym.clone()).or_default();
+                    am.z_rev = z.unwrap_or(0.0);
+                    am.bars = if z.is_some() { closes.len() } else { 0 };
+                    am.bar_ms = snap.closed.last().map(|c| c.open_time).unwrap_or(0);
+                }
+                Err(e) => {
+                    warn!("{sym}: {} candles failed: {e:#}", sc.revert_interval);
+                    failed = true;
+                }
+            }
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        let next_close = (now_ms / ims + 1) * ims + 3_000;
+        let wait = if failed { 20_000 } else { next_close - now_ms };
+        tokio::time::sleep(Duration::from_millis(wait.max(1_000) as u64)).await;
+    }
+}
+
 // ---------------------------------------------------------------- main loop
 
 struct ReviewCache {
@@ -607,6 +645,12 @@ fn new_pos(side: Side, x: &Exec, ev: &EntryEval, now_ms: i64, sc: &ScalpConfig, 
 }
 
 /// A maker fill in ledger terms: `sz` at `px`, paying `fee_usd`.
+/// Prices with 5 significant digits: `{:.4}` printed kPEPE's 0.005213 as 0.0052.
+fn fmt_px(x: f64) -> String {
+    let d = if x.abs() > 0.0 { (4 - x.abs().log10().floor() as i32).max(0) } else { 0 };
+    format!("{x:.*}", d as usize)
+}
+
 fn maker_exec(buy: bool, sz: f64, px: f64, fee_usd: f64, order_id: String) -> Exec {
     let n = sz * px;
     if buy {
@@ -650,10 +694,11 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
     ));
     let coins: Vec<(String, String)> = cfg.assets.iter().map(|a| (a.coin.clone(), a.symbol.clone())).collect();
     tokio::spawn(hl_feed_task(cfg.exchange.network.ws_url(), coins, markets.clone(), health.clone()));
+    tokio::spawn(bars_task(cfg.api(), sc.clone(), cfg.assets.iter().map(|a| (a.coin.clone(), a.symbol.clone())).collect(), markets.clone()));
     tokio::spawn(news_task(cfg.clone(), jev.clone(), store.clone(), files.news.clone(), files.events.clone()));
 
     let mut reviews: HashMap<(String, Side), ReviewCache> = HashMap::new();
-    let mut last_candidate_ms: HashMap<String, i64> = HashMap::new();
+    let mut last_candidate_bar: HashMap<String, i64> = HashMap::new();
     let mut pending: Vec<PendingMarkout> = Vec::new();
     // Live: free margin on the exchange and per-coin position mismatches.
     let mut withdrawable: Option<f64> = None;
@@ -666,11 +711,18 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
     let (mut maker_filled, mut maker_missed) = (0u32, 0u32);
     let mut last_funding_ms = Utc::now().timestamp_millis();
     let mut ticker = tokio::time::interval(Duration::from_millis(sc.eval_ms.max(100)));
+    // Set by Ctrl+C when flatten_on_exit: every position is closed, then the loop returns.
+    let mut shutdown_at: Option<i64> = None;
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
             _ = tokio::signal::ctrl_c() => {
+                if shutdown_at.is_some() {
+                    warn!("second Ctrl+C: exiting now; open positions stay in the ledger");
+                    ledger.save(&files.state)?;
+                    return Ok(());
+                }
                 if let Venue::Live(l) = &venue {
                     for (sym, pe) in &pending_entries {
                         if let Some(c) = &pe.cloid {
@@ -681,9 +733,14 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                         }
                     }
                 }
-                info!("shutting down; open positions stay in the ledger and are managed on restart");
-                ledger.save(&files.state)?;
-                return Ok(());
+                pending_entries.clear();
+                if !sc.flatten_on_exit || ledger.positions.is_empty() {
+                    info!("shutting down; open positions stay in the ledger and are managed on restart");
+                    ledger.save(&files.state)?;
+                    return Ok(());
+                }
+                info!("shutting down: closing {} open position(s) (Ctrl+C again to leave them open)", ledger.positions.len());
+                shutdown_at = Some(Utc::now().timestamp_millis());
             }
         }
         let now = Utc::now();
@@ -836,14 +893,14 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
             );
             if fsz <= 0.0 {
                 maker_missed += 1;
-                info!("{sym} maker {} at {:.4} not filled in {}s: cancelled", pe.side.word(), pe.px, sc.maker_timeout_secs);
+                info!("{sym} maker {} at {} not filled in {}s: cancelled", pe.side.word(), fmt_px(pe.px), sc.maker_timeout_secs);
                 continue;
             }
             maker_filled += 1;
             let x = maker_exec(pe.side == Side::Long, fsz, fpx, ffee, oid);
             ledger.apply(&sym, &x);
             let pos = new_pos(pe.side, &x, &pe.eval, now_ms, &sc, &pe.candidate_id, pe.size_mult, pe.review.clone());
-            info!("{} maker fill {} {sym} {:.6} @ {:.4} (${:.2}) after {}ms · tp {:.4} · stop {:.4}", venue.name().to_uppercase(), pe.side.word(), pos.qty, x.price, pos.qty * x.price, now_ms - pe.posted_ms, pos.tp_px, pos.sl_px);
+            info!("{} maker fill {} {sym} {:.6} @ {} (${:.2}) after {}ms · tp {} · stop {}", venue.name().to_uppercase(), pe.side.word(), pos.qty, fmt_px(x.price), pos.qty * x.price, now_ms - pe.posted_ms, fmt_px(pos.tp_px), fmt_px(pos.sl_px));
             ledger.positions.insert(sym.clone(), pos);
             ledger.save(&files.state)?;
         }
@@ -864,6 +921,7 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
             let p = ledger.positions[&sym].clone();
             let reason = match &p.closing {
                 Some(r) => r.clone(),
+                None if shutdown_at.is_some() => "shutdown".into(),
                 None => {
                     let op = OpenPos { side: p.side, tp_px: p.tp_px, sl_px: p.sl_px, deadline_ms: p.deadline_ms };
                     let Some(mut reason) = engine::evaluate_exit(&op, feats.get(&sym), &news, now_ms, &sc) else { continue };
@@ -901,7 +959,7 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                         ledger.positions.insert(sym.clone(), rest);
                     }
                     let shown = if flat { reason.clone() } else { format!("{reason} (partial)") };
-                    info!("{} close {} {sym} @ {:.4} — {shown} · pnl {pnl:+.2} ({:+.1} bps)", venue.name().to_uppercase(), p.side.word(), x.price, pnl / notional * 1e4);
+                    info!("{} close {} {sym} @ {} — {shown} · pnl {pnl:+.2} ({:+.1} bps)", venue.name().to_uppercase(), p.side.word(), fmt_px(x.price), pnl / notional * 1e4);
                     append_jsonl(
                         &files.trades,
                         &TradeRecord {
@@ -944,7 +1002,23 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
             }
         }
 
+        if let Some(t0) = shutdown_at {
+            let flat = ledger.positions.is_empty();
+            // Exits are retried each tick; give up after 30s (no price, exchange down).
+            if flat || now_ms - t0 > 30_000 {
+                if flat {
+                    info!("shutting down; all positions closed");
+                } else {
+                    error!("shutting down with {} position(s) still open: close them on the exchange or restart", ledger.positions.len());
+                }
+                ledger.save(&files.state)?;
+                return Ok(());
+            }
+            continue;
+        }
+
         // 2. Entries, each side judged by the same mirrored gates.
+        let macro_event = crate::bot::macro_window(&sc.macro_calendar, now, sc.macro_before_mins, sc.macro_after_mins);
         while ledger.entries_ms.front().is_some_and(|t| *t < now_ms - 3_600_000) {
             ledger.entries_ms.pop_front();
         }
@@ -957,17 +1031,16 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
             for e in &evals {
                 blocks.insert((sym.clone(), e.side), e.first_block().unwrap_or("").to_string());
             }
-            // Flow can only point one way at a time, so at most one side is a candidate.
+            // z has one sign at a time, so at most one side is a candidate.
             let Some(ev) = evals.into_iter().find(|e| e.candidate) else { continue };
-            // Before the baseline exists, activity and volatility are unreliable.
             if f.history_secs < sc.warmup_secs {
                 continue;
             }
-            // One candidate per asset per flow window, so a burst isn't counted 60 times.
-            if last_candidate_ms.get(sym).is_some_and(|t| now_ms - t < sc.flow_window_secs * 1000) {
+            // One candidate per asset per closed bar, as in the research.
+            if last_candidate_bar.get(sym) == Some(&f.bar_ms) {
                 continue;
             }
-            last_candidate_ms.insert(sym.clone(), now_ms);
+            last_candidate_bar.insert(sym.clone(), f.bar_ms);
             n.candidates += 1;
             let side = ev.side;
 
@@ -991,6 +1064,7 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
             ok &= rg("cooldown", ledger.cooldown_until_ms.get(sym).is_none_or(|t| now_ms >= *t), String::new());
             ok &= rg("trades/hour", ledger.entries_ms.len() < sc.max_trades_per_hour, format!("{}/{}", ledger.entries_ms.len(), sc.max_trades_per_hour));
             ok &= rg("daily limit", ledger.halted_day != Some(ledger.day), String::new());
+            ok &= rg("macro", macro_event.is_none(), macro_event.clone().unwrap_or_default());
             let exch_block = ledger.live_hold.clone().or_else(|| exch_review.get(sym).cloned()).or_else(|| (is_live && withdrawable.is_none()).then(|| "account check pending or failing".to_string()));
             ok &= rg("exchange", exch_block.is_none(), exch_block.unwrap_or_default());
             ok &= rg("cash", base_usd >= min_usd, format!("{base_usd:.2} free collateral (≥ {min_usd:.2})"));
@@ -1070,7 +1144,7 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                 };
                 match posted {
                     Ok((cloid, px, sz)) => {
-                        info!("{} post {} {sym} ${:.2} @ {px:.4} (maker, {}s timeout) · flow {:+.2} book {:+.2} activity {:.1}×", venue.name().to_uppercase(), side.word(), sz * px, sc.maker_timeout_secs, f.flow, f.obi, f.activity);
+                        info!("{} post {} {sym} ${:.2} @ {} (maker, {}s timeout) · flow {:+.2} book {:+.2} activity {:.1}×", venue.name().to_uppercase(), side.word(), sz * px, fmt_px(px), sc.maker_timeout_secs, f.flow, f.obi, f.activity);
                         pending_entries.insert(
                             sym.clone(),
                             PendingEntry { side, px, usd: sz * px, posted_ms: now_ms, cloid, sz, last_poll_ms: now_ms, eval: ev.clone(), candidate_id: id.clone(), size_mult, review: review.clone() },
@@ -1096,17 +1170,15 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                         ledger.entries_ms.push_back(now_ms);
                         let pos = new_pos(side, &x, &ev, now_ms, &sc, &id, size_mult, review.clone());
                         info!(
-                            "{} open {} {sym} {:.6} @ {:.4} (${:.2}) · tp {:.4} · stop {:.4} · flow {:+.2} book {:+.2} activity {:.1}×",
+                            "{} open {} {sym} {:.6} @ {} (${:.2}) · stop {} · {}h time stop · z {:+.2}",
                             venue.name().to_uppercase(),
                             side.word(),
                             pos.qty,
-                            x.price,
+                            fmt_px(x.price),
                             pos.qty * x.price,
-                            pos.tp_px,
-                            pos.sl_px,
-                            f.flow,
-                            f.obi,
-                            f.activity
+                            fmt_px(pos.sl_px),
+                            sc.hold_secs / 3600,
+                            f.z_rev
                         );
                         ledger.positions.insert(sym.clone(), pos);
                         ledger.save(&files.state)?;
@@ -1191,7 +1263,7 @@ pub async fn run(cfg: Config, jev: JevClient, live: Option<Live>) -> Result<()> 
                     let lb = blocks.get(&(a.symbol.clone(), Side::Long)).cloned().unwrap_or_default();
                     let sb = blocks.get(&(a.symbol.clone(), Side::Short)).cloned();
                     // The side the flow currently leans to, for a one-line "waiting because".
-                    let leaning = if sc.shorts && f.is_some_and(|f| f.flow < 0.0) { Side::Short } else { Side::Long };
+                    let leaning = if sc.shorts && f.is_some_and(|f| f.z_rev > 0.0) { Side::Short } else { Side::Long };
                     let block = if leaning == Side::Short { sb.clone().unwrap_or_default() } else { lb.clone() };
                     serde_json::json!({
                         "symbol": a.symbol,
@@ -1332,6 +1404,14 @@ mod tests {
         let pnl2 = e.cash + x.cash + (e.base + x.base) * x.price;
         assert!((pnl2 - (1.0 - 0.1 - 0.101)).abs() < 1e-9, "pnl {pnl2}");
         assert!((l.equity(&marks) - (1000.0 + pnl + pnl2)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prices_keep_five_significant_digits() {
+        assert_eq!(fmt_px(0.0052134), "0.0052134");
+        assert_eq!(fmt_px(3.63091), "3.6309");
+        assert_eq!(fmt_px(1174.5), "1174.5");
+        assert_eq!(fmt_px(98765.4), "98765");
     }
 
     #[test]

@@ -90,5 +90,57 @@ json.dump(status,open(f"{out}/status.json","w"),indent=1)
 state=dict(cash=8200.0,positions={"BTC":{"qty":0.022801,"entry":79610.4}},day=now.date().isoformat(),day_start_equity=10225.0,halted_on=None,cooldown_until={"SOL":iso(now+timedelta(hours=5,minutes=26))},seen=[],events=[],flatten_handled=None)
 json.dump(state,open(f"{out}/state.json","w"),indent=1)
 json.dump(dict(paused=False,flatten_requested_at=None),open(f"{out}/control.json","w"))
+# A synthetic backtest run (data/backtests/<run_id>/), shaped like `jev-trader backtest` output.
+def demo_backtest():
+    rnd = random.Random(11)
+    hours = 24*21
+    t0 = (now - timedelta(hours=hours+1)).replace(minute=0, second=0)
+    px0 = {"BTC":78000.0,"ETH":3100.0,"SOL":150.0}
+    paths = {}
+    for sym, p0 in px0.items():
+        p, row = p0, []
+        for h in range(hours):
+            p *= 1 + rnd.gauss(0.00005, 0.006 if sym!="BTC" else 0.004)
+            row.append(p)
+        paths[sym] = row
+    def sim(name, entry_p, seed):
+        r = random.Random(seed)
+        cash, pos, eq, fills = 10000.0, {}, [], []
+        for h in range(hours):
+            ts = t0 + timedelta(hours=h+1)
+            for sym in px0:
+                price = paths[sym][h]
+                if sym in pos and (r.random() < 0.04 or price < pos[sym][1]*0.96):
+                    qty, entry, cost = pos.pop(sym)
+                    notional = qty*price; fee = notional*0.001
+                    cash += notional - fee
+                    pnl = notional - fee - cost
+                    reason = "stop loss" if price < entry*0.96 else r.choice(["news turned negative","news faded below exit","momentum turned down"])
+                    fills.append(dict(ts=iso(ts),asset=sym,side="sell",qty=round(qty,6),price=round(price,2),notional=round(notional,2),fee=round(fee,2),reason=reason,events=[],realized_pnl=round(pnl,2),round_trip_pnl=round(pnl,2)))
+                elif sym not in pos and len(pos) < 2 and r.random() < entry_p:
+                    notional = min(cash*0.2, 2000.0); fee = notional*0.001
+                    qty = notional/price; cash -= notional + fee
+                    pos[sym] = (qty, price, notional+fee)
+                    fills.append(dict(ts=iso(ts),asset=sym,side="buy",qty=round(qty,6),price=round(price,2),notional=round(notional,2),fee=round(fee,2),reason="news %+.2f, momentum %+.2f%%"%(r.uniform(0.3,0.7),r.uniform(0.2,2.2)),events=[]))
+            eq.append((iso(ts), round(cash + sum(q*paths[s][h] for s,(q,_,_) in pos.items()), 2)))
+        return eq, fills
+    run_id = "demo_%s_%s" % (t0.strftime("%Y%m%d"), (t0+timedelta(hours=hours)).strftime("%Y%m%d"))
+    d = os.path.join(out, "backtests", run_id); os.makedirs(d, exist_ok=True)
+    for name, ep, seed in (("strategy",0.03,1),("momentum_only",0.05,2),("news_only",0.02,3)):
+        eq, fills = sim(name, ep, seed)
+        with open(f"{d}/equity_{name}.jsonl","w") as f:
+            for e in eq: f.write(json.dumps(e)+"\n")
+        with open(f"{d}/trades_{name}.jsonl","w") as f:
+            for x in fills: f.write(json.dumps(x)+"\n")
+        if name == "strategy": s_eq, s_fills = eq, fills
+    peak, mdd = 10000.0, 0.0
+    for _, v in s_eq: peak = max(peak, v); mdd = max(mdd, 1 - v/peak)
+    summary = dict(label="backtest · replay of cached events", synthetic=True, run_id=run_id, **{"from": iso(t0), "to": iso(t0+timedelta(hours=hours))},
+        verdict="BASELINE_EXPLAINED",
+        strategy=dict(total_return=s_eq[-1][1]/10000-1, max_drawdown=mdd, hours=hours, fills=len(s_fills), turnover=sum(x["notional"] for x in s_fills)/10000, fees=sum(x["fee"] for x in s_fills), decision_clusters=31, decision_hit_rate=0.52),
+        primary=dict(baseline="momentum-only (primary, declared)", ols=dict(alpha=0.00002, t_alpha=0.8, beta=0.71, r2=0.44, resid_sd=0.002), edge_ratio=0.01, stability=0.5),
+        alternate=dict(baseline="BTC buy-and-hold (alternate)", ols=dict(alpha=0.00003, t_alpha=1.1, beta=0.22, r2=0.09, resid_sd=0.003), edge_ratio=0.01, stability=0.5))
+    json.dump(summary, open(f"{d}/summary.json","w"), indent=1)
+demo_backtest()
 open(f"{out}/SYNTHETIC","w").write("demo data written by scripts/demo_data.py\n")
 print("wrote synthetic demo data to", out)

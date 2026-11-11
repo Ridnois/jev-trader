@@ -39,6 +39,11 @@ pub struct AssetMarket {
     pub open_interest: f64,
     pub mark_px: f64,
     pub oracle_px: f64,
+    /// From the bars task: z of the last closed candle, closed bars held, and the
+    /// open time of that candle (0 = no bars yet).
+    pub z_rev: f64,
+    pub bars: usize,
+    pub bar_ms: i64,
 }
 
 /// One evaluation's view of the market.
@@ -75,6 +80,27 @@ pub struct Features {
     /// Perps: (mark − oracle) / oracle, bps.
     #[serde(default)]
     pub premium_bps: f64,
+    /// (last close − mean of the previous N closes) / their std, on `revert_interval` candles.
+    #[serde(default)]
+    pub z_rev: f64,
+    #[serde(default)]
+    pub bars: usize,
+    /// Open time of the candle `z_rev` was computed on.
+    #[serde(default)]
+    pub bar_ms: i64,
+}
+
+/// z of the last close against the `n` closes before it (population std, as in the
+/// research). None until there are `n + 1` closes or when the window is flat.
+pub fn revert_z(closes: &[f64], n: usize) -> Option<f64> {
+    if n < 2 || closes.len() < n + 1 {
+        return None;
+    }
+    let last = closes[closes.len() - 1];
+    let w = &closes[closes.len() - 1 - n..closes.len() - 1];
+    let mean = w.iter().sum::<f64>() / n as f64;
+    let sd = (w.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
+    (sd > 0.0).then(|| (last - mean) / sd)
 }
 
 impl AssetMarket {
@@ -241,6 +267,9 @@ impl AssetMarket {
             funding_bps_1h: self.funding_1h * 1e4,
             open_interest_usd: self.open_interest * if self.mark_px > 0.0 { self.mark_px } else { mid },
             premium_bps: if self.oracle_px > 0.0 && self.mark_px > 0.0 { (self.mark_px / self.oracle_px - 1.0) * 1e4 } else { 0.0 },
+            z_rev: self.z_rev,
+            bars: self.bars,
+            bar_ms: self.bar_ms,
         })
     }
 }
@@ -290,6 +319,15 @@ mod tests {
         assert!(!m.traded_through(100.01, false, t0 / 1000), "no buyer paid above the ask");
         m.on_trade(100.02, 1.0, false, t0 + 3100);
         assert!(m.traded_through(100.01, false, t0 / 1000));
+    }
+
+    #[test]
+    fn revert_z_uses_the_bars_before_the_last() {
+        // Window 1,2,3 (mean 2, std √(2/3)); last close 4 → z = 2/0.8165.
+        let z = revert_z(&[1.0, 2.0, 3.0, 4.0], 3).unwrap();
+        assert!((z - 2.0 / (2.0f64 / 3.0).sqrt()).abs() < 1e-9);
+        assert_eq!(revert_z(&[1.0, 2.0, 3.0], 3), None, "needs n + 1 closes");
+        assert_eq!(revert_z(&[5.0, 5.0, 5.0, 6.0], 3), None, "flat window");
     }
 
     #[test]

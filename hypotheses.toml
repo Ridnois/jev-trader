@@ -157,8 +157,8 @@ metric = "mean net_bps at 300s and 600s of TAKEN candidates (scalp_markouts.json
 baseline = "the same markouts with the Binance spot cost (22 bps + spread) subtracted instead"
 pass_if = "mean net_bps at 600s > 0 with a 95% interval above 0 (clustered by hour), n >= 150 taken candidates"
 invalidate_if = "mean net_bps at 600s <= 0 with n >= 150"
-status = "testing"
-result = ""
+status = "rejected"
+result = "2026-11-09, n=133 taken (62h): raw +1.8 / -3.2 / -4.2 bps at 60/300/600s vs 7.7 bps cost -> net 600s about -11.9. Paper 45 trades, 6W/39L, -$60.34 (fees $27.00). Rejected 2026-11-10: a 380-rule search on Hyperliquid 1m candles (3.5 days) found nothing at scalp horizons that survives out of sample even at 7.5 bps cost. Order-flow rules retired for H-R01."
 
 [[hypothesis]]
 id = "H-C02"
@@ -168,8 +168,8 @@ metric = "fill rate; markouts of filled vs missed maker orders; net P&L vs a tak
 baseline = "entry = taker on the same candidates (cost 12 bps vs 7.5)"
 pass_if = "fill rate >= 40% and filled orders' 600s markout minus missed orders' >= -4.5 bps (less than the fee saved), n >= 100 orders"
 invalidate_if = "filled orders underperform missed ones by more than the 4.5 bps fee saving, or fill rate < 25%"
-status = "testing"
-result = ""
+status = "rejected"
+result = "2026-11-09, 134 orders, fill rate 34%: filled 600s markout -21.95 bps vs missed +1.41 (gap -23.4, fee saved 4.5). Fills come only when price trades through the bid, i.e. when the burst has failed. entry -> taker."
 
 [[hypothesis]]
 id = "H-C03"
@@ -203,6 +203,28 @@ pass_if = "momentum sign agrees on >= 98% of ticks over 7 days and funding < 25%
 invalidate_if = "momentum sign disagrees on > 5% of ticks (perp basis matters) or funding eats > 50% of gross P&L"
 status = "testing"
 result = ""
+
+[[hypothesis]]
+id = "H-C05"
+statement = "Taker entry with a 120s hold captures the order-flow signal before it reverses, cutting the scalper's loss per trade versus maker entry with a 600s hold"
+change = "config.scalp.toml: entry maker -> taker, hold_secs 600 -> 120 (the cost gate then uses sigma*sqrt(120)), max_trades_per_hour 200 (2026-11-10)"
+metric = "paper P&L per trade in bps after fees; net_bps of taken candidates at 60s and 300s"
+baseline = "2026-11-07..09 run: -13.4 bps per trade, 45 trades (maker entry, 600s hold)"
+pass_if = "mean net bps per trade > 0 with n >= 60 trades"
+invalidate_if = "mean net bps per trade <= -6 with n >= 60 (no better than half the baseline loss); then retire the order-flow scalper"
+status = "rejected"
+result = "Superseded 2026-11-10 after 4 trades (-$4.58) when the order-flow rules were retired (see H-C01, H-R01). Not a fair test; recorded for completeness."
+
+[[hypothesis]]
+id = "H-R01"
+statement = "Fading 15m closes more than 2 std from the mean of the previous 288 closes (3 days), held 6h with a 300 bps stop, pays after Hyperliquid taker costs"
+change = "scalp engine rewritten 2026-11-10: entry = |z| >= revert_z on revert_interval candles, side = against z, exits = 300 bps stop or 6h time stop, taker entry, up to 8 positions"
+metric = "paper P&L per trade in bps after fees and funding (scalp_trades.jsonl); net_bps of candidates at 3600s and 21600s"
+baseline = "research 2026-11-10 on 52 days of 15m candles (2026-09-19..11-10, 8 coins): +41.7 bps/trade net of 11.5 bps, 485 trades, 53% wins, max drawdown 5.5% of equity at 10%/trade; positive on 9/9 coins and 8/8 weeks; first 60% / last 40% split: +56.6 / +28.0 bps (time exit, no stop). Picked from 380 rules, so expect the live number to come in lower."
+pass_if = "mean net bps per trade > +10 with n >= 100 trades across >= 3 weeks"
+invalidate_if = "mean net bps per trade <= 0 with n >= 100, or drawdown > 10% of equity"
+status = "testing"
+result = "Restarted 2026-11-10 after 6 paper trades (-$95, mostly a 9h outage and two CPI-day ZEC stops). Changes: stop 300 -> 500 bps; Ctrl+C now closes all positions; no new entries 30 min before to 2 h after CPI / jobs / FOMC (data/macro_calendar.toml). Count n from the restart. Backtest on 52 days of HL 15m candles, 8 coins, 11.5 bps cost: no stop +43.5 bps/trade n=420 worst -1498; stop 500 +42.0 n=440 worst -512; stop 300 +38.3 n=486; macro window +42.8 (only 5 events). Rejected as filters, each cut the edge: skip when >=4 of 8 coins stretched the same way +8.9; at most 3 same-side positions +21.5; 1h cooldown after a loss +33.5; after a stop, no re-entry on that coin and side until |z| < 2 again +29.7 (2026-11-10, n=388 vs 437, last 40% +19.9 vs +36.2; re-entries after stops pay on average); skip |z| > 4 +37.6. The edge comes from market-wide dips, so cross-coin filters remove it."
 
 # --- P/B range engine (STRATEGY-PB.md). Not built yet; registered before any test. ---
 

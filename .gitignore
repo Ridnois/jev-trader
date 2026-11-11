@@ -6,6 +6,7 @@ data-scalp/
 data-hl/
 data-hl-live/
 data-hl-testnet/
+data-hl-*/
 .env
 .env.local
 .env.test

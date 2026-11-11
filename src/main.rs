@@ -98,6 +98,18 @@ enum Cmd {
         #[arg(long, num_args = 2, value_names = ["BASE", "CANDIDATE"])]
         compare: Option<Vec<PathBuf>>,
     },
+    /// Replay the scalper's rules on historical candles (no news, no Jev review).
+    ScalpBacktest {
+        /// Start (YYYY-MM-DD).
+        #[arg(long)]
+        from: String,
+        /// End (YYYY-MM-DD, exclusive). Default: now.
+        #[arg(long)]
+        to: Option<String>,
+        /// Output folder name under <data_dir>/backtests/.
+        #[arg(long)]
+        run_id: Option<String>,
+    },
     /// Serve the monitoring dashboard.
     Dashboard {
         #[arg(long, default_value = "127.0.0.1")]
@@ -150,6 +162,11 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = Config::load(&cli.config)?;
+    // Recorded next to each backtest run so the dashboard can say which settings made it.
+    let source = |dir: &std::path::Path, kind: &str| {
+        let file = cli.config.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        status::write_atomic(&dir.join("source.json"), serde_json::json!({ "config": file, "kind": kind }).to_string().as_bytes())
+    };
     std::fs::create_dir_all(&cfg.data_dir)?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -213,10 +230,23 @@ async fn main() -> Result<()> {
             }
             None => {
                 let b = backtest::run(&http, &cfg, from.as_deref(), to.as_deref(), run_id).await?;
+                source(&b.dir, "news")?;
                 println!("{}", b.markdown);
                 eprintln!("verdict: {} · written to {}", b.verdict, b.dir.display());
             }
         },
+        Cmd::ScalpBacktest { from, to, run_id } => {
+            let day = |s: &str| -> Result<chrono::DateTime<chrono::Utc>> {
+                Ok(chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")?.and_hms_opt(0, 0, 0).expect("midnight").and_utc())
+            };
+            let (from, to) = (day(&from)?, to.as_deref().map(day).transpose()?);
+            let id = run_id.unwrap_or_else(|| format!("scalp_{}_{}", from.format("%Y%m%d"), to.unwrap_or_else(chrono::Utc::now).format("%Y%m%d")));
+            let dir = status::Paths::new(&cfg.data_dir).backtests.join(&id);
+            let o = scalp::backtest::run(&http, &cfg, from, to, &id, &dir).await?;
+            source(&dir, "scalp")?;
+            println!("{}", o.markdown);
+            eprintln!("verdict: {} · written to {}", o.verdict, dir.display());
+        }
         Cmd::Dashboard { host, port, scalp_dir } => dashboard::serve(cfg, host, port, scalp_dir).await?,
     }
     Ok(())

@@ -1,6 +1,6 @@
-//! Pure entry/exit rules, mirrored for longs and shorts. Market microstructure
-//! decides; news only tilts the flow threshold and vetoes (the Jev entry review is
-//! applied by the caller).
+//! Pure entry/exit rules, mirrored for longs and shorts: fade 15m closes stretched
+//! far from their 3-day mean, hold up to `hold_secs`, hard stop. News only tilts
+//! the threshold and vetoes (the Jev entry review is applied by the caller).
 
 use serde::{Deserialize, Serialize};
 
@@ -48,13 +48,14 @@ pub struct NewsCtx {
 pub struct EntryEval {
     pub side: Side,
     pub gates: Vec<GateResult>,
-    /// Burst + flow + book + push all agree: a candidate worth recording.
+    /// Bars are fresh and price is stretched past the threshold: worth recording.
     pub candidate: bool,
     /// Every market gate passed (risk gates and the Jev review still apply).
     pub ok: bool,
     pub cost_bps: f64,
     pub tp_bps: f64,
     pub sl_bps: f64,
+    /// |z| needed to fade, after the news tilt.
     pub flow_threshold: f64,
 }
 
@@ -79,8 +80,11 @@ pub fn round_trip_cost_bps(f: &Features, cfg: &ScalpConfig, side: Side) -> f64 {
     trading + funding
 }
 
-/// The same gates for both sides, with every directional reading multiplied by the
-/// side's sign. News tone helps the side it agrees with and hinders the other.
+/// Mean reversion on `revert_interval` candles, mirrored for both sides: a close
+/// more than `revert_z` standard deviations above the mean of the previous
+/// `revert_bars` closes is sold, one as far below is bought. News tone shifts the
+/// threshold by `news_tilt` (in z units) toward the side it agrees with; a hack
+/// blocks longs. Research and caveats: hypotheses.toml H-R01.
 pub fn evaluate_entry(f: &Features, news: &NewsCtx, cfg: &ScalpConfig, side: Side) -> EntryEval {
     let s = side.sign();
     let mut gates = Vec::new();
@@ -89,47 +93,39 @@ pub fn evaluate_entry(f: &Features, news: &NewsCtx, cfg: &ScalpConfig, side: Sid
         pass
     };
     let cost = round_trip_cost_bps(f, cfg, side);
-    let flow_threshold = (cfg.min_flow_imbalance - cfg.news_tilt * s * news.score.clamp(-1.0, 1.0)).max(0.05);
-    let (buyers, rising) = match side {
-        Side::Long => ("buyers", "rising"),
-        Side::Short => ("sellers", "falling"),
-    };
+    let threshold = (cfg.revert_z - cfg.news_tilt * s * news.score.clamp(-1.0, 1.0)).max(0.5);
+    let bar_ms = crate::market::interval_ms(&cfg.revert_interval).unwrap_or(900_000);
+    // How far price sits on the far side of the mean from where this side profits.
+    let stretch = -s * f.z_rev;
 
     let warm = gate("warm-up", f.history_secs >= cfg.warmup_secs, format!("{}s of {}s", f.history_secs, cfg.warmup_secs));
     let fresh = gate("feed", f.book_age_ms <= cfg.feed_stale_ms, format!("book {}ms old", f.book_age_ms));
+    let bars = gate(
+        "bars",
+        f.bars > cfg.revert_bars && f.bar_ms > 0 && f.ts_ms - f.bar_ms <= 3 * bar_ms,
+        format!("{} of {} {} bars, last opened {}s ago", f.bars, cfg.revert_bars + 1, cfg.revert_interval, (f.ts_ms - f.bar_ms) / 1000),
+    );
     let spread = gate("spread", f.spread_bps <= cfg.max_spread_bps, format!("{:.2} bps", f.spread_bps));
-    let burst = gate("burst", f.activity >= cfg.min_activity_ratio, format!("activity {:.2}× (≥ {:.2})", f.activity, cfg.min_activity_ratio));
-    let flow = gate("flow", s * f.flow >= flow_threshold, format!("{buyers} {:+.2} (≥ {:+.2})", s * f.flow, flow_threshold));
-    let book = gate("book", s * f.obi >= cfg.min_book_imbalance, format!("{buyers} {:+.2} (≥ {:+.2})", s * f.obi, cfg.min_book_imbalance));
-    let push = gate(
-        "push",
-        s * f.ret_60s_bps >= cfg.min_push_bps && s * f.micro_bps >= 0.0,
-        format!("{rising} {:+.1} bps in 60s, micro {:+.2} bps", s * f.ret_60s_bps, s * f.micro_bps),
-    );
-    let chase = gate("no chase", s * f.ret_300s_bps <= cfg.max_chase_bps, format!("5m {:+.1} bps (≤ {:.0})", s * f.ret_300s_bps, cfg.max_chase_bps));
-    let pays = gate(
-        "cost",
-        f.exp_move_bps >= cfg.cost_mult * cost,
-        format!("expected move {:.1} bps vs {:.1}× cost {:.1}", f.exp_move_bps, cfg.cost_mult, cost),
-    );
-    // A fresh hack blocks buying the coin; it doesn't block selling it.
+    let stretched = gate("stretch", stretch >= threshold, format!("z {:+.2} (fade needs {} {:.2})", f.z_rev, if s > 0.0 { "≤ −" } else { "≥ +" }, threshold));
     let calm = gate(
         "news",
         side == Side::Short || !news.hack_alert,
         if news.hack_alert { "hack alert".into() } else { format!("score {:+.2}", news.score) },
     );
 
-    let candidate = burst && flow && book && push;
-    let ok = warm && fresh && spread && candidate && chase && pays && calm;
+    let candidate = bars && stretched;
+    let ok = warm && fresh && spread && candidate && calm;
     EntryEval {
         side,
         gates,
         candidate,
         ok,
         cost_bps: cost,
-        tp_bps: (cfg.tp_vol_mult * f.exp_move_bps).max(cfg.tp_cost_mult * cost),
-        sl_bps: (cfg.sl_vol_mult * f.exp_move_bps).max(cfg.sl_cost_mult * cost),
-        flow_threshold,
+        // No take profit: in the research the time stop beat exiting at the mean.
+        // 9999 bps keeps the target finite (the ledger is JSON) and out of reach.
+        tp_bps: 9999.0,
+        sl_bps: cfg.revert_stop_bps,
+        flow_threshold: threshold,
     }
 }
 
@@ -142,8 +138,9 @@ pub struct OpenPos {
     pub deadline_ms: i64,
 }
 
-/// Longs are judged on the bid (what a sell gets), shorts on the ask (what buying back costs).
-pub fn evaluate_exit(p: &OpenPos, f: Option<&Features>, news: &NewsCtx, now_ms: i64, cfg: &ScalpConfig) -> Option<String> {
+/// Longs are judged on the bid (what a sell gets), shorts on the ask (what buying
+/// back costs). Hack alert (longs), stop, take profit, then the time stop.
+pub fn evaluate_exit(p: &OpenPos, f: Option<&Features>, news: &NewsCtx, now_ms: i64, _cfg: &ScalpConfig) -> Option<String> {
     if news.hack_alert && p.side == Side::Long {
         return Some("hack alert".into());
     }
@@ -158,9 +155,6 @@ pub fn evaluate_exit(p: &OpenPos, f: Option<&Features>, news: &NewsCtx, now_ms: 
         if s * (px - p.sl_px) <= 0.0 {
             // "stop" rather than "stop loss": after trailing, a stop can lock in a gain.
             return Some("stop".into());
-        }
-        if -s * f.flow >= cfg.min_flow_imbalance && -s * f.obi >= cfg.min_book_imbalance && f.activity >= 1.0 {
-            return Some("flow reversed".into());
         }
     }
     if now_ms >= p.deadline_ms {
@@ -190,92 +184,69 @@ pub fn trailed_stop(side: Side, entry: f64, best: f64, sl_px: f64, sl_bps: f64, 
 mod tests {
     use super::*;
 
-    pub fn hot() -> Features {
+    /// A liquid market 3σ below its 3-day mean on fresh 15m bars.
+    fn low() -> Features {
         Features {
-            ts_ms: 0,
+            ts_ms: 1_000_000_000,
             mid: 100.0,
             bid: 99.995,
             ask: 100.005,
             spread_bps: 1.0,
-            micro_bps: 0.2,
-            obi: 0.3,
-            flow: 0.5,
-            activity: 2.5,
-            ret_60s_bps: 8.0,
-            ret_300s_bps: 20.0,
-            sigma_1s_bps: 2.5,
-            exp_move_bps: 2.5 * 600f64.sqrt(),
             history_secs: 3600,
             book_age_ms: 100,
+            z_rev: -3.0,
+            bars: 290,
+            bar_ms: 1_000_000_000 - 960_000,
             ..Default::default()
         }
     }
 
-    /// The same market, mirrored: sellers in control, price falling.
-    fn cold() -> Features {
-        let mut f = hot();
-        f.micro_bps = -0.2;
-        f.obi = -0.3;
-        f.flow = -0.5;
-        f.ret_60s_bps = -8.0;
-        f.ret_300s_bps = -20.0;
-        f
+    fn high() -> Features {
+        Features { z_rev: 3.0, ..low() }
     }
 
     #[test]
-    fn hot_market_passes_long_only() {
+    fn stretched_low_is_bought_and_high_is_sold() {
         let cfg = ScalpConfig::default();
-        let e = evaluate_entry(&hot(), &NewsCtx::default(), &cfg, Side::Long);
+        let n = NewsCtx::default();
+        let e = evaluate_entry(&low(), &n, &cfg, Side::Long);
         assert!(e.ok, "{:?}", e.first_block());
-        // Hyperliquid defaults: maker 1.5 + taker 4.5 + slippage 1 + half the 1 bp spread.
-        assert!((e.cost_bps - 7.5).abs() < 1e-9);
-        assert!(e.tp_bps > e.sl_bps && e.sl_bps >= e.cost_bps);
-        assert!(!evaluate_entry(&hot(), &NewsCtx::default(), &cfg, Side::Short).candidate);
+        assert_eq!(e.sl_bps, 300.0);
+        assert!(!evaluate_entry(&low(), &n, &cfg, Side::Short).candidate);
+        assert!(evaluate_entry(&high(), &n, &cfg, Side::Short).ok);
+        assert!(!evaluate_entry(&high(), &n, &cfg, Side::Long).candidate);
+        let mut mild = low();
+        mild.z_rev = -1.9;
+        assert_eq!(evaluate_entry(&mild, &n, &cfg, Side::Long).first_block(), Some("stretch"));
     }
 
     #[test]
-    fn mirrored_market_passes_short_only() {
+    fn stale_or_short_bar_history_blocks() {
         let cfg = ScalpConfig::default();
-        let e = evaluate_entry(&cold(), &NewsCtx::default(), &cfg, Side::Short);
-        assert!(e.ok, "{:?}", e.first_block());
-        assert!(!evaluate_entry(&cold(), &NewsCtx::default(), &cfg, Side::Long).candidate);
+        let n = NewsCtx::default();
+        let mut f = low();
+        f.bars = 200;
+        assert_eq!(evaluate_entry(&f, &n, &cfg, Side::Long).first_block(), Some("bars"));
+        let mut f = low();
+        f.bar_ms = f.ts_ms - 4 * 900_000;
+        assert_eq!(evaluate_entry(&f, &n, &cfg, Side::Long).first_block(), Some("bars"));
     }
 
     #[test]
-    fn cost_gate_blocks_quiet_markets() {
-        let cfg = ScalpConfig::default();
-        let mut f = hot();
-        f.exp_move_bps = 0.5 * 600f64.sqrt(); // ≈ 12.2 bps < 2 × 7.5
-        let e = evaluate_entry(&f, &NewsCtx::default(), &cfg, Side::Long);
-        assert!(e.candidate && !e.ok);
-        assert_eq!(e.first_block(), Some("cost"));
-    }
-
-    #[test]
-    fn news_tilts_each_side_but_never_triggers() {
-        let cfg = ScalpConfig::default();
+    fn news_tilts_the_threshold() {
+        let cfg = ScalpConfig { news_tilt: 0.2, ..Default::default() };
+        let mut f = low();
+        f.z_rev = -1.9;
         let good = NewsCtx { score: 1.0, ..Default::default() };
-        let bad = NewsCtx { score: -1.0, ..Default::default() };
-        let mut f = hot();
-        f.flow = 0.2; // below 0.25, above 0.25 − 0.10
-        assert!(!evaluate_entry(&f, &NewsCtx::default(), &cfg, Side::Long).ok);
-        assert!(evaluate_entry(&f, &good, &cfg, Side::Long).ok);
-        let mut g = cold();
-        g.flow = -0.2;
-        assert!(evaluate_entry(&g, &bad, &cfg, Side::Short).ok, "bad news lowers the bar for shorts");
-        assert!(!evaluate_entry(&g, &good, &cfg, Side::Short).ok, "good news raises it");
-        // Great news with no order flow does nothing.
-        let mut quiet = hot();
-        quiet.activity = 0.8;
-        quiet.flow = 0.0;
-        assert!(!evaluate_entry(&quiet, &good, &cfg, Side::Long).candidate);
+        assert!(evaluate_entry(&f, &good, &cfg, Side::Long).ok, "good news lowers the bar to 1.8");
+        assert!(!evaluate_entry(&f, &NewsCtx { score: -1.0, ..Default::default() }, &cfg, Side::Long).ok);
     }
 
     #[test]
     fn maker_perps_cost_model() {
         // Hyperliquid tier 0: maker 1.5, taker 4.5 bps; 1 bps spread; 1 bps slippage.
         let cfg = ScalpConfig { entry: EntryMode::Maker, maker_fee_bps: 1.5, fee_bps: 4.5, slippage_bps: 1.0, hold_secs: 3600, ..Default::default() };
-        let mut f = hot();
+        let mut f = low();
         f.funding_bps_1h = 0.5; // longs pay 0.5 bps/hour
         assert!((round_trip_cost_bps(&f, &cfg, Side::Long) - (1.5 + 4.5 + 1.0 + 0.5 + 0.5)).abs() < 1e-9);
         assert!((round_trip_cost_bps(&f, &cfg, Side::Short) - 7.5).abs() < 1e-9, "received funding is not a credit");
@@ -287,8 +258,8 @@ mod tests {
     fn hack_blocks_longs_not_shorts() {
         let cfg = ScalpConfig::default();
         let hack = NewsCtx { hack_alert: true, ..Default::default() };
-        assert_eq!(evaluate_entry(&hot(), &hack, &cfg, Side::Long).first_block(), Some("news"));
-        assert!(evaluate_entry(&cold(), &hack, &cfg, Side::Short).ok);
+        assert_eq!(evaluate_entry(&low(), &hack, &cfg, Side::Long).first_block(), Some("news"));
+        assert!(evaluate_entry(&high(), &hack, &cfg, Side::Short).ok);
     }
 
     #[test]
@@ -297,14 +268,12 @@ mod tests {
         let n = NewsCtx::default();
         let long = OpenPos { side: Side::Long, tp_px: 100.5, sl_px: 99.5, deadline_ms: 1000 };
         let short = OpenPos { side: Side::Short, tp_px: 99.5, sl_px: 100.5, deadline_ms: 1000 };
-        let at = |bid: f64, ask: f64| Features { bid, ask, flow: 0.0, obi: 0.0, ..hot() };
+        let at = |bid: f64, ask: f64| Features { bid, ask, ..low() };
         assert_eq!(evaluate_exit(&long, Some(&at(100.0, 100.01)), &n, 0, &cfg), None);
         assert_eq!(evaluate_exit(&long, Some(&at(100.6, 100.61)), &n, 0, &cfg).as_deref(), Some("take profit"));
         assert_eq!(evaluate_exit(&long, Some(&at(99.4, 99.41)), &n, 0, &cfg).as_deref(), Some("stop"));
         assert_eq!(evaluate_exit(&short, Some(&at(99.40, 99.45)), &n, 0, &cfg).as_deref(), Some("take profit"));
         assert_eq!(evaluate_exit(&short, Some(&at(100.55, 100.6)), &n, 0, &cfg).as_deref(), Some("stop"));
-        assert_eq!(evaluate_exit(&long, Some(&cold()), &n, 0, &cfg).as_deref(), Some("flow reversed"));
-        assert_eq!(evaluate_exit(&short, Some(&hot()), &n, 0, &cfg).as_deref(), Some("flow reversed"));
         assert_eq!(evaluate_exit(&short, None, &n, 1000, &cfg).as_deref(), Some("time stop"));
         let hack = NewsCtx { hack_alert: true, ..Default::default() };
         assert_eq!(evaluate_exit(&long, None, &hack, 0, &cfg).as_deref(), Some("hack alert"));
@@ -312,19 +281,22 @@ mod tests {
     }
 
     #[test]
+    fn far_target_never_triggers() {
+        let cfg = ScalpConfig::default();
+        let e = evaluate_entry(&high(), &NewsCtx::default(), &cfg, Side::Short);
+        let tp = 100.0 * (1.0 - e.tp_bps / 1e4);
+        assert!(tp > 0.0 && tp < 0.1, "short target {tp} is finite and unreachable");
+    }
+
+    #[test]
     fn trailing_stop_locks_breakeven_then_follows() {
         let cfg = ScalpConfig::default(); // trail after 1.5 × cost
         let (cost, sl_bps) = (23.0, 30.0);
-        // Long from 100, stop at 99.70. Best 100.20 (+20 bps < 34.5): unchanged.
         assert_eq!(trailed_stop(Side::Long, 100.0, 100.2, 99.7, sl_bps, cost, &cfg), 99.7);
-        // Best 100.50 (+50 bps): max(break-even 100.23, trail 100.50 × 0.997 = 100.1985) = 100.23.
         assert!((trailed_stop(Side::Long, 100.0, 100.5, 99.7, sl_bps, cost, &cfg) - 100.23).abs() < 1e-9);
-        // Best 101.00: the trail (100.697) is above break-even.
         assert!((trailed_stop(Side::Long, 100.0, 101.0, 99.7, sl_bps, cost, &cfg) - 100.697).abs() < 1e-9);
-        // Mirrored for a short from 100 with its stop at 100.30.
         assert!((trailed_stop(Side::Short, 100.0, 99.5, 100.3, sl_bps, cost, &cfg) - 99.77).abs() < 1e-9);
         assert!((trailed_stop(Side::Short, 100.0, 99.0, 100.3, sl_bps, cost, &cfg) - 99.297).abs() < 1e-9);
-        // Never loosens: an already tighter stop stays.
         assert_eq!(trailed_stop(Side::Long, 100.0, 100.5, 100.4, sl_bps, cost, &cfg), 100.4);
     }
 }

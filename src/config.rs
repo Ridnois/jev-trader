@@ -128,6 +128,21 @@ pub struct ScalpConfig {
     /// through it; unfilled orders are cancelled and logged as misses.
     pub entry: EntryMode,
     pub maker_timeout_secs: i64,
+    /// Mean-reversion rule: candle interval, lookback in bars, the |z| that opens a
+    /// fade, and the hard stop. z = (last close − mean of the previous `revert_bars`
+    /// closes) / their std. Found 2026-11-10 on 52 days of 15m candles (H-R01).
+    pub revert_interval: String,
+    pub revert_bars: usize,
+    pub revert_z: f64,
+    pub revert_stop_bps: f64,
+    /// Close every open position on Ctrl+C instead of leaving it unprotected
+    /// until restart (there is no exchange-side stop).
+    pub flatten_on_exit: bool,
+    /// Operator-maintained calendar (`[[event]] name, at`); no new entries from
+    /// `macro_before_mins` before an event to `macro_after_mins` after it.
+    pub macro_calendar: std::path::PathBuf,
+    pub macro_before_mins: i64,
+    pub macro_after_mins: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -179,6 +194,14 @@ impl Default for ScalpConfig {
             maker_fee_bps: 1.5,
             entry: EntryMode::Maker,
             maker_timeout_secs: 20,
+            revert_interval: "15m".into(),
+            revert_bars: 288,
+            revert_z: 2.0,
+            revert_stop_bps: 300.0,
+            flatten_on_exit: true,
+            macro_calendar: "data/macro_calendar.toml".into(),
+            macro_before_mins: 30,
+            macro_after_mins: 120,
         }
     }
 }

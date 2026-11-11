@@ -87,47 +87,47 @@ max_slippage_bps = 30     # IOC limit at most 0.3% through the price
 leverage = 1              # cross 1× on each coin, matching the ledger's sizing
 
 [scalp]
-# Market microstructure decides; news tilts (news_tilt) and vetoes (hack alert,
-# Jev entry review). Every default is listed. Paper fills are charged real
-# Hyperliquid fees, and maker entries fill only when trades print through the price.
+# Mean reversion on 15m candles (H-R01, rewritten 2026-11-10; the order-flow rules
+# were rejected, H-C01/H-C02). A close more than revert_z std from the mean of the
+# previous revert_bars closes is faded: bought when stretched low, sold when high.
+# Exits: revert_stop_bps hard stop or the hold_secs time stop. No take profit, no trail.
+# Research: 52 days x 8 coins, +41.7 bps/trade after 11.5 bps costs, 53% wins.
+revert_interval = "15m"
+revert_bars = 288         # 3 days
+revert_z = 2.0
+revert_stop_bps = 500.0   # backtest 2026-11-10: none +43.5 bps/trade (worst -1498), 500 +42.0 (worst -512), 300 +38.3
+flatten_on_exit = true    # Ctrl+C closes everything; no exchange-side stop protects a stopped bot
+macro_calendar = "data/macro_calendar.toml"
+macro_before_mins = 30    # no new entries 30 min before to 2 h after CPI / jobs / FOMC
+macro_after_mins = 120
+hold_secs = 21600         # 6h
+entry = "taker"           # maker fills were adversely selected (H-C02)
+trail_after_cost_mult = 0.0
+news_tilt = 0.10          # z units: news agreeing with the side lowers the bar by up to 0.1
 eval_ms = 500
+warmup_secs = 60          # websocket history needed for spread/feed checks
+max_spread_bps = 5.0
+# Microstructure features are still logged with every candidate (research only).
 flow_window_secs = 30
 vol_window_secs = 300
 baseline_secs = 1800
-warmup_secs = 600
-min_activity_ratio = 1.5
-min_flow_imbalance = 0.25
-min_book_imbalance = 0.10
-min_push_bps = 3.0
-max_chase_bps = 60.0
-max_spread_bps = 5.0
-hold_secs = 600
 # Costs: Hyperliquid perps tier 0 (no volume, no HYPE staked), checked 2026-11-06
 # against hyperliquid.gitbook.io/hyperliquid-docs/trading/fees.
 fee_bps = 4.5             # taker
 maker_fee_bps = 1.5       # post-only (ALO)
 slippage_bps = 1.0
-cost_mult = 2.0           # typical move over the hold must be ≥ 2× round-trip cost
-tp_vol_mult = 1.5
-tp_cost_mult = 1.5
-sl_vol_mult = 1.0
-sl_cost_mult = 1.0
 position_pct = 0.10
-max_positions = 2
-max_trades_per_hour = 6
+max_positions = 8          # one per coin
+max_trades_per_hour = 200
 daily_loss_limit_pct = 0.02
-cooldown_after_loss_secs = 900
-news_tilt = 0.10
+cooldown_after_loss_secs = 0   # the research re-entered on the next bar; a 1h cooldown cut the backtest to +33.5 bps/trade
 jev_review = true
 jev_veto = 0.6
 jev_cache_secs = 120
 jev_headline_minutes = 180
-markouts = [60, 300, 600]
+markouts = [3600, 21600]
 shorts = true             # a short is a plain perp sell
 starting_cash = 10000.0   # paper dollars
-entry = "maker"           # post at the bid (long) / ask (short); filled only if trades print through it
-maker_timeout_secs = 20   # then cancelled and logged as a miss (scalp_orders.jsonl)
-trail_after_cost_mult = 1.5  # in profit by 1.5× cost → stop to break-even after fees, then trail
 
 # Universe (2026-11-06, `hl scan`, 72h): liquid perps (24h volume ≥ $18M, impact spread
 # ≤ 3.3 bps) whose 10-minute moves clear 2× the maker/taker round trip most often.

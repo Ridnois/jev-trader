@@ -574,7 +574,7 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
         t0,
     ));
 
-    let macro_event = macro_window(&ctx.paths.macro_calendar, now);
+    let macro_event = macro_window(&ctx.paths.macro_calendar, now, 60, 60);
     for a in &d.assets {
         let Some(price) = a.mark else { continue };
         append_jsonl(
@@ -641,7 +641,8 @@ async fn tick(ctx: &Ctx, state: &mut State, status: &mut Status) -> Result<Vec<S
 
 /// Phase 7: operator-maintained macro calendar (`data/macro_calendar.toml`):
 /// `[[event]] name = "FOMC", at = "2026-12-09T19:00:00Z"`. Returns the event
-/// within ±1h of `now`, if any. Recorded only.
+/// from `before` minutes ahead of its time to `after` minutes past it, if any.
+/// The news bot records it (±1h); the scalper blocks entries in it.
 #[derive(Deserialize)]
 struct MacroCalendar {
     #[serde(default)]
@@ -654,10 +655,10 @@ struct MacroEvent {
     at: DateTime<Utc>,
 }
 
-fn macro_window(path: &Path, now: DateTime<Utc>) -> Option<String> {
+pub fn macro_window(path: &Path, now: DateTime<Utc>, before: i64, after: i64) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let cal: MacroCalendar = toml::from_str(&text).ok()?;
-    cal.event.into_iter().find(|e| (e.at - now).num_minutes().abs() <= 60).map(|e| e.name)
+    cal.event.into_iter().find(|e| (-before..=after).contains(&(now - e.at).num_minutes())).map(|e| e.name)
 }
 
 pub fn truncate(s: &str, n: usize) -> String {
@@ -720,8 +721,11 @@ mod tests {
         let p = dir.join("m.toml");
         std::fs::write(&p, "[[event]]\nname = \"CPI\"\nat = \"2026-11-12T13:30:00Z\"\n").unwrap();
         let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
-        assert_eq!(macro_window(&p, t("2026-11-12T13:00:00Z")).as_deref(), Some("CPI"));
-        assert!(macro_window(&p, t("2026-11-12T16:00:00Z")).is_none());
+        assert_eq!(macro_window(&p, t("2026-11-12T13:00:00Z"), 60, 60).as_deref(), Some("CPI"));
+        assert!(macro_window(&p, t("2026-11-12T16:00:00Z"), 60, 60).is_none());
+        // Scalper window: 30 min before to 2 h after.
+        assert!(macro_window(&p, t("2026-11-12T12:50:00Z"), 30, 120).is_none());
+        assert!(macro_window(&p, t("2026-11-12T15:20:00Z"), 30, 120).is_some());
         std::fs::remove_dir_all(dir).ok();
     }
 }
