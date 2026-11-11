@@ -51,7 +51,7 @@ pub fn sequential(rets: &[f64], card: &gate::Card) -> (Call, f64, f64) {
         _ => card.dd99[2],
     };
     let call = if limit > 0.0 && dd > limit {
-        Call::Kill(format!("drawdown {:.2}% is past the {:.2}% the backtest allows in {} days", dd * 100.0, limit * 100.0, rets.len().max(30).min(90)))
+        Call::Kill(format!("drawdown {:.2}% is past the {:.2}% the backtest allows in {} days", dd * 100.0, limit * 100.0, rets.len().clamp(30, 90)))
     } else if card.mu_daily <= 0.0 {
         Call::Kill("the card predicts no positive return".into())
     } else if llr <= lo {

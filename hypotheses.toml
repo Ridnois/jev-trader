@@ -224,7 +224,7 @@ baseline = "research 2026-11-10 on 52 days of 15m candles (2026-09-19..11-10, 8 
 pass_if = "mean net bps per trade > +10 with n >= 100 trades across >= 3 weeks"
 invalidate_if = "mean net bps per trade <= 0 with n >= 100, or drawdown > 10% of equity"
 status = "testing"
-result = "Restarted 2026-11-10 after 6 paper trades (-$95, mostly a 9h outage and two CPI-day ZEC stops). Changes: stop 300 -> 500 bps; Ctrl+C now closes all positions; no new entries 30 min before to 2 h after CPI / jobs / FOMC (data/macro_calendar.toml). Count n from the restart. Backtest on 52 days of HL 15m candles, 8 coins, 11.5 bps cost: no stop +43.5 bps/trade n=420 worst -1498; stop 500 +42.0 n=440 worst -512; stop 300 +38.3 n=486; macro window +42.8 (only 5 events). Rejected as filters, each cut the edge: skip when >=4 of 8 coins stretched the same way +8.9; at most 3 same-side positions +21.5; 1h cooldown after a loss +33.5; after a stop, no re-entry on that coin and side until |z| < 2 again +29.7 (2026-11-10, n=388 vs 437, last 40% +19.9 vs +36.2; re-entries after stops pay on average); skip |z| > 4 +37.6. The edge comes from market-wide dips, so cross-coin filters remove it."
+result = "Lab, 2026-11-11 (H-L01): this rule loses on 836 days of research history, -19.8 bps/trade over 15,974 trades; the 52-day backtest below is one favourable stretch. Paper run continues under its own n >= 100 rule. Restarted 2026-11-10 after 6 paper trades (-$95, mostly a 9h outage and two CPI-day ZEC stops). Changes: stop 300 -> 500 bps; Ctrl+C now closes all positions; no new entries 30 min before to 2 h after CPI / jobs / FOMC (data/macro_calendar.toml). Count n from the restart. Backtest on 52 days of HL 15m candles, 8 coins, 11.5 bps cost: no stop +43.5 bps/trade n=420 worst -1498; stop 500 +42.0 n=440 worst -512; stop 300 +38.3 n=486; macro window +42.8 (only 5 events). Rejected as filters, each cut the edge: skip when >=4 of 8 coins stretched the same way +8.9; at most 3 same-side positions +21.5; 1h cooldown after a loss +33.5; after a stop, no re-entry on that coin and side until |z| < 2 again +29.7 (2026-11-10, n=388 vs 437, last 40% +19.9 vs +36.2; re-entries after stops pay on average); skip |z| > 4 +37.6. The edge comes from market-wide dips, so cross-coin filters remove it."
 
 # --- P/B range engine (STRATEGY-PB.md). Not built yet; registered before any test. ---
 
@@ -306,8 +306,8 @@ metric = "lab gate: walk-forward out-of-sample daily mean, family-wide reality c
 baseline = "zero after costs; time-shifted copies of the same signals; H-R01's own 52-day backtest (+35 bps/trade, t = 2.44) as the claim under test"
 pass_if = "lab verdict PROMOTE_TO_PAPER"
 invalidate_if = "lab verdict REJECT; then H-R01 keeps running on paper only until its own n >= 100 rule decides it"
-status = "proposed"
-result = ""
+status = "rejected"
+result = "2026-11-11, lab verdict REJECT. 384 rules on Binance USDT-M 15m, 20 coins, 836 design days (2024-01-01 to 2026-04-15): every rule loses after costs (best Sharpe -0.20), reality check p = 1.00, walk-forward -10.0 bps/day [-21.4, +1.2]. H-R01's own rule (hold=24,n=288,stop=500,z=2) on those days: 15,974 trades, -19.8 bps/trade, 0 of 20 coins and 0 of 9 quarters profitable; an independent recomputation without stops gives -17 bps gross per fade on 6 coins. The same code reproduces H-R01's backtest on Hyperliquid's last 49 days (+37.4 bps/trade, 435 trades vs +35.0, 422), so the 52-day result is one favourable stretch, not an edge. Lockbox (210 days) not opened."
 
 [[hypothesis]]
 id = "H-L02"
@@ -317,8 +317,8 @@ metric = "lab gate, as H-L01"
 baseline = "zero after costs; time-shifted copies; market beta reported"
 pass_if = "lab verdict PROMOTE_TO_PAPER"
 invalidate_if = "lab verdict REJECT"
-status = "proposed"
-result = ""
+status = "rejected"
+result = "2026-11-11, lab verdict REJECT, the closest of the four. 40 rules on Binance 1h, 836 design days. Best: 16-day channel, long only, stop 800 bps: Sharpe 1.19 in sample, +13.9 bps/day, alpha vs the basket t = 1.9. But reality check p = 0.22, deflated Sharpe 0.23 (202 trials on this data set), PBO 0.51, walk-forward +3.9 bps/day [-13.4, +22.0], 5 of 9 quarters positive. Kept on paper as an unproven candidate (strategies/trend.json): its card says about 970 days of paper trading would be needed to confirm an edge this size. Lockbox not opened."
 
 [[hypothesis]]
 id = "H-L03"
@@ -328,8 +328,8 @@ metric = "lab gate, as H-L01"
 baseline = "zero after costs; time-shifted copies"
 pass_if = "lab verdict PROMOTE_TO_PAPER"
 invalidate_if = "lab verdict REJECT"
-status = "proposed"
-result = ""
+status = "rejected"
+result = "2026-11-11, lab verdict REJECT. 108 rules (both directions) on Binance 1h. Best: 7-day momentum, daily rebalance, 5 a side: Sharpe 1.23 in sample, but walk-forward -3.0 bps/day [-9.5, +3.7], reality check p = 0.77, deflated Sharpe 0.17, one grid step away the Sharpe is -2.1, and it loses when entered one bar late. Lockbox not opened."
 
 [[hypothesis]]
 id = "H-L04"
@@ -339,8 +339,8 @@ metric = "lab gate, as H-L01; funding received reported separately from price P&
 baseline = "zero after costs; time-shifted copies"
 pass_if = "lab verdict PROMOTE_TO_PAPER"
 invalidate_if = "lab verdict REJECT"
-status = "proposed"
-result = ""
+status = "rejected"
+result = "2026-11-11, lab verdict REJECT. 54 rules on Binance 1h with Binance funding prints. Best Sharpe 0.82 in sample (+4.6 bps/day); reality check p = 0.53, deflated Sharpe 0.14, walk-forward +0.6 bps/day [-6.9, +7.5], beats only about two thirds of its time-shifted copies. Lockbox not opened."
 
 [[hypothesis]]
 id = "H-J01"
@@ -350,8 +350,8 @@ metric = "Brier skill of `p_revert` vs the base rate, AUC, and IC against the si
 baseline = "the base rate (always answering the average); the candidate's own |z| as a one-number predictor"
 pass_if = "Brier skill > 0 and IC > 0 with null percentile > 95, n >= 400 candidates across >= 30 days; then jev_gate must pass the lab gate like any family"
 invalidate_if = "IC indistinguishable from the null with n >= 400; then Jev stays out of mean-reversion entries"
-status = "proposed"
-result = ""
+status = "rejected"
+result = "2026-11-11, Jev jev-1.14.0, 1,233 scored candidates. Hyperliquid, 49 days, 892 entries on 20 coins: p_revert IC -0.110 (1st percentile of the day-block null: wrong-way), Brier skill -0.14, AUC 0.45; answers sit in a narrow 0.35-0.46 band. Binance, 341 entries spread over 836 days: IC -0.042 (22nd percentile), AUC 0.52: no skill, and the wrong-way reading did not repeat. p_run (goes 2% against the trade first) has AUC 0.59 and 0.64: Jev reads risk from the state, but that did not sort winners from losers. jev_gate on Hyperliquid: INSUFFICIENT_EVIDENCE (39 design days). Cost 991 tokens and about 210 ms per call; 1,485 calls in all. Jev stays out of mean-reversion entries."
 
 [[hypothesis]]
 id = "H-J02"
@@ -372,8 +372,8 @@ metric = "IC with the date revealed minus IC anonymised, same states"
 baseline = "anonymised answers"
 pass_if = "difference within the null's 90% range, n >= 150: revealed replays can be trusted as much as anonymised ones"
 invalidate_if = "revealed IC higher beyond the null: Jev recalls history, so only anonymised or forward (paper) evidence counts"
-status = "proposed"
-result = ""
+status = "accepted"
+result = "2026-11-11, 150 states re-asked with coin and date shown: IC -0.040 revealed vs -0.073 anonymous on the same states. No sign that Jev recalls what happened next; with 150 pairs the difference (0.03) is well inside noise (about 0.08). Stability: the same state asked twice differs by 0.009 (p_revert) and 0.016 (p_run) on average over 100 pairs."
 
 [[hypothesis]]
 id = "H-X01"

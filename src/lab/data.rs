@@ -231,7 +231,7 @@ async fn hl_candles(http: &reqwest::Client, api: &str, coin: &str, interval: &st
             }
         }
         let Some(last) = out.last().map(|c| c.open_time) else { break };
-        if n < 500 || last + ims >= end_ms || last + 1 <= from {
+        if n < 500 || last + ims >= end_ms || last < from {
             break;
         }
         from = last + 1;

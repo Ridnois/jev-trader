@@ -1,5 +1,7 @@
 # Next steps (handoff, 2026-11-07)
 
+> **2026-11-11:** v3 adds a research lab and a paper trader. Its results change this page: H-R01's rule loses over 2.3 years, and no rule family passed the gate. Read [DESIGN-V3.md](DESIGN-V3.md) §4 and §9 first. What follows is the v1 handoff, kept for the P/B spec and the testnet question.
+
 Where the work stopped and what comes next. Read this before resuming.
 
 ## Where things stand

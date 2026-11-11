@@ -5,6 +5,8 @@ Two crypto trading bots for **Hyperliquid perps**, written in Rust and powered b
 - **News bot** (`run`): long-only, hourly-candle strategy driven by headlines.
 - **Scalper** (`scalp`): long and short, second-by-second order flow decides; news only informs.
 
+- **v3 lab and paper trader** (`lab`, `trade`, branch `v3`): where strategies are searched, judged with the search paid for, and paper-traded against a prediction fixed in advance. Design, first verdicts and commands: [DESIGN-V3.md](DESIGN-V3.md).
+
 Both run on **paper by default**: simulated fills on real Hyperliquid prices, charged Hyperliquid's real fees and funding. Real orders need `[exchange] mode = "live"` **and** `--live` (see *Live trading*).
 
 ## News bot
@@ -121,6 +123,23 @@ cargo run --release -- --config config.scalp.toml scalp-backtest --from 2026-10-
 - **--compare** judges only the last 30% of the window. It checks sample size, how many parameters changed, regime dependency (BTC 200h-SMA proxy), costs, and whether momentum explains the result. Verdicts go to `data/reviews.jsonl`, and `report` flags a config that was applied against a REJECT.
 - Write every strategy change into `hypotheses.toml` **before** testing it.
 - `data/macro_calendar.toml` (optional, `[[event]] name = "CPI"` / `at = "…Z"`) tags ticks within ±1h of a release. It is recorded only.
+
+## v3: the lab and the paper trader
+
+```sh
+cargo build --profile lab -j 2
+target/lab/jev-trader lab fetch                                   # candle + funding archive (no keys)
+target/lab/jev-trader lab validate --family families/trend.toml   # PROMOTE_TO_PAPER / REVISE / REJECT
+target/lab/jev-trader lab jev score --probe probes/fade_judge.toml
+target/lab/jev-trader --env-file .env.local trade run             # paper only
+target/lab/jev-trader trade monitor
+```
+
+- `lab validate` searches a family's declared grid (`families/*.toml`) on a design window and returns one verdict: walk-forward out of sample, a reality check over the whole family, deflated Sharpe with the trial count read from `lab-data/trials.jsonl`, PBO, cost and delay stress, breadth, a time-shifted baseline, then a lockbox only a passing candidate opens. Thresholds are in `lab.toml`.
+- `lab calibrate` runs that gate on synthetic markets with nothing to find (it promoted none of 200) and with planted edges.
+- `lab jev replay | score` asks Jev typed questions about an anonymous market state at each historical candidate, caches the answers and scores them against what happened next.
+- `trade run` paper-trades the specs in `strategies/` with the simulator's own rules, records every Jev-scored headline as a catalyst candidate with markouts (no orders), and writes 1-second rows. `trade monitor` checks parity with the simulator and runs the sequential test against each strategy's prediction card.
+- Verdicts so far (2026-11-11): all four families REJECT, including H-R01's rule, which loses over 2.3 years. See DESIGN-V3.md §4.
 
 ## Dashboard
 
