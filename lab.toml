@@ -67,5 +67,15 @@ paper_beta = 0.20
 [trade]                       # the v3 paper trader (`jev-trader trade run`)
 data_dir = "data-v3"
 strategies_dir = "strategies" # written by `lab promote`
-record_ticks = true           # 1-second rows per coin, about 50 MB a day for 20 coins
+record_ticks = true           # 1-second rows per coin: about 140 MB a day for 20 coins
+tick_days_kept = 14           # older tick files are deleted at UTC midnight (about 2 GB at most)
 live_probes = []              # e.g. ["probes/direction.toml"]: asked live each bar, costs Jev tokens
+
+[trade.catalyst]              # Jev catalyst scalper, record mode: headlines are scored and marked out, nothing is ordered
+enabled = true                # false = no news fetched, no Jev calls for headlines
+max_calls_per_hour = 30       # each call scores up to batch_size headlines (~200 tokens per headline)
+batch_size = 10
+min_impact = 0.45             # |Jev impact| on -1..1 that counts as a catalyst
+min_new_info = 0.6
+max_lag_min = 20.0
+markouts_secs = [300, 1800, 7200, 21600]

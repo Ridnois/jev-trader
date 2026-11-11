@@ -167,16 +167,89 @@ pub struct TradeCfg {
     /// Where `lab promote` writes the specs the trader runs.
     pub strategies_dir: PathBuf,
     /// Write one row per active second per coin (mid, trade range, taker volume) for
-    /// later finer-grained replays. About 50 MB a day for 20 coins.
+    /// later finer-grained replays. About 140 MB a day for 20 coins (measured).
     pub record_ticks: bool,
+    /// Tick files older than this many days are deleted at each UTC midnight.
+    pub tick_days_kept: i64,
     /// Probes asked live at each bar close and cached like a replay. Each costs Jev
     /// tokens on every bar it applies to; empty = none.
     pub live_probes: Vec<PathBuf>,
+    pub catalyst: CatalystCfg,
 }
 
 impl Default for TradeCfg {
     fn default() -> Self {
-        Self { data_dir: "data-v3".into(), strategies_dir: "strategies".into(), record_ticks: true, live_probes: Vec::new() }
+        Self { data_dir: "data-v3".into(), strategies_dir: "strategies".into(), record_ticks: true, tick_days_kept: 14, live_probes: Vec::new(), catalyst: CatalystCfg::default() }
+    }
+}
+
+/// The Jev catalyst scalper (record mode): news sources, Jev budget, what counts as
+/// a catalyst, and when its candidates are marked out.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CatalystCfg {
+    /// Off = no news is fetched and Jev is not called for headlines.
+    pub enabled: bool,
+    pub rss: Vec<String>,
+    /// Exchange announcement APIs: binance, upbit, bybit, okx.
+    pub announcements: Vec<String>,
+    pub rss_every_secs: u64,
+    pub announcements_every_secs: u64,
+    /// Older items on first sight are context, not news.
+    pub max_age_min: i64,
+    /// Title-token overlap above which a headline repeats a story already scored.
+    pub dedupe_jaccard: f64,
+    /// Headlines per Jev call, and calls allowed per hour.
+    pub batch_size: usize,
+    pub max_calls_per_hour: usize,
+    /// |Jev impact| on −1..1 needed to trigger.
+    pub min_impact: f64,
+    /// Jev: a new concrete fact, not opinion or a price recap.
+    pub min_new_info: f64,
+    /// Seen within this many minutes of publication.
+    pub max_lag_min: f64,
+    /// Seconds after the headline at which every candidate is marked out.
+    pub markouts_secs: Vec<i64>,
+}
+
+impl Default for CatalystCfg {
+    fn default() -> Self {
+        // The 18 feeds v2 checked on 2026-11-08 (all returned 200 without a key).
+        let rss = [
+            "https://www.coindesk.com/arc/outboundfeeds/rss",
+            "https://cointelegraph.com/rss",
+            "https://decrypt.co/feed",
+            "https://www.theblock.co/rss.xml",
+            "https://blockworks.com/feed",
+            "https://www.dlnews.com/arc/outboundfeeds/rss/",
+            "https://thedefiant.io/api/feed",
+            "https://bitcoinmagazine.com/feed",
+            "https://cryptoslate.com/feed/",
+            "https://crypto.news/feed/",
+            "https://beincrypto.com/feed/",
+            "https://cryptonews.com/news/feed/",
+            "https://www.newsbtc.com/feed/",
+            "https://bitcoinist.com/feed/",
+            "https://cryptopotato.com/feed/",
+            "https://news.google.com/rss/search?q=crypto+OR+bitcoin+when:1h&hl=en-US&gl=US&ceid=US:en",
+            "https://www.federalreserve.gov/feeds/press_all.xml",
+            "https://www.sec.gov/news/pressreleases.rss",
+        ];
+        Self {
+            enabled: true,
+            rss: rss.iter().map(|s| s.to_string()).collect(),
+            announcements: ["binance", "upbit", "bybit", "okx"].iter().map(|s| s.to_string()).collect(),
+            rss_every_secs: 60,
+            announcements_every_secs: 20,
+            max_age_min: 180,
+            dedupe_jaccard: 0.5,
+            batch_size: 10,
+            max_calls_per_hour: 30,
+            min_impact: 0.45,
+            min_new_info: 0.6,
+            max_lag_min: 20.0,
+            markouts_secs: vec![300, 1800, 7200, 21600],
+        }
     }
 }
 

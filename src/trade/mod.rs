@@ -12,6 +12,8 @@
 //! `ticks/<coin>/<day>.csv` (1-second rows).
 
 pub mod book;
+pub mod catalyst;
+pub mod intel;
 pub mod monitor;
 
 use std::collections::{BTreeMap, HashMap};
@@ -123,11 +125,15 @@ pub struct Paths {
     pub maker: PathBuf,
     pub ticks: PathBuf,
     pub monitor: PathBuf,
+    pub news: PathBuf,
+    pub news_seen: PathBuf,
+    pub catalyst_candidates: PathBuf,
+    pub catalyst_markouts: PathBuf,
 }
 
 impl Paths {
     pub fn new(dir: &Path) -> Self {
-        Self { ledger: dir.join("ledger.json"), trades: dir.join("trades.jsonl"), daily: dir.join("daily.jsonl"), status: dir.join("status.json"), maker: dir.join("maker_exits.jsonl"), ticks: dir.join("ticks"), monitor: dir.join("monitor.md") }
+        Self { ledger: dir.join("ledger.json"), trades: dir.join("trades.jsonl"), daily: dir.join("daily.jsonl"), status: dir.join("status.json"), maker: dir.join("maker_exits.jsonl"), ticks: dir.join("ticks"), monitor: dir.join("monitor.md"), news: dir.join("news_events.jsonl"), news_seen: dir.join("news_seen.json"), catalyst_candidates: dir.join("catalyst_candidates.jsonl"), catalyst_markouts: dir.join("catalyst_markouts.jsonl") }
     }
 }
 
@@ -151,15 +157,15 @@ pub async fn run(cmd: TradeCmd, lab: &LabConfig, http: &reqwest::Client, hl_api:
 async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, ws_url: &'static str, jev_cfg: &crate::config::JevConfig, once: bool) -> Result<()> {
     let tc = &lab.trade;
     let strategies = load_strategies(&tc.strategies_dir)?;
-    if strategies.is_empty() {
-        bail!("no strategies in {}: run `jev-trader lab validate` and then `lab promote` first", tc.strategies_dir.display());
+    if strategies.is_empty() && !tc.catalyst.enabled {
+        bail!("no strategies in {} and the catalyst recorder is off: run `jev-trader lab validate` and then `lab promote` first", tc.strategies_dir.display());
     }
     std::fs::create_dir_all(&tc.data_dir)?;
     crate::status::acquire_pid_lock(&tc.data_dir.join("trade.pid"))?;
     let paths = Paths::new(&tc.data_dir);
     let coins = lab.universe.coins.clone();
     let ar = lab.archive();
-    let share = lab.capital / strategies.len() as f64;
+    let share = lab.capital / strategies.len().max(1) as f64;
     let cfg = SimCfg::new(share, lab.costs.clone(), lab.sizing.clone());
     let mut ledger: Ledger = crate::status::read_json(&paths.ledger).unwrap_or_default();
     ledger.started.get_or_insert_with(Utc::now);
@@ -168,7 +174,15 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
         info!("strategy {} ({}): {} on {} bars · expects {:+.2} bps/day", s.name, s.promoted.status, s.promoted.card.spec.id(), s.promoted.card.interval, s.promoted.card.mu_daily * 1e4);
     }
     let live_probes: Vec<probe::Probe> = tc.live_probes.iter().map(|p| probe::Probe::load(p)).collect::<Result<_>>()?;
-    let jev = if live_probes.is_empty() { None } else { Some(crate::jev::JevClient::from_env(&jev_cfg.model, Duration::from_millis(jev_cfg.timeout_ms.max(8000)))?) };
+    let jev = if live_probes.is_empty() && !tc.catalyst.enabled { None } else { Some(crate::jev::JevClient::from_env(&jev_cfg.model, Duration::from_millis(jev_cfg.timeout_ms.max(8000)))?) };
+    // Catalyst recorder: its own news loop, events arrive on a channel. No orders.
+    let (news_tx, mut news_rx) = tokio::sync::mpsc::unbounded_channel::<intel::NewsEvent>();
+    let mut recorder = catalyst::Recorder::default();
+    if let (true, Some(j)) = (tc.catalyst.enabled && !once, &jev) {
+        let tagger = Arc::new(intel::tagger::Tagger::new(&coins));
+        tokio::spawn(intel::run(tc.catalyst.clone(), j.clone(), tagger, paths.news.clone(), paths.news_seen.clone(), news_tx.clone()));
+        info!("catalyst recorder on: {} feeds + {} exchange APIs, at most {} Jev calls an hour, record mode (no orders)", tc.catalyst.rss.len(), tc.catalyst.announcements.len(), tc.catalyst.max_calls_per_hour);
+    }
     let mut intervals: Vec<String> = strategies.iter().map(|s| s.promoted.card.interval.clone()).chain(live_probes.iter().map(|p| p.interval.clone())).collect();
     intervals.sort();
     intervals.dedup();
@@ -221,6 +235,17 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
             }
         }
 
+        // Catalyst candidates (record mode) and their markouts.
+        while let Ok(e) = news_rx.try_recv() {
+            let cost = e.coins.first().map(|c| lab.costs.round_trip_bps(c)).unwrap_or(0.0);
+            if let Some(c) = recorder.on_event(&e, &quotes, &tc.catalyst, cost, now_ms, &paths.catalyst_candidates)
+                && c.triggered
+            {
+                info!("catalyst candidate (recorded, not traded): {} {} on \"{}\" [{}] impact {:+.2}", if c.side > 0 { "buy" } else { "sell" }, c.coin, c.title, c.source, c.impact);
+            }
+        }
+        recorder.tick(&quotes, now_ms, &paths.catalyst_markouts);
+
         // Day roll: one row per strategy for the day that just ended.
         let day = now_ms.div_euclid(DAY_MS);
         let mid = |c: &str| quotes.get(c).map(Quote::mid);
@@ -231,6 +256,15 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
                     let eq = book.equity(mid);
                     let start = ledger.day_start_equity.get(&s.name).copied().unwrap_or(eq);
                     append_jsonl(&paths.daily, &DailyRow { strategy: s.name.clone(), day: day_name(ledger.day), ret: (eq - start) / book.capital, up_secs: ledger.day_up_secs });
+                }
+            }
+            // Old tick files go, so the recorder's disk use stays bounded.
+            let cutoff = day_name(day - tc.tick_days_kept.max(1));
+            for coin in std::fs::read_dir(&paths.ticks).into_iter().flatten().flatten() {
+                for f in std::fs::read_dir(coin.path()).into_iter().flatten().flatten() {
+                    if f.path().file_stem().is_some_and(|d| d.to_string_lossy().as_ref() < cutoff.as_str()) {
+                        let _ = std::fs::remove_file(f.path());
+                    }
                 }
             }
             ledger.day = day;
@@ -387,6 +421,7 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
             }).collect();
             write_atomic(&paths.status, &serde_json::to_vec_pretty(&serde_json::json!({
                 "ts": now, "pid": std::process::id(), "venue": "hyperliquid-paper", "feed": h, "quotes": quotes.len(), "coins": coins.len(), "books": books,
+                "catalyst": { "enabled": tc.catalyst.enabled, "candidates_waiting_for_markouts": recorder.waiting() },
             }))?)?;
         }
         if once && intervals.iter().all(|i| bar_done.contains_key(i)) {

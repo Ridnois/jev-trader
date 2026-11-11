@@ -133,6 +133,19 @@ pub fn run(lab: &LabConfig) -> Result<()> {
         }
         let _ = writeln!(md);
     }
+    // The catalyst recorder: forward evidence only.
+    let marks: Vec<super::catalyst::Markout> = crate::status::read_jsonl(&paths.catalyst_markouts);
+    let _ = writeln!(md, "## Jev catalyst scalper (record mode, no orders)\n");
+    if marks.is_empty() {
+        let _ = writeln!(md, "No markouts yet. Each scored headline about a coin is marked out at fixed horizons after it arrives.");
+    } else {
+        let _ = writeln!(md, "Return of trading each headline in the direction Jev read, after the round-trip cost.\n\n| After | Triggered (strong, new, fresh) | n | Every scored headline | n |\n|---|---|---|---|---|");
+        for (h, tn, tmean, an, amean) in super::catalyst::summary(&marks) {
+            let _ = writeln!(md, "| {} min | {} | {tn} | {:+.1} bps | {an} |", h / 60, if tn > 0 { format!("{tmean:+.1} bps") } else { "–".into() }, amean);
+        }
+        let days = marks.iter().map(|m| m.ts.date_naive()).collect::<HashSet<_>>().len();
+        let _ = writeln!(md, "\n{days} day(s) of evidence. Below 30 triggered candidates across 20 days this is an anecdote, not a result.");
+    }
     crate::status::write_atomic(&paths.monitor, md.as_bytes())?;
     println!("{md}");
     Ok(())
