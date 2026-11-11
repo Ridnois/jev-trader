@@ -1,0 +1,14 @@
+# Mean reversion (H-R01, generalised): fade a close stretched z std from the mean
+# of the previous n closes. The grid is H-R01's rule and its neighbourhood, about
+# the size of the 380-rule search it was picked from. H-R01 itself is
+# meanrev:hold=24,n=288,resid=0,stop=500,z=2.
+family = "meanrev"
+interval = "15m"
+hypothesis = "H-L01"
+
+[grid]
+n = [96, 192, 288, 576]       # lookback: 1, 2, 3, 6 days
+z = [1.5, 2.0, 2.5, 3.0]
+hold = [12, 24, 48, 96]       # time stop: 3h, 6h, 12h, 24h
+stop = [0, 300, 500]          # hard stop, bps (0 = none)
+resid = [0, 1]                # 1 = stretch measured against the basket of all coins

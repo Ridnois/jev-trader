@@ -1,0 +1,11 @@
+# Funding carry: short the k coins whose shorts are paid the most, and (mode 0)
+# long the k whose longs pay the least. mode 1 = short leg only.
+family = "funding_carry"
+interval = "1h"
+hypothesis = "H-L04"
+
+[grid]
+look = [24, 72, 168]          # hours of funding averaged
+hold = [8, 24, 72]
+k = [2, 3, 5]
+mode = [0, 1]

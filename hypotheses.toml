@@ -293,3 +293,95 @@ pass_if = "gated mean R higher for both B and A, pb backtest --compare PASS"
 invalidate_if = "no gain, or pb backtest --compare REJECT"
 status = "proposed"
 result = ""
+
+# --- v3 lab (DESIGN-V3.md, registered 2026-11-11 before any lab run). ---
+# These are judged by `jev-trader lab validate`, whose thresholds live in lab.toml.
+# "pass" means verdict PROMOTE_TO_PAPER; nothing else counts.
+
+[[hypothesis]]
+id = "H-L01"
+statement = "Some rule in H-R01's neighbourhood (fade a 15m close stretched 1.5-3 std from its 1-6 day mean, held 3-24h) pays after Hyperliquid costs and funding once the search over 384 rules is accounted for"
+change = "families/meanrev.toml on ~2.8 years of Binance USDT-M 15m candles (research proxy), 20 coins with a point-in-time volume filter, then Hyperliquid candles and funding"
+metric = "lab gate: walk-forward out-of-sample daily mean, family-wide reality check, deflated Sharpe, PBO, lockbox"
+baseline = "zero after costs; time-shifted copies of the same signals; H-R01's own 52-day backtest (+35 bps/trade, t = 2.44) as the claim under test"
+pass_if = "lab verdict PROMOTE_TO_PAPER"
+invalidate_if = "lab verdict REJECT; then H-R01 keeps running on paper only until its own n >= 100 rule decides it"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-L02"
+statement = "Donchian breakouts on 1h bars (1-16 day channels) pay after costs across liquid perps"
+change = "families/trend.toml, 40 specs"
+metric = "lab gate, as H-L01"
+baseline = "zero after costs; time-shifted copies; market beta reported"
+pass_if = "lab verdict PROMOTE_TO_PAPER"
+invalidate_if = "lab verdict REJECT"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-L03"
+statement = "Ranking coins against each other (losers vs winners over 1h-7d, rebalanced every 4-24h) pays after costs in one direction, reversal or momentum, market-neutral"
+change = "families/xs_reversal.toml, 108 specs, both directions in the grid"
+metric = "lab gate, as H-L01"
+baseline = "zero after costs; time-shifted copies"
+pass_if = "lab verdict PROMOTE_TO_PAPER"
+invalidate_if = "lab verdict REJECT"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-L04"
+statement = "Shorting the perps whose shorts are paid the most funding (and buying the cheapest to hold) earns the funding without losing it to price"
+change = "families/funding_carry.toml, 54 specs; research uses Binance funding prints, the venue check Hyperliquid's hourly prints"
+metric = "lab gate, as H-L01; funding received reported separately from price P&L"
+baseline = "zero after costs; time-shifted copies"
+pass_if = "lab verdict PROMOTE_TO_PAPER"
+invalidate_if = "lab verdict REJECT"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-J01"
+statement = "Jev, shown an anonymised market state at a mean-reversion candidate (no coin name, date or price level), can tell fades that revert from fades that keep running"
+change = "probe `fade_judge` replayed over historical candidates (`lab jev replay`); answers cached, nothing traded"
+metric = "Brier skill of `p_revert` vs the base rate, AUC, and IC against the signed 6h forward return, day-clustered with a block-permutation null"
+baseline = "the base rate (always answering the average); the candidate's own |z| as a one-number predictor"
+pass_if = "Brier skill > 0 and IC > 0 with null percentile > 95, n >= 400 candidates across >= 30 days; then jev_gate must pass the lab gate like any family"
+invalidate_if = "IC indistinguishable from the null with n >= 400; then Jev stays out of mean-reversion entries"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-J02"
+statement = "Jev's read of the same state predicts the direction of the next 6 hours on ordinary bars, not only at candidates"
+change = "probe `direction` replayed on a sample of bars; family `jev_direction`"
+metric = "IC of `p_up` against the 6h forward return, day-clustered; AUC"
+baseline = "0.5 (no skill); 24h momentum sign as a one-number predictor"
+pass_if = "IC > 0 with null percentile > 95, n >= 600 bars across >= 30 days; then jev_direction must pass the lab gate"
+invalidate_if = "IC indistinguishable from the null with n >= 600"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-J03"
+statement = "Jev's skill on historical states is not memory of what happened: it is the same whether or not the coin and date are revealed"
+change = "a sub-sample of H-J01's states re-asked with coin name and date shown"
+metric = "IC with the date revealed minus IC anonymised, same states"
+baseline = "anonymised answers"
+pass_if = "difference within the null's 90% range, n >= 150: revealed replays can be trusted as much as anonymised ones"
+invalidate_if = "revealed IC higher beyond the null: Jev recalls history, so only anonymised or forward (paper) evidence counts"
+status = "proposed"
+result = ""
+
+[[hypothesis]]
+id = "H-X01"
+statement = "A time-stop exit posted as a maker order (falling back to taker after a timeout) saves more in fees than it loses to adverse selection"
+change = "none yet: the v3 engine records, for every time-stop exit, whether a passive order at the touch would have filled within 5 minutes and at what price"
+metric = "bps saved per exit vs the taker exit actually taken, from the 1-second recorder"
+baseline = "taker exit (4.5 bps + half spread + slippage)"
+pass_if = "mean saving >= 3 bps per exit with a 95% interval above 0, n >= 100 exits"
+invalidate_if = "saving <= 0 with n >= 100"
+status = "proposed"
+result = ""

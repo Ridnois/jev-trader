@@ -17,3 +17,7 @@ scripts/vol_scan.json
 # Personal notes vault (Obsidian), not part of the project
 .obsidian/
 trader/
+
+# v3: research archive and the v3 paper ledger
+lab-data/
+data-v3/

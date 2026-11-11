@@ -1,0 +1,13 @@
+# Cross-sectional: every `hold` hours rank coins by their return over `look` hours.
+# dir = 1 buys the k losers and sells the k winners (reversal); dir = -1 the opposite
+# (momentum). Both directions are in the grid on purpose: the search must pay for
+# having tried both.
+family = "xs_reversal"
+interval = "1h"
+hypothesis = "H-L03"
+
+[grid]
+look = [1, 4, 12, 24, 72, 168]
+hold = [4, 12, 24]
+k = [2, 3, 5]
+dir = [-1, 1]

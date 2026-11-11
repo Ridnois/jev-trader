@@ -23,3 +23,10 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 toml = "1.2.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# Research runs (`lab`): bootstraps and grid searches are ~20x slower unoptimized.
+# Build and test with `--profile lab -j 2`.
+[profile.lab]
+inherits = "dev"
+opt-level = 2
+debug = 1

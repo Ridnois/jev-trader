@@ -14,6 +14,7 @@ mod stats;
 mod config;
 mod dashboard;
 mod jev;
+mod lab;
 mod market;
 mod news;
 mod paper;
@@ -109,6 +110,15 @@ enum Cmd {
         /// Output folder name under <data_dir>/backtests/.
         #[arg(long)]
         run_id: Option<String>,
+    },
+    /// The research lab: fetch history, search strategy families, and judge them
+    /// with the search paid for (walk-forward, reality check, deflated Sharpe, lockbox).
+    Lab {
+        /// Lab settings (universe, costs, gate thresholds).
+        #[arg(long, default_value = "lab.toml")]
+        lab_config: PathBuf,
+        #[command(subcommand)]
+        cmd: lab::LabCmd,
     },
     /// Serve the monitoring dashboard.
     Dashboard {
@@ -246,6 +256,12 @@ async fn main() -> Result<()> {
             source(&dir, "scalp")?;
             println!("{}", o.markdown);
             eprintln!("verdict: {} · written to {}", o.verdict, dir.display());
+        }
+        Cmd::Lab { lab_config, cmd } => {
+            let lab = lab::LabConfig::load(&lab_config)?;
+            // History downloads page through thousands of candles: allow slow responses.
+            let http = reqwest::Client::builder().timeout(Duration::from_secs(40)).user_agent("jev-trader/0.3").build()?;
+            lab::run(cmd, &lab, &http, cfg.api()).await?;
         }
         Cmd::Dashboard { host, port, scalp_dir } => dashboard::serve(cfg, host, port, scalp_dir).await?,
     }

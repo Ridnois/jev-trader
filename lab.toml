@@ -1,0 +1,65 @@
+# The research lab (`jev-trader lab …`). Design and reasons: DESIGN-V3.md.
+# Every threshold here was written before any strategy was tested with it.
+# Changing one after seeing a result is a new trial: say so in hypotheses.toml.
+data_dir = "lab-data"
+research_venue = "binance"    # long history, prices only; costs are always Hyperliquid's
+base_interval = "15m"         # coarser bars are built from these
+hl_intervals = ["15m", "1h"]  # Hyperliquid serves only its latest 5000 candles per interval
+start = "2024-01-01"
+capital = 10000.0
+lockbox_frac = 0.20           # newest 20% of days: no search may see them
+threads = 4
+seed = 20261111
+
+[universe]
+# Fixed list: perps listed on both venues on 2026-11-11. A coin is tradable on a day
+# only if its median daily volume over the 30 days before was at least this.
+coins = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "ADA", "AVAX", "LINK", "SUI", "NEAR", "LTC", "ZEC", "ENA", "HYPE", "AAVE", "UNI", "WLD", "kPEPE", "BCH"]
+min_dollar_volume = 50e6
+min_history_days = 20
+[universe.binance]
+kPEPE = "1000PEPEUSDT"
+
+[costs]                       # per side, bps of notional (Hyperliquid perps tier 0)
+fee_bps = 4.5
+slippage_bps = 1.0
+spread_bps = 2.0
+stop_slippage_bps = 5.0       # the paper stop of 2026-11-11 filled 3 bps through; 5 is the stress
+funding = true
+
+[sizing]
+mode = "vol"                  # same expected daily swing per position
+risk_pct = 0.004              # a one-sigma day in the coin moves the account 0.4%
+max_pct = 0.15
+max_gross = 1.0               # no leverage
+min_usd = 10.0
+
+[walk]
+train_days = 180
+test_days = 60
+purge_days = 5
+min_active_days = 20
+
+[gate]
+min_design_days = 250
+min_trades = 100
+block_days = 5.0
+boot_iters = 2000
+rc_iters = 1000
+rc_p_pass = 0.05
+rc_p_fatal = 0.20
+dsr_pass = 0.95
+dsr_fatal = 0.50
+pbo_blocks = 10
+pbo_pass = 0.30
+pbo_fatal = 0.50
+plateau_frac = 0.5
+cost_stress = 2.0
+quarters_pos_frac = 0.6
+top_day_frac = 0.01
+baseline_draws = 200
+baseline_pct = 0.95
+lockbox_alpha = 0.20
+venue_corr = 0.7
+paper_alpha = 0.05
+paper_beta = 0.20
