@@ -1,0 +1,20 @@
+# Jev's own read of ordinary bars (H-J02): one bar in 24 per coin, scored 6 hours later.
+name = "direction"
+interval = "15m"
+hypothesis = "H-J02"
+every = 24
+rows = 16
+horizon_bars = 24
+
+[[questions]]
+id = "p_up"
+kind = "noul"
+text = "Six hours from now the price is higher than it is now"
+outcome = "fwd_up"
+
+[[questions]]
+id = "trend"
+kind = "score"
+text = "Direction and strength of the current move"
+levels = ["Strong downtrend", "Mild downtrend", "No clear direction", "Mild uptrend", "Strong uptrend"]
+outcome = "fwd_up"

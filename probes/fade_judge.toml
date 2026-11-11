@@ -1,0 +1,30 @@
+# Jev judges each mean-reversion candidate from an anonymous market state (H-J01).
+# Asked at the entries and signal bars of H-R01's rule; scored 6 hours later.
+name = "fade_judge"
+interval = "15m"
+hypothesis = "H-J01"
+candidates_of = "meanrev:hold=24,n=288,resid=0,stop=500,z=2"
+rows = 16
+horizon_bars = 24
+
+[[questions]]
+id = "p_revert"
+kind = "noul"
+text = "Six hours from now the price is {with} than it is now"
+outcome = "fwd_up"
+
+[[questions]]
+id = "p_run"
+kind = "noul"
+text = "Before any recovery the price first goes at least another 2% {against}"
+outcome = "adverse_2pct"
+
+[[questions]]
+id = "kind"
+kind = "choice"
+text = "What best describes the move that led here"
+[questions.options]
+climax = "A fast move ending in a burst of volume: likely exhaustion"
+trend = "A steady, persistent move with normal volume: likely to continue"
+shock = "A sudden jump out of a calm market: news-like"
+chop = "Ordinary back-and-forth in a choppy range"

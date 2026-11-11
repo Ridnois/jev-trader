@@ -49,6 +49,12 @@ pub struct Family {
     pub hypothesis: String,
     #[serde(default)]
     pub note: String,
+    /// Jev families: the probe whose cached answers the rule reads.
+    #[serde(default)]
+    pub probe: Option<std::path::PathBuf>,
+    /// Run on this venue instead of the research venue (Jev replays live where they were asked).
+    #[serde(default)]
+    pub venue: Option<String>,
     #[serde(default)]
     pub grid: BTreeMap<String, Vec<f64>>,
     #[serde(default)]

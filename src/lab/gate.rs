@@ -112,6 +112,8 @@ pub struct Inputs<'a> {
     pub lockbox_reads: usize,
     /// Judge this spec instead of the grid's best (it must be in the grid).
     pub force: Option<&'a Spec>,
+    /// The grid already simulated on the design window (saves running it twice).
+    pub design_trials: Option<Vec<Trial>>,
 }
 
 fn bps(x: f64) -> String {
@@ -151,7 +153,7 @@ fn quarter_of(p: &Panel, day: usize) -> (i32, u32) {
     (d.year(), (d.month() - 1) / 3)
 }
 
-pub fn evaluate(inp: &Inputs, lab: &LabConfig) -> Result<Evaluation> {
+pub fn evaluate(inp: Inputs, lab: &LabConfig) -> Result<Evaluation> {
     let g: &GateCfg = &lab.gate;
     let full = inp.full;
     let fam = inp.fam;
@@ -182,7 +184,10 @@ pub fn evaluate(inp: &Inputs, lab: &LabConfig) -> Result<Evaluation> {
         notes: Vec::new(),
     };
 
-    let trials: Vec<Trial> = search::run_grid(&design, fam, inp.aux, &cfg, lab.threads)?;
+    let trials: Vec<Trial> = match inp.design_trials {
+        Some(t) if t.first().is_some_and(|x| x.daily.len() == design_days) => t,
+        _ => search::run_grid(&design, fam, inp.aux, &cfg, lab.threads)?,
+    };
     ev.specs = trials.len();
     // Days before anything could trade (warm-up, coins not listed yet) carry no information.
     let first = (0..design_days).find(|d| trials.iter().any(|t| t.daily[*d] != 0.0)).unwrap_or(design_days);
@@ -240,10 +245,14 @@ pub fn evaluate(inp: &Inputs, lab: &LabConfig) -> Result<Evaluation> {
     );
 
     // 3. Deflated Sharpe of the pick, given every trial on this data set.
-    let srs: Vec<f64> = rows.iter().map(|x| stat::sharpe(x)).filter(|s| *s != 0.0).collect();
+    // The bar is the Sharpe the luckiest of N_eff no-edge rules would show. A no-edge
+    // rule's Sharpe over T days has variance ≈ 1/T; the textbook recipe takes the
+    // variance across the trials instead, but that also counts real differences
+    // between rules (a 3h hold pays four times the costs of a 24h hold), which raised
+    // the bar so far that planted edges with Sharpe 3.5 never passed in calibration.
     let (n_eff, rho) = stat::effective_trials(&rows, n_trials, lab.seed ^ 0x17);
     ev.trials_effective = n_eff;
-    let sr0 = stat::expected_max_sharpe(stat::sd(&srs).powi(2), n_eff);
+    let sr0 = stat::expected_max_sharpe(1.0 / (t_days.max(2) - 1) as f64, n_eff);
     let (sk, ku) = stat::skew_kurt(r);
     let sr = stat::sharpe(r);
     let dsr = stat::psr(sr, sr0, t_days, sk, ku);
@@ -357,7 +366,8 @@ pub fn evaluate(inp: &Inputs, lab: &LabConfig) -> Result<Evaluation> {
             format!("{} over {} unseen days, p = {:.3}, Sharpe {:.2}; design predicted ≥ {:+.2} bps/day; opening #{}", bps(lb.mean), lock.len(), lb.p, annual(stat::sharpe(lock)), p5 * 1e4, inp.lockbox_reads + 1),
             format!("mean > 0, p < {alpha:.3}, not below the predicted range"),
             ok,
-            true,
+            // Losing on unseen data ends it. Positive but not yet convincing is a REVISE.
+            lb.mean <= 0.0,
         );
         lock_mean = Some(lb.mean);
 
@@ -488,7 +498,7 @@ mod tests {
     fn a_random_walk_is_not_promoted_and_its_lockbox_stays_sealed() {
         let p = random_panel(1234, 6, 300, "1h");
         let f = fam();
-        let ev = evaluate(&Inputs { full: &p, aux: &Aux::default(), venue: None, fam: &f, ledger_trials: 0, lockbox_reads: 0, force: None }, &lab()).unwrap();
+        let ev = evaluate(Inputs { full: &p, aux: &Aux::default(), venue: None, fam: &f, ledger_trials: 0, lockbox_reads: 0, force: None, design_trials: None }, &lab()).unwrap();
         assert_eq!(ev.specs, 36);
         assert_eq!((ev.design_days, ev.lockbox_days), (240, 60));
         assert_ne!(ev.verdict, Verdict::PromoteToPaper, "{}", markdown(&ev));
@@ -498,7 +508,7 @@ mod tests {
         assert!(md.contains("reality check") && md.contains("still sealed"), "{md}");
         // A spec outside the grid can't be judged as if it had been searched.
         let odd = Spec::new("meanrev", &[("n", 7.0), ("z", 9.0), ("hold", 1.0), ("stop", 0.0)]);
-        let ev = evaluate(&Inputs { full: &p, aux: &Aux::default(), venue: None, fam: &f, ledger_trials: 0, lockbox_reads: 0, force: Some(&odd) }, &lab()).unwrap();
+        let ev = evaluate(Inputs { full: &p, aux: &Aux::default(), venue: None, fam: &f, ledger_trials: 0, lockbox_reads: 0, force: Some(&odd), design_trials: None }, &lab()).unwrap();
         assert_eq!(ev.verdict, Verdict::InsufficientEvidence);
         assert!(ev.pick.is_none());
     }

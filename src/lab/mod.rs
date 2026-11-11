@@ -12,6 +12,7 @@
 pub mod data;
 pub mod gate;
 pub mod panel;
+pub mod probe;
 pub mod rules;
 pub mod search;
 pub mod sim;
@@ -297,6 +298,50 @@ pub enum LabCmd {
     },
     /// List the verdicts on file.
     Report,
+    /// Jev as a market reader: replay a probe over history, score its answers.
+    Jev {
+        #[command(subcommand)]
+        cmd: JevCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum JevCmd {
+    /// Walk the archive bar by bar and ask Jev at each of the probe's points.
+    /// Answers are cached: a rerun only asks what is missing.
+    Replay {
+        #[arg(long)]
+        probe: PathBuf,
+        #[arg(long, default_value = "hyperliquid")]
+        venue: String,
+        /// Comma-separated coins instead of the whole universe.
+        #[arg(long)]
+        coins: Option<String>,
+        /// Most Jev calls this run may make.
+        #[arg(long, default_value_t = 200)]
+        max_calls: usize,
+        /// anon (default), revealed (coin and date shown: memory check) or repeat (stability check).
+        #[arg(long, default_value = "anon")]
+        variant: String,
+        /// revealed / repeat: how many of the anonymous answers to re-ask.
+        #[arg(long, default_value_t = 150)]
+        sample: usize,
+        /// Only the bars where the rule really entered.
+        #[arg(long)]
+        entries_only: bool,
+        /// Print the first state and the call count; ask nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Score the cached answers against what happened next.
+    Score {
+        #[arg(long)]
+        probe: PathBuf,
+        #[arg(long, default_value = "hyperliquid")]
+        venue: String,
+        #[arg(long)]
+        coins: Option<String>,
+    },
 }
 
 fn day_ms(s: &str) -> Result<i64> {
@@ -323,16 +368,16 @@ struct LockboxRead {
     passed: bool,
 }
 
-pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str) -> Result<()> {
+pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, jev_cfg: &crate::config::JevConfig) -> Result<()> {
     match cmd {
         LabCmd::Fetch { venue } => fetch(lab, http, hl_api, &venue).await,
         LabCmd::Search { family } => {
             let fam = Family::load(&family)?;
-            let full = lab.panel(&lab.research_venue, &fam.interval, &lab.universe.coins)?;
+            let full = lab.panel(fam.venue.as_deref().unwrap_or(&lab.research_venue), &fam.interval, &lab.universe.coins)?;
             let design = full.head(design_bars(&full, lab));
             eprintln!("{} · design window: first {} days", full.describe(), design.n_days());
             let cfg = sim::SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
-            let trials = search::run_grid(&design, &fam, &Aux::default(), &cfg, lab.threads)?;
+            let trials = search::run_grid(&design, &fam, &family_aux(lab, &fam, &full)?, &cfg, lab.threads)?;
             let study = format!("{}-{}", full.venue, full.interval);
             let (new, total) = search::record_trials(&lab.trials_path(), &study, &fam.family, &trials);
             let mut rows: Vec<(f64, &search::Trial)> = trials.iter().map(|t| (stat::sharpe(&t.daily), t)).collect();
@@ -346,27 +391,31 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
         }
         LabCmd::Validate { family, spec } => {
             let fam = Family::load(&family)?;
-            let full = lab.panel(&lab.research_venue, &fam.interval, &lab.universe.coins)?;
-            let venue = lab.panel(HL, &fam.interval, &lab.universe.coins).ok();
+            let venue_name = fam.venue.clone().unwrap_or_else(|| lab.research_venue.clone());
+            let full = lab.panel(&venue_name, &fam.interval, &lab.universe.coins)?;
+            let aux = family_aux(lab, &fam, &full)?;
+            // The trading venue's own data is the last check for rules searched elsewhere.
+            let venue = if venue_name == HL { None } else { lab.panel(HL, &fam.interval, &lab.universe.coins).ok() };
             let study = format!("{}-{}", full.venue, full.interval);
             let force = spec.as_deref().map(parse_spec).transpose()?;
             // Record this grid's trials first, so the count the gate uses includes them.
             let cfg = sim::SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
             let design = full.head(design_bars(&full, lab));
-            let trials = search::run_grid(&design, &fam, &Aux::default(), &cfg, lab.threads)?;
+            let trials = search::run_grid(&design, &fam, &aux, &cfg, lab.threads)?;
             let (_, ledger_trials) = search::record_trials(&lab.trials_path(), &study, &fam.family, &trials);
-            drop((trials, design));
+            drop(design);
             let reads: Vec<LockboxRead> = crate::status::read_jsonl(&lab.lockbox_path());
             let prior = |spec_id: &str| reads.iter().filter(|r| r.study == study && r.spec != spec_id).map(|r| r.spec.as_str()).collect::<std::collections::HashSet<_>>().len();
             // The pick isn't known before the run; count every earlier opening, then correct below.
             let all_prior = prior("");
-            let aux = Aux::default();
-            let mut ev = gate::evaluate(&gate::Inputs { full: &full, aux: &aux, venue: venue.as_ref().map(|v| (v, &aux)), fam: &fam, ledger_trials, lockbox_reads: all_prior, force: force.as_ref() }, lab)?;
+            let vaux = Aux::default();
+            let inputs = |reads: usize, trials: Option<Vec<search::Trial>>| gate::Inputs { full: &full, aux: &aux, venue: venue.as_ref().map(|v| (v, &vaux)), fam: &fam, ledger_trials, lockbox_reads: reads, force: force.as_ref(), design_trials: trials };
+            let mut ev = gate::evaluate(inputs(all_prior, Some(trials)), lab)?;
             if let (true, Some(p)) = (ev.lockbox_opened, ev.pick.clone()) {
                 let own = prior(&p.id());
                 if own != all_prior {
                     // This same spec opened the lockbox before: looking again is not a new look.
-                    ev = gate::evaluate(&gate::Inputs { full: &full, aux: &aux, venue: venue.as_ref().map(|v| (v, &aux)), fam: &fam, ledger_trials, lockbox_reads: own, force: force.as_ref() }, lab)?;
+                    ev = gate::evaluate(inputs(own, None), lab)?;
                 } else {
                     crate::bot::append_jsonl(&lab.lockbox_path(), &LockboxRead { study: study.clone(), family: fam.family.clone(), spec: p.id(), at: chrono::Utc::now(), passed: ev.verdict == gate::Verdict::PromoteToPaper });
                 }
@@ -419,16 +468,24 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             lab.gate.boot_iters = lab.gate.boot_iters.min(600);
             lab.gate.rc_iters = lab.gate.rc_iters.min(400);
             let mut tally: BTreeMap<&'static str, usize> = BTreeMap::new();
-            let (mut opened, mut rc05, mut wf_pos) = (0, 0, 0);
+            let mut opened = 0;
+            // Per check: (times run, times passed), in the order the gate runs them.
+            let mut per_check: Vec<(&'static str, usize, usize)> = Vec::new();
             for s in 0..panels {
                 let p = synth::panel(lab.seed + s as u64, coins, days, &fam.interval, edge);
                 let aux = Aux::default();
-                let ev = gate::evaluate(&gate::Inputs { full: &p, aux: &aux, venue: None, fam: &fam, ledger_trials: 0, lockbox_reads: 0, force: None }, &lab)?;
+                let ev = gate::evaluate(gate::Inputs { full: &p, aux: &aux, venue: None, fam: &fam, ledger_trials: 0, lockbox_reads: 0, force: None, design_trials: None }, &lab)?;
                 *tally.entry(ev.verdict.word()).or_default() += 1;
                 opened += ev.lockbox_opened as usize;
-                let pass = |name: &str| ev.checks.iter().any(|c| c.name == name && c.pass);
-                rc05 += pass("reality check") as usize;
-                wf_pos += pass("walk-forward") as usize;
+                for c in &ev.checks {
+                    match per_check.iter_mut().find(|x| x.0 == c.name) {
+                        Some(x) => {
+                            x.1 += 1;
+                            x.2 += c.pass as usize;
+                        }
+                        None => per_check.push((c.name, 1, c.pass as usize)),
+                    }
+                }
                 let best = ev.leaders.first().map(|l| format!("in-sample best Sharpe {:.2}", l.sharpe_annual)).unwrap_or_default();
                 eprintln!("panel {:>3}: {:<22} {best}", s + 1, ev.verdict.word());
             }
@@ -438,7 +495,11 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             for (k, v) in &tally {
                 println!("| {k} | {v} | {:.0}% |", pct(*v));
             }
-            println!("\n- Walk-forward check passed: {:.0}%\n- Reality check passed: {:.0}%\n- Lockbox opened: {:.0}%", pct(wf_pos), pct(rc05), pct(opened));
+            println!("\n| Check | Run on | Passed |\n|---|---|---|");
+            for (name, n, ok) in &per_check {
+                println!("| {name} | {n} | {:.0}% |", *ok as f64 / (*n).max(1) as f64 * 100.0);
+            }
+            println!("\nLockbox opened on {:.0}% of panels.", pct(opened));
             let promoted = tally.get("PROMOTE_TO_PAPER").copied().unwrap_or(0);
             if edge == 0.0 {
                 println!("\nThere is nothing to find in these markets, so every promotion is a false positive: **{:.0}%** (target ≤ 5%).", pct(promoted));
@@ -448,6 +509,7 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             Ok(())
         }
         LabCmd::Promote { family, candidate } => promote(lab, &family, candidate),
+        LabCmd::Jev { cmd } => jev(cmd, lab, jev_cfg).await,
         LabCmd::Report => {
             let root = lab.data_dir.join("reports");
             println!("| Study | Family | Verdict | Specs | Trials on record | Candidate |\n|---|---|---|---|---|---|");
@@ -466,6 +528,51 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             if n == 0 {
                 println!("\nNo verdicts yet: run `jev-trader lab validate --family families/<name>.toml`.");
             }
+            Ok(())
+        }
+    }
+}
+
+/// Cached Jev answers for a family that reads a probe; empty for the others.
+fn family_aux(lab: &LabConfig, fam: &Family, p: &Panel) -> Result<Aux> {
+    match &fam.probe {
+        Some(path) => {
+            let pr = probe::Probe::load(path)?;
+            Ok(probe::aux(p, &pr, &probe::load_answers(&lab.data_dir, &pr, &p.venue)))
+        }
+        None => Ok(Aux::default()),
+    }
+}
+
+async fn jev(cmd: JevCmd, lab: &LabConfig, jev_cfg: &crate::config::JevConfig) -> Result<()> {
+    let coins_of = |c: Option<String>| c.map(|c| c.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_else(|| lab.universe.coins.clone());
+    let cfg = sim::SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
+    match cmd {
+        JevCmd::Replay { probe, venue, coins, max_calls, variant, sample, entries_only, dry_run } => {
+            let pr = probe::Probe::load(&probe)?;
+            let p = lab.panel(&venue, &pr.interval, &coins_of(coins))?;
+            let client = if dry_run { None } else { Some(crate::jev::JevClient::from_env(&jev_cfg.model, std::time::Duration::from_millis(jev_cfg.timeout_ms.max(8000)))?) };
+            let opts = probe::ReplayOpts { variant: probe::Variant::parse(&variant)?, max_calls, concurrency: jev_cfg.concurrency.clamp(1, 8), entries_only, sample, seed: lab.seed, dry_run };
+            eprintln!("{} · probe {} ({})", p.describe(), pr.name, variant);
+            let st = probe::replay(&p, &pr, &cfg, &lab.data_dir, client.as_ref(), &opts).await?;
+            let per = if st.asked > 0 { (st.tokens_in + st.tokens_out) as f64 / st.asked as f64 } else { 0.0 };
+            println!("points {} · already cached {} · asked now {} · failed {} · still to ask {}", st.planned, st.cached, st.asked, st.failed, st.left);
+            if st.asked > 0 {
+                println!("tokens: {} in + {} out = {:.0} per call. Asking the remaining {} would take about {:.1}M tokens.", st.tokens_in, st.tokens_out, per, st.left, st.left as f64 * per / 1e6);
+            }
+            Ok(())
+        }
+        JevCmd::Score { probe, venue, coins } => {
+            let pr = probe::Probe::load(&probe)?;
+            let p = lab.panel(&venue, &pr.interval, &coins_of(coins))?;
+            let answers = probe::load_answers(&lab.data_dir, &pr, &venue);
+            let sc = probe::score(&p, &pr, &answers);
+            let md = probe::markdown(&sc, &pr, &p);
+            let dir = lab.data_dir.join("reports").join("jev");
+            std::fs::create_dir_all(&dir)?;
+            crate::status::write_atomic(&dir.join(format!("{}-{venue}.md", pr.name)), md.as_bytes())?;
+            crate::status::write_atomic(&dir.join(format!("{}-{venue}.json", pr.name)), &serde_json::to_vec_pretty(&sc)?)?;
+            println!("{md}");
             Ok(())
         }
     }

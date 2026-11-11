@@ -1,0 +1,17 @@
+# H-R01's fade, taken only when Jev's `p_revert` for that bar is at least min_p.
+# Runs where Jev was replayed (Hyperliquid's 52 days of 15m bars for the pilot), so
+# expect INSUFFICIENT_EVIDENCE until the replay covers a year.
+family = "jev_gate"
+interval = "15m"
+hypothesis = "H-J01"
+probe = "probes/fade_judge.toml"
+venue = "hyperliquid"
+
+[grid]
+min_p = [0.4, 0.5, 0.6, 0.7]
+
+[fixed]
+n = 288
+z = 2
+hold = 24
+stop = 500

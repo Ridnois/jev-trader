@@ -261,7 +261,7 @@ async fn main() -> Result<()> {
             let lab = lab::LabConfig::load(&lab_config)?;
             // History downloads page through thousands of candles: allow slow responses.
             let http = reqwest::Client::builder().timeout(Duration::from_secs(40)).user_agent("jev-trader/0.3").build()?;
-            lab::run(cmd, &lab, &http, cfg.api()).await?;
+            lab::run(cmd, &lab, &http, cfg.api(), &cfg.jev).await?;
         }
         Cmd::Dashboard { host, port, scalp_dir } => dashboard::serve(cfg, host, port, scalp_dir).await?,
     }
