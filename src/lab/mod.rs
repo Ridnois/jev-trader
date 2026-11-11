@@ -329,6 +329,9 @@ pub enum JevCmd {
         /// Only the bars where the rule really entered.
         #[arg(long)]
         entries_only: bool,
+        /// Keep every N-th point: spreads a small budget over the whole history.
+        #[arg(long, default_value_t = 1)]
+        stride: usize,
         /// Print the first state and the call count; ask nothing.
         #[arg(long)]
         dry_run: bool,
@@ -544,15 +547,22 @@ fn family_aux(lab: &LabConfig, fam: &Family, p: &Panel) -> Result<Aux> {
     }
 }
 
+/// The panel a probe is replayed and scored on. On the research venue that is the
+/// design window only: Jev's answers are evidence too, and the lockbox stays sealed.
+fn jev_panel(lab: &LabConfig, venue: &str, interval: &str, coins: &[String]) -> Result<Panel> {
+    let p = lab.panel(venue, interval, coins)?;
+    Ok(if venue == lab.research_venue { p.head(design_bars(&p, lab)) } else { p })
+}
+
 async fn jev(cmd: JevCmd, lab: &LabConfig, jev_cfg: &crate::config::JevConfig) -> Result<()> {
     let coins_of = |c: Option<String>| c.map(|c| c.split(',').map(|s| s.trim().to_string()).collect()).unwrap_or_else(|| lab.universe.coins.clone());
     let cfg = sim::SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
     match cmd {
-        JevCmd::Replay { probe, venue, coins, max_calls, variant, sample, entries_only, dry_run } => {
+        JevCmd::Replay { probe, venue, coins, max_calls, variant, sample, entries_only, stride, dry_run } => {
             let pr = probe::Probe::load(&probe)?;
-            let p = lab.panel(&venue, &pr.interval, &coins_of(coins))?;
+            let p = jev_panel(lab, &venue, &pr.interval, &coins_of(coins))?;
             let client = if dry_run { None } else { Some(crate::jev::JevClient::from_env(&jev_cfg.model, std::time::Duration::from_millis(jev_cfg.timeout_ms.max(8000)))?) };
-            let opts = probe::ReplayOpts { variant: probe::Variant::parse(&variant)?, max_calls, concurrency: jev_cfg.concurrency.clamp(1, 8), entries_only, sample, seed: lab.seed, dry_run };
+            let opts = probe::ReplayOpts { variant: probe::Variant::parse(&variant)?, max_calls, concurrency: jev_cfg.concurrency.clamp(1, 8), entries_only, stride, sample, seed: lab.seed, dry_run };
             eprintln!("{} · probe {} ({})", p.describe(), pr.name, variant);
             let st = probe::replay(&p, &pr, &cfg, &lab.data_dir, client.as_ref(), &opts).await?;
             let per = if st.asked > 0 { (st.tokens_in + st.tokens_out) as f64 / st.asked as f64 } else { 0.0 };
@@ -564,7 +574,7 @@ async fn jev(cmd: JevCmd, lab: &LabConfig, jev_cfg: &crate::config::JevConfig) -
         }
         JevCmd::Score { probe, venue, coins } => {
             let pr = probe::Probe::load(&probe)?;
-            let p = lab.panel(&venue, &pr.interval, &coins_of(coins))?;
+            let p = jev_panel(lab, &venue, &pr.interval, &coins_of(coins))?;
             let answers = probe::load_answers(&lab.data_dir, &pr, &venue);
             let sc = probe::score(&p, &pr, &answers);
             let md = probe::markdown(&sc, &pr, &p);

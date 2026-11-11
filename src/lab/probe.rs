@@ -361,6 +361,9 @@ pub struct ReplayOpts {
     pub concurrency: usize,
     /// Only the rule's real entries (skip its other signal bars).
     pub entries_only: bool,
+    /// Keep every N-th point, so a small budget is spread over the whole history
+    /// instead of spent on its first weeks. 1 = all.
+    pub stride: usize,
     /// Ask a random sample of this many of the points already answered as `anon`
     /// (for the revealed and repeat variants).
     pub sample: usize,
@@ -402,6 +405,10 @@ pub async fn replay(p: &Panel, probe: &Probe, cfg: &SimCfg, data_dir: &Path, jev
     let mut pts = points(p, probe, cfg)?;
     if o.entries_only {
         pts.retain(|x| x.entry);
+    }
+    if o.stride > 1 {
+        pts.sort_by_key(|x| (x.i, x.c));
+        pts = pts.into_iter().step_by(o.stride).collect();
     }
     if o.variant != Variant::Anon {
         // Re-ask a random sample of what the anonymous run answered, so the pairs line up.
