@@ -143,12 +143,6 @@ pub fn record_trials(path: &Path, study: &str, family: &str, trials: &[Trial]) -
     (new, seen.len())
 }
 
-/// Distinct specs ever tried on this study.
-pub fn count_trials(path: &Path, study: &str) -> usize {
-    let known: Vec<TrialRecord> = crate::status::read_jsonl(path);
-    known.iter().filter(|r| r.study == study).map(|r| r.spec.as_str()).collect::<HashSet<_>>().len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::panel::testing::*;
@@ -212,8 +206,7 @@ mod tests {
         assert_eq!(record_trials(&path, "binance-1h", "meanrev", &trials), (8, 8));
         assert_eq!(record_trials(&path, "binance-1h", "meanrev", &trials), (0, 8), "a rerun adds nothing");
         assert_eq!(record_trials(&path, "hyperliquid-1h", "meanrev", &trials[..3]), (3, 3));
-        assert_eq!(count_trials(&path, "binance-1h"), 8);
-        assert_eq!(count_trials(&path, "nothing"), 0);
+        assert_eq!(record_trials(&path, "nothing", "meanrev", &[]), (0, 0));
         std::fs::remove_dir_all(dir).ok();
     }
 }

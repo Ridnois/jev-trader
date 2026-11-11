@@ -20,6 +20,7 @@ pub struct Spec {
 }
 
 impl Spec {
+    #[cfg(test)]
     pub fn new(family: &str, params: &[(&str, f64)]) -> Self {
         Self { family: family.into(), params: params.iter().map(|(k, v)| (k.to_string(), *v)).collect() }
     }
@@ -47,8 +48,6 @@ pub struct Family {
     /// Entry in hypotheses.toml this search belongs to.
     #[serde(default)]
     pub hypothesis: String,
-    #[serde(default)]
-    pub note: String,
     /// Jev families: the probe whose cached answers the rule reads.
     #[serde(default)]
     pub probe: Option<std::path::PathBuf>,
@@ -155,21 +154,6 @@ pub fn plan(spec: &Spec, p: &Panel, aux: &Aux) -> Result<Plan> {
         "jev_direction" => jev_direction(spec, p, aux),
         other => bail!("unknown strategy family `{other}` (known: {})", FAMILIES.join(", ")),
     }
-}
-
-/// How many bars of history a spec reads before its newest bar. The walk-forward
-/// purge and the live engine's warm-up both use it.
-pub fn lookback_bars(spec: &Spec, p: &Panel) -> usize {
-    let bpd = p.bars_per_day();
-    let own = match spec.family.as_str() {
-        "meanrev" | "jev_gate" => spec.get("n", 288.0) as usize + 1,
-        "trend" => spec.get("n", 96.0) as usize + 1,
-        "xs_reversal" => spec.get("look", 24.0) as usize + 1,
-        "funding_carry" => (spec.get("look", 72.0) * 3_600_000.0 / p.interval_ms as f64).ceil() as usize + 1,
-        _ => 1,
-    };
-    // Daily volatility (sizing) looks back three days.
-    own.max(3 * bpd)
 }
 
 fn empty(p: &Panel) -> Vec<Vec<i8>> {

@@ -293,11 +293,11 @@ struct OrderRecord<'a> {
 // ---------------------------------------------------------------- shared state
 
 #[derive(Debug, Default, Clone, Serialize)]
-struct FeedHealth {
-    connected: bool,
-    reconnects: u32,
-    last_msg_ms: i64,
-    last_error: String,
+pub(crate) struct FeedHealth {
+    pub connected: bool,
+    pub reconnects: u32,
+    pub last_msg_ms: i64,
+    pub last_error: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -314,7 +314,7 @@ struct NewsStore {
     last_run: Option<DateTime<Utc>>,
 }
 
-type Markets = Arc<Mutex<HashMap<String, AssetMarket>>>;
+pub(crate) type Markets = Arc<Mutex<HashMap<String, AssetMarket>>>;
 
 // ---------------------------------------------------------------- records
 
@@ -390,7 +390,7 @@ struct PendingMarkout {
 
 /// Hyperliquid perp feed: best bid/ask (`bbo`, on change per block), every trade
 /// (`side` "B" = the taker bought), and funding / open interest (`activeAssetCtx`).
-async fn hl_feed_task(ws_url: &'static str, coins: Vec<(String, String)>, markets: Markets, health: Arc<Mutex<FeedHealth>>) {
+pub(crate) async fn hl_feed_task(ws_url: &'static str, coins: Vec<(String, String)>, markets: Markets, health: Arc<Mutex<FeedHealth>>) {
     use tokio_tungstenite::tungstenite::Message;
     let by_coin: HashMap<String, String> = coins.iter().map(|(c, s)| (c.clone(), s.clone())).collect();
     let num = |v: &Value| match v {

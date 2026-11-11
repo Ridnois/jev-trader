@@ -86,11 +86,13 @@ impl Run {
         if self.trades.is_empty() { 0.0 } else { self.trades.iter().map(Trade::bps).sum::<f64>() / self.trades.len() as f64 }
     }
 
+    #[cfg(test)]
     pub fn total_return(&self) -> f64 {
         self.daily.iter().sum()
     }
 
     /// Deepest peak-to-trough fall of the daily equity curve, as a share of capital.
+    #[cfg(test)]
     pub fn max_drawdown(&self) -> f64 {
         let (mut cum, mut peak, mut dd) = (0.0f64, 0.0f64, 0.0f64);
         for r in &self.daily {
@@ -170,15 +172,14 @@ pub fn simulate(p: &Panel, plan: &Plan, cfg: &SimCfg) -> Run {
             }
         }
         let halted = cfg.daily_loss_limit_pct > 0.0 && day_closed < -cfg.daily_loss_limit_pct * cfg.capital;
+        // 1. Exits decided at the previous close, filled at this open. All of them come
+        // before any entry, so the capital they free is there for this bar's entries.
         for c in 0..nc {
             let o = p.open[c][i];
-            if !o.is_finite() {
+            if !o.is_finite() || i == 0 {
                 continue; // no bar: nothing can trade, an open position waits
             }
-            // 1. Exits decided at the previous close, filled at this open.
-            if i > 0
-                && let Some((side, deadline)) = pos[c].as_ref().map(|q| (q.side as i8, q.deadline))
-            {
+            if let Some((side, deadline)) = pos[c].as_ref().map(|q| (q.side as i8, q.deadline)) {
                 if !plan.exit.is_empty() && plan.exit[c][i - 1] == side {
                     close(&mut pos, &mut run, &mut realized, &mut day_closed, &mut open_count, &mut gross, c, o, i, Reason::Signal);
                 } else if i >= deadline {
@@ -191,32 +192,42 @@ pub fn simulate(p: &Panel, plan: &Plan, cfg: &SimCfg) -> Run {
                     }
                 }
             }
-            // 2. Entries.
-            if pos[c].is_none() && i > cfg.entry_delay {
-                let j = i - 1 - cfg.entry_delay;
-                let sig = plan.entry[c][j];
-                if sig != 0 && p.active[c][i - 1] && !halted && (pol.max_positions == 0 || open_count < pol.max_positions) {
-                    let usd = rules::size_usd(&cfg.sizing, cfg.capital, p.dvol[c][i - 1], gross);
-                    if usd > 0.0 {
-                        let side = sig as f64;
-                        let fill = rules::entry_fill(o, side, side_bps[c]);
-                        let entry_fee = usd * fee;
-                        realized -= entry_fee;
-                        run.fees += entry_fee;
-                        run.turnover += usd / cfg.capital;
-                        open_count += 1;
-                        gross += usd;
-                        let stop = if pol.stop_bps > 0.0 { rules::stop_px(fill, side, pol.stop_bps) } else { f64::NAN };
-                        pos[c] = Some(Pos { side, qty: usd / fill, entry_px: fill, notional: usd, entry_fee, stop_px: stop, deadline: i + pol.hold_bars, entry_i: i, funding: 0.0 });
-                    }
+        }
+        // 2. Entries at this open.
+        for c in 0..nc {
+            let o = p.open[c][i];
+            if !o.is_finite() || pos[c].is_some() || i <= cfg.entry_delay {
+                continue;
+            }
+            let j = i - 1 - cfg.entry_delay;
+            let sig = plan.entry[c][j];
+            if sig != 0 && p.active[c][i - 1] && !halted && (pol.max_positions == 0 || open_count < pol.max_positions) {
+                let usd = rules::size_usd(&cfg.sizing, cfg.capital, p.dvol[c][i - 1], gross);
+                if usd > 0.0 {
+                    let side = sig as f64;
+                    let fill = rules::entry_fill(o, side, side_bps[c]);
+                    let entry_fee = usd * fee;
+                    realized -= entry_fee;
+                    run.fees += entry_fee;
+                    run.turnover += usd / cfg.capital;
+                    open_count += 1;
+                    gross += usd;
+                    let stop = if pol.stop_bps > 0.0 { rules::stop_px(fill, side, pol.stop_bps) } else { f64::NAN };
+                    pos[c] = Some(Pos { side, qty: usd / fill, entry_px: fill, notional: usd, entry_fee, stop_px: stop, deadline: i + pol.hold_bars, entry_i: i, funding: 0.0 });
                 }
             }
-            // 3. Stop inside this bar (also for a position opened at its open).
-            let hit = pos[c].as_ref().filter(|q| q.stop_px.is_finite()).and_then(|q| {
-                if q.side > 0.0 { (p.low[c][i] <= q.stop_px).then(|| o.min(q.stop_px)) } else { (p.high[c][i] >= q.stop_px).then(|| o.max(q.stop_px)) }
-            });
-            if let Some(px) = hit {
-                close(&mut pos, &mut run, &mut realized, &mut day_closed, &mut open_count, &mut gross, c, px, i, Reason::Stop);
+        }
+        // 3. Stops inside this bar (also for positions opened at its open). A stop can't
+        // free capital for an entry at the same bar's open: it happens later.
+        for c in 0..nc {
+            let o = p.open[c][i];
+            if o.is_finite() {
+                let hit = pos[c].as_ref().filter(|q| q.stop_px.is_finite()).and_then(|q| {
+                    if q.side > 0.0 { (p.low[c][i] <= q.stop_px).then(|| o.min(q.stop_px)) } else { (p.high[c][i] >= q.stop_px).then(|| o.max(q.stop_px)) }
+                });
+                if let Some(px) = hit {
+                    close(&mut pos, &mut run, &mut realized, &mut day_closed, &mut open_count, &mut gross, c, px, i, Reason::Stop);
+                }
             }
             if p.close[c][i].is_finite() {
                 last_px[c] = p.close[c][i];

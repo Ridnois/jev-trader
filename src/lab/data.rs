@@ -263,6 +263,38 @@ pub async fn hl_funding(http: &reqwest::Client, api: &str, coin: &str, start_ms:
     Ok(out)
 }
 
+/// Appends each coin's newest closed Hyperliquid candles (the last `bars` of them):
+/// what the live engine calls right after a bar closes. Returns how many coins now
+/// have the bar opening at `want_open_ms`.
+pub async fn hl_recent(http: &reqwest::Client, ar: &Archive, api: &str, coins: &[String], interval: &str, bars: i64, want_open_ms: i64) -> usize {
+    let Some(ims) = interval_ms(interval) else { return 0 };
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut have = 0;
+    for coin in coins {
+        let path = ar.candle_path(HL, interval, coin);
+        if last_time(&path).is_some_and(|t| t >= want_open_ms) {
+            have += 1;
+            continue;
+        }
+        // Never leave a hole: start from the bar after the last one stored.
+        let from = last_time(&path).map(|t| t + ims).unwrap_or(now - bars * ims).max(now - 4990 * ims);
+        if (now - from) / ims > 100 {
+            // Catching up after downtime is a heavy call: stay well inside the rate limit the other bots share.
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        }
+        match hl_candles(http, api, coin, interval, from, now).await {
+            Ok(c) => {
+                if ar.append_candles(HL, interval, coin, &c).is_ok() && c.iter().any(|k| k.open_time >= want_open_ms) {
+                    have += 1;
+                }
+            }
+            Err(e) => tracing::warn!("{coin}: {interval} candles failed: {e:#}"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    have
+}
+
 /// What `lab fetch` should bring up to date.
 pub struct FetchPlan<'a> {
     pub venue: &'a str,

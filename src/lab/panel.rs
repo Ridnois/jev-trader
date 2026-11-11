@@ -144,6 +144,7 @@ impl Panel {
 
     /// Recomputes everything derived from prices: the tradable mask, daily volatility
     /// and the basket return. All three are causal.
+    #[cfg(test)]
     pub fn rederive(&mut self, rule: UniverseRule) {
         self.derive(rule);
     }
@@ -258,30 +259,6 @@ impl Panel {
             funding: self.funding.iter().map(|f| f.iter().copied().filter(|(t, _)| *t < end).collect()).collect(),
             dvol: cut(&self.dvol),
             basket_ret: self.basket_ret[..n].to_vec(),
-        }
-    }
-
-    /// Bars `from..` as their own panel (derived series are kept, not recomputed, so
-    /// the first bars still carry volatility and universe history).
-    pub fn tail(&self, from: usize) -> Panel {
-        let from = from.min(self.n);
-        let cut = |v: &Vec<Vec<f64>>| v.iter().map(|x| x[from..].to_vec()).collect::<Vec<_>>();
-        Panel {
-            venue: self.venue.clone(),
-            interval: self.interval.clone(),
-            interval_ms: self.interval_ms,
-            t0: self.time(from),
-            n: self.n - from,
-            coins: self.coins.clone(),
-            open: cut(&self.open),
-            high: cut(&self.high),
-            low: cut(&self.low),
-            close: cut(&self.close),
-            volume: cut(&self.volume),
-            active: self.active.iter().map(|x| x[from..].to_vec()).collect(),
-            funding: self.funding.clone(),
-            dvol: cut(&self.dvol),
-            basket_ret: self.basket_ret[from..].to_vec(),
         }
     }
 
@@ -411,10 +388,6 @@ mod tests {
             }
         }
         assert_eq!(head.basket_ret, full.basket_ret[..cut]);
-        let tail = full.tail(cut);
-        assert_eq!(tail.n + head.n, full.n);
-        assert_eq!(tail.time(0), full.time(cut));
-        assert_eq!(tail.close[2][5], full.close[2][cut + 5]);
     }
 
     #[test]

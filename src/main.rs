@@ -20,6 +20,7 @@ mod news;
 mod paper;
 mod signals;
 mod status;
+mod trade;
 mod validate;
 
 use std::collections::HashMap;
@@ -119,6 +120,14 @@ enum Cmd {
         lab_config: PathBuf,
         #[command(subcommand)]
         cmd: lab::LabCmd,
+    },
+    /// The v3 paper trader: runs the specs `lab promote` handed over, and judges the
+    /// paper run against their prediction cards.
+    Trade {
+        #[arg(long, default_value = "lab.toml")]
+        lab_config: PathBuf,
+        #[command(subcommand)]
+        cmd: trade::TradeCmd,
     },
     /// Serve the monitoring dashboard.
     Dashboard {
@@ -262,6 +271,11 @@ async fn main() -> Result<()> {
             // History downloads page through thousands of candles: allow slow responses.
             let http = reqwest::Client::builder().timeout(Duration::from_secs(40)).user_agent("jev-trader/0.3").build()?;
             lab::run(cmd, &lab, &http, cfg.api(), &cfg.jev).await?;
+        }
+        Cmd::Trade { lab_config, cmd } => {
+            let lab = lab::LabConfig::load(&lab_config)?;
+            let http = reqwest::Client::builder().timeout(Duration::from_secs(40)).user_agent("jev-trader/0.3").build()?;
+            trade::run(cmd, &lab, &http, cfg.api(), cfg.exchange.network.ws_url(), &cfg.jev).await?;
         }
         Cmd::Dashboard { host, port, scalp_dir } => dashboard::serve(cfg, host, port, scalp_dir).await?,
     }

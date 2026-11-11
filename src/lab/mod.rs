@@ -156,6 +156,28 @@ pub struct LabConfig {
     pub sizing: Sizing,
     pub walk: Walk,
     pub gate: GateCfg,
+    pub trade: TradeCfg,
+}
+
+/// The v3 paper trader (`jev-trader trade`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TradeCfg {
+    pub data_dir: PathBuf,
+    /// Where `lab promote` writes the specs the trader runs.
+    pub strategies_dir: PathBuf,
+    /// Write one row per active second per coin (mid, trade range, taker volume) for
+    /// later finer-grained replays. About 50 MB a day for 20 coins.
+    pub record_ticks: bool,
+    /// Probes asked live at each bar close and cached like a replay. Each costs Jev
+    /// tokens on every bar it applies to; empty = none.
+    pub live_probes: Vec<PathBuf>,
+}
+
+impl Default for TradeCfg {
+    fn default() -> Self {
+        Self { data_dir: "data-v3".into(), strategies_dir: "strategies".into(), record_ticks: true, live_probes: Vec::new() }
+    }
 }
 
 impl Default for LabConfig {
@@ -175,6 +197,7 @@ impl Default for LabConfig {
             sizing: Sizing::default(),
             walk: Walk::default(),
             gate: GateCfg::default(),
+            trade: TradeCfg::default(),
         }
     }
 }
@@ -522,6 +545,9 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
                     let path = f.path();
                     if path.extension().is_some_and(|e| e == "json") && !path.to_string_lossy().ends_with(".card.json") {
                         let Some(v) = crate::status::read_json::<serde_json::Value>(&path) else { continue };
+                        if v["verdict"].as_str().is_none() {
+                            continue; // not a gate verdict (probe scorecards live here too)
+                        }
                         let pick = v["pick"]["params"].as_object().map(|m| m.iter().map(|(k, x)| format!("{k}={x}")).collect::<Vec<_>>().join(",")).unwrap_or_default();
                         println!("| {} | {} | {} | {} | {} | `{pick}` |", v["study"].as_str().unwrap_or(""), v["family"].as_str().unwrap_or(""), v["verdict"].as_str().unwrap_or(""), v["specs"], v["trials_ledger"]);
                         n += 1;
@@ -624,7 +650,7 @@ fn run_summary(spec: &Spec, run: &sim::Run, daily: &[f64], p: &Panel, lab: &LabC
         peak = peak.max(cum);
         dd = dd.max(peak - cum);
     }
-    let _ = writeln!(s, "spec {}", spec.id());
+    let _ = writeln!(s, "spec {} · round trip costs {:.1} bps before funding", spec.id(), lab.costs.round_trip_bps(""));
     let _ = writeln!(s, "trades {n} · won {} ({:.0}%) · mean {mean:+.1} bps/trade · sd {sd:.0} · trade-level t {naive_t:+.2} (assumes independent trades: it overstates)", run.wins(), if n > 0 { run.wins() as f64 / n as f64 * 100.0 } else { 0.0 });
     let _ = writeln!(s, "return {:+.2}% over {} days · max drawdown {:.2}% · fees ${:.2} · funding ${:+.2}", cum * 100.0, daily.len(), dd * 100.0, run.fees, run.funding);
     let _ = writeln!(s, "daily: mean {:+.2} bps [{:+.2}, {:+.2}] · Sharpe {:.2} · one-sided p {:.3} (day-clustered bootstrap)", b.mean * 1e4, b.lo * 1e4, b.hi * 1e4, stat::sharpe(daily) * gate::DAYS_PER_YEAR.sqrt(), b.p);
@@ -687,8 +713,8 @@ fn promote(lab: &LabConfig, family: &Path, candidate: bool) -> Result<()> {
     } else {
         bail!("{} on {study} is {verdict}, not PROMOTE_TO_PAPER. Use --candidate to paper-trade it anyway, labelled as unproven.", fam.family);
     };
-    std::fs::create_dir_all("strategies")?;
-    let out = PathBuf::from("strategies").join(format!("{}.json", fam.family));
+    std::fs::create_dir_all(&lab.trade.strategies_dir)?;
+    let out = lab.trade.strategies_dir.join(format!("{}.json", fam.family));
     crate::status::write_atomic(&out, &serde_json::to_vec_pretty(&promoted)?)?;
     println!("{} → {} ({}): `{}`", fam.family, out.display(), promoted.status, promoted.card.spec.id());
     Ok(())

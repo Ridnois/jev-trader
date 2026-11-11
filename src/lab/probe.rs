@@ -489,6 +489,44 @@ pub async fn replay(p: &Panel, probe: &Probe, cfg: &SimCfg, data_dir: &Path, jev
     Ok(st)
 }
 
+/// Live use: asks the probe about the panel's newest closed bar only and appends the
+/// answers to the same cache a replay writes, so `lab jev score` judges live and
+/// replayed answers together. Returns how many were asked.
+pub async fn ask_live(p: &Panel, probe: &Probe, data_dir: &Path, jev: &JevClient) -> Result<usize> {
+    if p.n == 0 {
+        return Ok(0);
+    }
+    let i = p.n - 1;
+    let mut pts = Vec::new();
+    if probe.every > 0 {
+        for c in 0..p.coins.len() {
+            if p.active[c][i] && (p.time(i) / p.interval_ms) as usize % probe.every == (c * 7) % probe.every {
+                pts.push(Point { c, i, side: 1, entry: true });
+            }
+        }
+    } else {
+        let plan = strategy::plan(&super::parse_spec(&probe.candidates_of)?, p, &Aux::default())?;
+        for c in 0..p.coins.len() {
+            if plan.entry[c][i] != 0 && p.active[c][i] {
+                pts.push(Point { c, i, side: plan.entry[c][i], entry: false });
+            }
+        }
+    }
+    let feat = Featurizer::new(p);
+    let (path, hash) = (cache_path(data_dir, &probe.name), probe.hash());
+    let mut asked = 0;
+    for x in pts {
+        let Some(state) = feat.state(x.c, x.i, probe, x.side, false) else { continue };
+        let t0 = std::time::Instant::now();
+        let r = jev.ask(&state, &probe.questions_for(x.side)).await?;
+        let answers = parse_answers(probe, &r)?;
+        let (ti, to) = r.usage.as_ref().map(|u| (u.input_tokens, u.output_tokens)).unwrap_or((0, 0));
+        crate::bot::append_jsonl(&path, &Answer { probe: probe.name.clone(), hash: hash.clone(), venue: p.venue.clone(), variant: Variant::Anon, coin: p.coins[x.c].clone(), t: p.time(x.i), side: x.side, model: r.model.clone(), answers, tokens_in: ti, tokens_out: to, ms: t0.elapsed().as_millis() as u64, asked_at: chrono::Utc::now() });
+        asked += 1;
+    }
+    Ok(asked)
+}
+
 /// Anonymous answers as series the Jev families read: question id → `[coin][bar]`.
 /// A noul phrased for the trade's side is stored as asked (a `p_revert` of 0.7 means
 /// "70% this trade's side wins", for longs and shorts alike).

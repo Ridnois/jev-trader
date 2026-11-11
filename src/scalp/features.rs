@@ -176,6 +176,17 @@ impl AssetMarket {
         self.secs.iter().rev().take_while(|b| b.sec > after_sec).any(|b| b.lo > 0.0 && if below { b.lo < px } else { b.hi > px })
     }
 
+    /// Per-second rows in `(after_sec, until_sec)`, oldest first, for the tick recorder:
+    /// (second, last mid, lowest trade, highest trade, taker-buy $, taker-sell $, trades).
+    pub fn seconds(&self, after_sec: i64, until_sec: i64) -> Vec<(i64, f64, f64, f64, f64, f64, u32)> {
+        self.secs.iter().filter(|b| b.sec > after_sec && b.sec < until_sec).map(|b| (b.sec, b.mid, b.lo, b.hi, b.buy_usd, b.sell_usd, b.trades)).collect()
+    }
+
+    /// Forgets seconds before `sec` (engines that never call `features` prune here).
+    pub fn drop_before(&mut self, sec: i64) {
+        self.prune(sec, 0);
+    }
+
     /// Mid at the end of second `sec` (forward-filled from earlier seconds).
     pub fn mid_at(&self, sec: i64) -> Option<f64> {
         self.secs.iter().rev().find(|b| b.sec <= sec && b.mid > 0.0).map(|b| b.mid)

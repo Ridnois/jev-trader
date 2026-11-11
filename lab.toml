@@ -63,3 +63,9 @@ lockbox_alpha = 0.20
 venue_corr = 0.7
 paper_alpha = 0.05
 paper_beta = 0.20
+
+[trade]                       # the v3 paper trader (`jev-trader trade run`)
+data_dir = "data-v3"
+strategies_dir = "strategies" # written by `lab promote`
+record_ticks = true           # 1-second rows per coin, about 50 MB a day for 20 coins
+live_probes = []              # e.g. ["probes/direction.toml"]: asked live each bar, costs Jev tokens
