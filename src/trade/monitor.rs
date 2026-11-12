@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use super::{DailyRow, Ledger, Paths, load_strategies};
 use crate::lab::data::HL;
@@ -87,13 +88,138 @@ fn stamp(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| ms.to_string())
 }
 
+/// What `monitor.json` holds: the same verdicts as `monitor.md`, typed, for `lab learn`
+/// and the dashboard.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Report {
+    pub generated: Option<chrono::DateTime<chrono::Utc>>,
+    pub started: Option<chrono::DateTime<chrono::Utc>>,
+    pub strategies: Vec<StrategyReport>,
+    pub catalyst: Vec<CatalystRow>,
+    pub catalyst_days: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StrategyReport {
+    pub name: String,
+    pub status: String,
+    pub spec: String,
+    pub interval: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub parent: Option<String>,
+    pub card_mu_bps: f64,
+    pub card_sd_bps: f64,
+    pub days_if_real: f64,
+    pub days_if_none: f64,
+    /// Days with the engine up at least 90% of the time, and the ones left out.
+    pub paper_days: usize,
+    pub partial_days: usize,
+    pub mean_bps: f64,
+    pub total_pct: f64,
+    pub drawdown_pct: f64,
+    pub llr: f64,
+    pub kill_at: f64,
+    pub graduate_at: f64,
+    /// CONTINUE | KILL | GRADUATE
+    pub call: String,
+    #[serde(default)]
+    pub call_reason: String,
+    /// Full paper days: (UTC date, return).
+    pub daily: Vec<(String, f64)>,
+    #[serde(default)]
+    pub parity: Option<Parity>,
+    pub execution: Execution,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Parity {
+    pub both: usize,
+    pub late: usize,
+    pub only_sim: usize,
+    pub only_paper: usize,
+    /// Closed pairs, paper minus simulator, bps.
+    pub mean_diff_bps: Option<f64>,
+}
+
+/// What fills really cost on paper against what the lab charges.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Execution {
+    pub trades: usize,
+    /// Mean price concession against the mid at entry, bps (the model charges `model_side_bps`).
+    pub entry_cost_bps: Option<f64>,
+    /// The same at signal and time exits.
+    pub exit_cost_bps: Option<f64>,
+    pub stop_exits: usize,
+    /// At stop exits: concession against the mid when the stop fired (the model adds `model_stop_extra_bps`).
+    pub stop_cost_bps: Option<f64>,
+    pub model_side_bps: f64,
+    pub model_stop_extra_bps: f64,
+    pub fees_usd: f64,
+    pub funding_usd: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CatalystRow {
+    pub h_secs: i64,
+    pub triggered_n: usize,
+    pub triggered_bps: Option<f64>,
+    pub all_n: usize,
+    pub all_bps: f64,
+}
+
+fn mean_opt(x: &[f64]) -> Option<f64> {
+    (!x.is_empty()).then(|| stat::mean(x))
+}
+
+/// Realised fill costs of one strategy's closed paper trades.
+pub fn execution(trades: &[serde_json::Value], lab: &LabConfig) -> Execution {
+    let (mut entry, mut exit, mut stop) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut fees, mut funding) = (0.0, 0.0);
+    for t in trades {
+        let (Some(side), Some(epx), Some(emid), Some(xpx), Some(xmid)) = (t["side"].as_f64(), t["entry_px"].as_f64(), t["entry_mid"].as_f64(), t["exit_px"].as_f64(), t["exit_mid"].as_f64()) else { continue };
+        fees += t["fees"].as_f64().unwrap_or(0.0);
+        funding += t["funding"].as_f64().unwrap_or(0.0);
+        if emid > 0.0 {
+            entry.push(side * (epx / emid - 1.0) * 1e4);
+        }
+        if xmid > 0.0 {
+            let c = side * (xmid - xpx) / xmid * 1e4;
+            if t["reason"] == "stop" { stop.push(c) } else if t["reason"] != "shutdown" { exit.push(c) }
+        }
+    }
+    Execution {
+        trades: trades.len(),
+        entry_cost_bps: mean_opt(&entry),
+        exit_cost_bps: mean_opt(&exit),
+        stop_exits: stop.len(),
+        stop_cost_bps: mean_opt(&stop),
+        model_side_bps: lab.costs.side_bps(""),
+        model_stop_extra_bps: lab.costs.stop_extra_bps(),
+        fees_usd: fees,
+        funding_usd: funding,
+    }
+}
+
 pub fn run(lab: &LabConfig) -> Result<()> {
+    let (report, md) = build(lab)?;
+    let paths = Paths::new(&lab.trade.data_dir);
+    crate::status::write_atomic(&paths.monitor, md.as_bytes())?;
+    crate::status::write_atomic(&paths.monitor.with_extension("json"), &serde_json::to_vec_pretty(&report)?)?;
+    println!("{md}");
+    Ok(())
+}
+
+/// The monitor's verdicts, as a typed report and as the page `monitor.md` shows.
+pub fn build(lab: &LabConfig) -> Result<(Report, String)> {
     let paths = Paths::new(&lab.trade.data_dir);
     let strategies = load_strategies(&lab.trade.strategies_dir)?;
     let ledger: Ledger = crate::status::read_json(&paths.ledger).unwrap_or_default();
     let daily: Vec<DailyRow> = crate::status::read_jsonl(&paths.daily);
     let trades: Vec<serde_json::Value> = crate::status::read_jsonl(&paths.trades);
     let mut md = String::new();
+    let mut report = Report { generated: Some(chrono::Utc::now()), started: ledger.started, ..Default::default() };
     let _ = writeln!(md, "# v3 paper monitor\n\n*{} · started {}*\n", chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"), ledger.started.map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_else(|| "never".into()));
     if strategies.is_empty() {
         let _ = writeln!(md, "No strategies in {}.", lab.trade.strategies_dir.display());
@@ -102,9 +228,44 @@ pub fn run(lab: &LabConfig) -> Result<()> {
         let card = &s.promoted.card;
         let _ = writeln!(md, "## {} ({})\n\n`{}` on {} bars{}\n", s.name, s.promoted.status, card.spec.id(), card.interval, if s.promoted.status == "validated" { "" } else { " · **not validated by the lab: watched, not trusted**" });
         let rows: Vec<&DailyRow> = daily.iter().filter(|r| r.strategy == s.name).collect();
-        let full: Vec<f64> = rows.iter().filter(|r| r.up_secs as f64 >= MIN_UPTIME * 86_400.0).map(|r| r.ret).collect();
+        let full_rows: Vec<&&DailyRow> = rows.iter().filter(|r| r.up_secs as f64 >= MIN_UPTIME * 86_400.0).collect();
+        let full: Vec<f64> = full_rows.iter().map(|r| r.ret).collect();
         let (call, llr, dd) = sequential(&full, card);
         let (lo, hi) = stat::sprt_bounds(card.alpha, card.beta);
+        let mine: Vec<serde_json::Value> = trades.iter().filter(|t| t["strategy"] == s.name.as_str()).cloned().collect();
+        report.strategies.push(StrategyReport {
+            name: s.name.clone(),
+            status: s.promoted.status.clone(),
+            spec: card.spec.id(),
+            interval: card.interval.clone(),
+            label: s.promoted.label.clone(),
+            parent: s.promoted.parent.clone(),
+            card_mu_bps: card.mu_daily * 1e4,
+            card_sd_bps: card.sd_daily * 1e4,
+            days_if_real: card.days_if_real,
+            days_if_none: card.days_if_none,
+            paper_days: full.len(),
+            partial_days: rows.len() - full.len(),
+            mean_bps: z(stat::mean(&full) * 1e4),
+            total_pct: z(full.iter().sum::<f64>() * 100.0),
+            drawdown_pct: dd * 100.0,
+            llr: z(llr),
+            kill_at: lo,
+            graduate_at: hi,
+            call: match &call {
+                Call::Kill(_) => "KILL",
+                Call::Graduate => "GRADUATE",
+                Call::Continue => "CONTINUE",
+            }
+            .into(),
+            call_reason: match &call {
+                Call::Kill(why) => why.clone(),
+                _ => String::new(),
+            },
+            daily: full_rows.iter().map(|r| (r.day.clone(), r.ret)).collect(),
+            parity: None,
+            execution: execution(&mine, lab),
+        });
         let _ = writeln!(md, "- Card: {:+.2} bps/day expected, sd {:.1} bps; decision expected in about {:.0} days if real, {:.0} if not.", card.mu_daily * 1e4, card.sd_daily * 1e4, card.days_if_real, card.days_if_none);
         let _ = writeln!(md, "- Paper: {} full days ({} partial days left out): mean {:+.2} bps/day, total {:+.2}%, drawdown {:.2}%.", full.len(), rows.len() - full.len(), z(stat::mean(&full) * 1e4), z(full.iter().sum::<f64>() * 100.0), dd * 100.0);
         let _ = writeln!(md, "- Sequential test: {:+.2} (kill at {lo:.2}, graduate at {hi:+.2}).", z(llr));
@@ -174,6 +335,9 @@ pub fn run(lab: &LabConfig) -> Result<()> {
             }
         }
         let only_sim: Vec<_> = sk.difference(&pk).cloned().collect();
+        if let Some(r) = report.strategies.last_mut() {
+            r.parity = Some(Parity { both: both.len(), late: late.len(), only_sim: only_sim.len(), only_paper: only_paper.len(), mean_diff_bps: mean_opt(&diffs) });
+        }
         let _ = writeln!(md, "- Parity: {} entries in both, {} joined a position the simulator already held, {} only in the simulator, {} only on paper{}.", both.len(), late.len(), only_sim.len(), only_paper.len(), if diffs.is_empty() { String::new() } else { format!("; closed pairs differ by {:+.1} bps on average (paper minus simulator)", stat::mean(&diffs)) });
         if only_sim.is_empty() && only_paper.is_empty() && both.is_empty() && late.is_empty() {
             let _ = writeln!(md, "  No bar is comparable yet: the engine needs the close after the bar that decided a trade before the simulator can fill it.");
@@ -198,14 +362,14 @@ pub fn run(lab: &LabConfig) -> Result<()> {
     } else {
         let _ = writeln!(md, "Return of trading each headline in the direction Jev read, after the round-trip cost.\n\n| After | Triggered (strong, new, fresh) | n | Every scored headline | n |\n|---|---|---|---|---|");
         for (h, tn, tmean, an, amean) in super::catalyst::summary(&marks) {
+            report.catalyst.push(CatalystRow { h_secs: h, triggered_n: tn, triggered_bps: (tn > 0).then_some(tmean), all_n: an, all_bps: amean });
             let _ = writeln!(md, "| {} min | {} | {tn} | {:+.1} bps | {an} |", h / 60, if tn > 0 { format!("{tmean:+.1} bps") } else { "–".into() }, amean);
         }
         let days = marks.iter().map(|m| m.ts.date_naive()).collect::<HashSet<_>>().len();
+        report.catalyst_days = days;
         let _ = writeln!(md, "\n{days} day(s) of evidence. Below 30 triggered candidates across 20 days this is an anecdote, not a result.");
     }
-    crate::status::write_atomic(&paths.monitor, md.as_bytes())?;
-    println!("{md}");
-    Ok(())
+    Ok((report, md))
 }
 
 #[cfg(test)]

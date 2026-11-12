@@ -191,7 +191,10 @@ impl Cond {
     pub fn inverted(&self) -> Cond {
         let level = match &self.level {
             Param::Num(x) if self.feature.signed() => Param::Num(-x),
-            Param::Ref(s) if self.feature.signed() => Param::Ref(format!("{s}*-1")),
+            Param::Ref(s) if self.feature.signed() => Param::Ref(match s.strip_suffix("*-1") {
+                Some(base) => base.to_string(),
+                None => format!("{s}*-1"),
+            }),
             other => other.clone(),
         };
         Cond { op: self.op.flipped(), level, ..self.clone() }

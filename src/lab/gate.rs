@@ -97,6 +97,93 @@ pub struct Evaluation {
     pub verdict: Verdict,
     pub card: Option<Card>,
     pub notes: Vec<String>,
+    /// The pick's design-window record, kept so `lab learn` can read where it made and
+    /// lost money without simulating again. Never contains lockbox days.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Evidence>,
+}
+
+/// One slice of the pick's trades.
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+pub struct Slice {
+    pub label: String,
+    pub trades: usize,
+    pub wins: usize,
+    /// Dollars, after costs and funding.
+    pub pnl: f64,
+    pub mean_bps: f64,
+}
+
+/// The pick on the design window, from its first trading day on.
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+pub struct Evidence {
+    /// UTC date of `daily[0]`.
+    pub first_day: String,
+    pub capital: f64,
+    /// Daily return (fraction of capital).
+    pub daily: Vec<f64>,
+    /// The equal-weight coin basket's log return on the same days (market state).
+    pub basket: Vec<f64>,
+    pub coins: Vec<Slice>,
+    /// long, short.
+    pub sides: Vec<Slice>,
+    /// Holding time in terciles of the pick's own trades (label: "≤ N bars").
+    pub holds: Vec<Slice>,
+    /// By exit reason: time, stop, signal, end.
+    pub exits: Vec<Slice>,
+}
+
+fn slice(label: impl Into<String>, trades: &[&sim::Trade]) -> Slice {
+    let bps: Vec<f64> = trades.iter().map(|t| t.bps()).collect();
+    Slice { label: label.into(), trades: trades.len(), wins: trades.iter().filter(|t| t.pnl > 0.0).count(), pnl: trades.iter().map(|t| t.pnl).sum(), mean_bps: stat::mean(&bps) }
+}
+
+/// Breaks a run on the design panel down for the learner.
+pub fn evidence(design: &Panel, run: &sim::Run, first: usize, capital: f64) -> Evidence {
+    let days = run.daily.len();
+    let mut basket = vec![0.0f64; days];
+    for i in 0..design.n {
+        let d = design.day_of(i);
+        if d < days {
+            basket[d] += design.basket_ret[i];
+        }
+    }
+    let t: Vec<&sim::Trade> = run.trades.iter().collect();
+    let coins = (0..design.coins.len()).map(|c| slice(design.coins[c].clone(), &t.iter().copied().filter(|x| x.coin == c).collect::<Vec<_>>())).filter(|s| s.trades > 0).collect();
+    let sides = vec![slice("long", &t.iter().copied().filter(|x| x.side > 0).collect::<Vec<_>>()), slice("short", &t.iter().copied().filter(|x| x.side < 0).collect::<Vec<_>>())];
+    let mut held: Vec<usize> = t.iter().map(|x| x.exit_i.saturating_sub(x.entry_i)).collect();
+    held.sort_unstable();
+    let mut holds = Vec::new();
+    if !held.is_empty() {
+        let cuts = [held[held.len() / 3], held[2 * held.len() / 3], usize::MAX];
+        let mut lo = 0usize;
+        for (k, hi) in cuts.iter().enumerate() {
+            let part: Vec<&sim::Trade> = t.iter().copied().filter(|x| {
+                let h = x.exit_i.saturating_sub(x.entry_i);
+                (k == 0 || h > lo) && h <= *hi
+            }).collect();
+            if !part.is_empty() {
+                holds.push(slice(if *hi == usize::MAX { format!("> {lo} bars") } else { format!("≤ {hi} bars") }, &part));
+            }
+            lo = *hi;
+        }
+    }
+    let exits = [(sim::Reason::Time, "time"), (sim::Reason::Stop, "stop"), (sim::Reason::Signal, "signal"), (sim::Reason::End, "end")]
+        .iter()
+        .map(|(r, w)| slice(*w, &t.iter().copied().filter(|x| x.reason == *r).collect::<Vec<_>>()))
+        .filter(|s| s.trades > 0)
+        .collect();
+    let day0 = design.t0.div_euclid(DAY_MS) + first as i64;
+    Evidence {
+        first_day: chrono::DateTime::from_timestamp_millis(day0 * DAY_MS).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+        capital,
+        daily: run.daily[first.min(days)..].to_vec(),
+        basket: basket[first.min(days)..].to_vec(),
+        coins,
+        sides,
+        holds,
+        exits,
+    }
 }
 
 pub struct Inputs<'a> {
@@ -114,6 +201,11 @@ pub struct Inputs<'a> {
     pub force: Option<&'a Spec>,
     /// The grid already simulated on the design window (saves running it twice).
     pub design_trials: Option<Vec<Trial>>,
+    /// Daily returns on the design window of every spec simulated in the same `lab
+    /// evolve` cycle on this study (this family's included). Proposals chosen together
+    /// are judged together: a family that passes its own reality check while the
+    /// generation as a whole fails it gets REVISE at best, and the lockbox stays shut.
+    pub generation: Option<&'a [Vec<f64>]>,
 }
 
 fn bps(x: f64) -> String {
@@ -182,6 +274,7 @@ pub fn evaluate(inp: Inputs, lab: &LabConfig) -> Result<Evaluation> {
         verdict: Verdict::InsufficientEvidence,
         card: None,
         notes: Vec::new(),
+        evidence: None,
     };
 
     let trials: Vec<Trial> = match inp.design_trials {
@@ -244,6 +337,16 @@ pub fn evaluate(inp: Inputs, lab: &LabConfig) -> Result<Evaluation> {
         rc_p > g.rc_p_fatal,
     );
 
+    // 2b. The same check over the whole generation of proposals.
+    if let Some(cycle) = inp.generation {
+        let grows: Vec<&[f64]> = cycle.iter().filter(|r| r.len() == design_days).map(|r| &r[first..]).collect();
+        if grows.len() > rows.len() {
+            let g_rc = stat::reality_check(&grows, g.block_days, g.rc_iters, lab.seed ^ 0x6E);
+            let gp = g_rc.as_ref().map(|x| x.p).unwrap_or(1.0);
+            add("generation reality check", format!("p = {gp:.3} over all {} specs simulated in this cycle", grows.len()), format!("p < {}", g.rc_p_pass), gp < g.rc_p_pass, false);
+        }
+    }
+
     // 3. Deflated Sharpe of the pick, given every trial on this data set.
     // The bar is the Sharpe the luckiest of N_eff no-edge rules would show. A no-edge
     // rule's Sharpe over T days has variance ≈ 1/T; the textbook recipe takes the
@@ -289,6 +392,7 @@ pub fn evaluate(inp: Inputs, lab: &LabConfig) -> Result<Evaluation> {
 
     // 6. Costs doubled, and one bar late.
     let plan = strategy::plan(&best.spec, &design, inp.aux)?;
+    ev.evidence = Some(evidence(&design, &sim::simulate(&design, &plan, &cfg), first, cfg.capital));
     let stressed = sim::simulate(&design, &plan, &SimCfg { costs: lab.costs.scaled(g.cost_stress), ..cfg.clone() });
     let sm = stat::mean(&stressed.daily[first..]);
     add("costs ×2", bps(sm), "mean > 0".into(), sm > 0.0, false);
@@ -498,7 +602,7 @@ mod tests {
     fn a_random_walk_is_not_promoted_and_its_lockbox_stays_sealed() {
         let p = random_panel(1234, 6, 300, "1h");
         let f = fam();
-        let ev = evaluate(Inputs { full: &p, aux: &Aux::default(), venue: None, fam: &f, ledger_trials: 0, lockbox_reads: 0, force: None, design_trials: None }, &lab()).unwrap();
+        let ev = evaluate(Inputs { full: &p, aux: &Aux::default(), venue: None, fam: &f, ledger_trials: 0, lockbox_reads: 0, force: None, design_trials: None, generation: None }, &lab()).unwrap();
         assert_eq!(ev.specs, 36);
         assert_eq!((ev.design_days, ev.lockbox_days), (240, 60));
         assert_ne!(ev.verdict, Verdict::PromoteToPaper, "{}", markdown(&ev));
@@ -506,9 +610,19 @@ mod tests {
         assert!(ev.card.is_none());
         let md = markdown(&ev);
         assert!(md.contains("reality check") && md.contains("still sealed"), "{md}");
+        // The learner's record of the pick: design days only, and it adds up.
+        let e = ev.evidence.as_ref().expect("evidence for the pick");
+        assert!(!e.daily.is_empty() && e.daily.len() <= ev.design_days);
+        assert_eq!(e.daily.len(), e.basket.len());
+        let trades: usize = e.sides.iter().map(|s| s.trades).sum();
+        assert_eq!(trades, e.coins.iter().map(|s| s.trades).sum::<usize>());
+        assert_eq!(trades, e.holds.iter().map(|s| s.trades).sum::<usize>());
+        assert_eq!(trades, e.exits.iter().map(|s| s.trades).sum::<usize>());
+        let pnl: f64 = e.coins.iter().map(|s| s.pnl).sum();
+        assert!((pnl - e.sides.iter().map(|s| s.pnl).sum::<f64>()).abs() < 1e-6);
         // A spec outside the grid can't be judged as if it had been searched.
         let odd = Spec::new("meanrev", &[("n", 7.0), ("z", 9.0), ("hold", 1.0), ("stop", 0.0)]);
-        let ev = evaluate(Inputs { full: &p, aux: &Aux::default(), venue: None, fam: &f, ledger_trials: 0, lockbox_reads: 0, force: Some(&odd), design_trials: None }, &lab()).unwrap();
+        let ev = evaluate(Inputs { full: &p, aux: &Aux::default(), venue: None, fam: &f, ledger_trials: 0, lockbox_reads: 0, force: Some(&odd), design_trials: None, generation: None }, &lab()).unwrap();
         assert_eq!(ev.verdict, Verdict::InsufficientEvidence);
         assert!(ev.pick.is_none());
     }

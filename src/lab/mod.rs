@@ -10,10 +10,15 @@
 //! - `report`    list the verdicts so far
 
 pub mod compose;
+pub mod compare;
 pub mod data;
+pub mod evolve;
 pub mod gate;
+pub mod learn;
+pub mod lineage;
 pub mod panel;
 pub mod probe;
+pub mod propose;
 pub mod rules;
 pub mod search;
 pub mod sim;
@@ -158,6 +163,37 @@ pub struct LabConfig {
     pub walk: Walk,
     pub gate: GateCfg,
     pub trade: TradeCfg,
+    pub evolve: EvolveCfg,
+}
+
+/// `lab evolve`: the budget of one cycle and what counts as an anecdote.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct EvolveCfg {
+    /// New families proposed per cycle.
+    pub proposals: usize,
+    /// Most specs in one proposal's grid.
+    pub specs_per_proposal: usize,
+    /// Most new trials one cycle may charge to the ledger. Reaching it stops the cycle.
+    pub trials_per_cycle: usize,
+    /// A market-state lesson needs this many days on each side.
+    pub min_regime_days: usize,
+    /// A side or holding-time lesson needs this many trades in the losing slice.
+    pub min_side_trades: usize,
+    /// A paper lesson needs this many full paper days.
+    pub min_paper_days: usize,
+    /// A catalyst lesson needs this many triggered candidates.
+    pub min_catalyst: usize,
+    /// Where generated family files go.
+    pub families_dir: PathBuf,
+    /// The hypothesis register proposals are added to.
+    pub hypotheses: PathBuf,
+}
+
+impl Default for EvolveCfg {
+    fn default() -> Self {
+        Self { proposals: 4, specs_per_proposal: 12, trials_per_cycle: 40, min_regime_days: 60, min_side_trades: 30, min_paper_days: 20, min_catalyst: 30, families_dir: "families/gen".into(), hypotheses: "hypotheses.toml".into() }
+    }
 }
 
 /// The v3 paper trader (`jev-trader trade`).
@@ -272,6 +308,7 @@ impl Default for LabConfig {
             walk: Walk::default(),
             gate: GateCfg::default(),
             trade: TradeCfg::default(),
+            evolve: EvolveCfg::default(),
         }
     }
 }
@@ -295,6 +332,14 @@ impl LabConfig {
 
     pub fn trials_path(&self) -> PathBuf {
         self.data_dir.join("trials.jsonl")
+    }
+
+    pub fn lineage_path(&self) -> PathBuf {
+        self.data_dir.join("lineage.jsonl")
+    }
+
+    pub fn lessons_dir(&self) -> PathBuf {
+        self.data_dir.join("lessons")
     }
 
     pub fn lockbox_path(&self) -> PathBuf {
@@ -385,7 +430,47 @@ pub enum LabCmd {
         /// 0 = nothing to find (false-positive rate); up to 1 = a planted mean-reverting edge (power).
         #[arg(long, default_value_t = 0.0)]
         edge: f64,
+        /// Run the whole evolve loop on each panel, with this family as the seed.
+        #[arg(long)]
+        evolve: bool,
+        /// Generations per panel with --evolve.
+        #[arg(long, default_value_t = 5)]
+        generations: u32,
     },
+    /// Read every verdict, the ledger, the paper monitor and the lineage; write lessons.
+    Learn,
+    /// Turn the latest lessons into new families under families/gen/ (each with a hypothesis).
+    Propose {
+        /// Show the proposals; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// A lessons file instead of the newest one.
+        #[arg(long)]
+        from_lessons: Option<PathBuf>,
+        /// Override `[evolve] trials_per_cycle` for this run.
+        #[arg(long)]
+        max_trials: Option<usize>,
+    },
+    /// Judge a generation of proposals: charged first, judged together, set against the incumbents.
+    Compare {
+        /// Default: the newest generation not yet judged.
+        #[arg(long)]
+        generation: Option<u32>,
+    },
+    /// learn → propose → compare → report, once. Nothing is promoted.
+    Evolve {
+        /// Learn and propose only: simulate nothing, charge nothing, write no family file.
+        #[arg(long)]
+        dry_run: bool,
+        /// Override `[evolve] trials_per_cycle` for this cycle.
+        #[arg(long)]
+        max_trials: Option<usize>,
+        /// Use this lessons file instead of learning again.
+        #[arg(long)]
+        from_lessons: Option<PathBuf>,
+    },
+    /// The tree of generated families and what became of them.
+    Lineage,
     /// Hand a spec to the trader: the validated pick, or (--candidate) the best spec labelled unproven.
     Promote {
         #[arg(long)]
@@ -467,14 +552,6 @@ pub fn parse_spec(id: &str) -> Result<Spec> {
     Ok(Spec { family: family.to_string(), params })
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct LockboxRead {
-    study: String,
-    family: String,
-    spec: String,
-    at: chrono::DateTime<chrono::Utc>,
-    passed: bool,
-}
 
 pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, jev_cfg: &crate::config::JevConfig) -> Result<()> {
     match cmd {
@@ -506,28 +583,7 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             let venue = if venue_name == HL { None } else { lab.panel(HL, &fam.interval, &lab.universe.coins).ok() };
             let study = format!("{}-{}", full.venue, full.interval);
             let force = spec.as_deref().map(parse_spec).transpose()?;
-            // Record this grid's trials first, so the count the gate uses includes them.
-            let cfg = sim::SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
-            let design = full.head(design_bars(&full, lab));
-            let trials = search::run_grid(&design, &fam, &aux, &cfg, lab.threads)?;
-            let (_, ledger_trials) = search::record_trials(&lab.trials_path(), &study, &fam.family, &trials);
-            drop(design);
-            let reads: Vec<LockboxRead> = crate::status::read_jsonl(&lab.lockbox_path());
-            let prior = |spec_id: &str| reads.iter().filter(|r| r.study == study && r.spec != spec_id).map(|r| r.spec.as_str()).collect::<std::collections::HashSet<_>>().len();
-            // The pick isn't known before the run; count every earlier opening, then correct below.
-            let all_prior = prior("");
-            let vaux = Aux::default();
-            let inputs = |reads: usize, trials: Option<Vec<search::Trial>>| gate::Inputs { full: &full, aux: &aux, venue: venue.as_ref().map(|v| (v, &vaux)), fam: &fam, ledger_trials, lockbox_reads: reads, force: force.as_ref(), design_trials: trials };
-            let mut ev = gate::evaluate(inputs(all_prior, Some(trials)), lab)?;
-            if let (true, Some(p)) = (ev.lockbox_opened, ev.pick.clone()) {
-                let own = prior(&p.id());
-                if own != all_prior {
-                    // This same spec opened the lockbox before: looking again is not a new look.
-                    ev = gate::evaluate(inputs(own, None), lab)?;
-                } else {
-                    crate::bot::append_jsonl(&lab.lockbox_path(), &LockboxRead { study: study.clone(), family: fam.family.clone(), spec: p.id(), at: chrono::Utc::now(), passed: ev.verdict == gate::Verdict::PromoteToPaper });
-                }
-            }
+            let ev = compare::validate_family(lab, &fam, &full, venue.as_ref(), &aux, force.as_ref(), None, None, &mut compare::Books::files(lab))?;
             let md = gate::markdown(&ev);
             let dir = lab.report_dir(&study);
             std::fs::create_dir_all(&dir)?;
@@ -569,12 +625,16 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             println!("{}\n{}", p.describe(), run_summary(&spec, &run, daily, &p, lab));
             Ok(())
         }
-        LabCmd::Calibrate { family, panels, days, coins, edge } => {
+        LabCmd::Calibrate { family, panels, days, coins, edge, evolve: run_evolve, generations } => {
             let fam = Family::load(&family)?;
             let mut lab = lab.clone();
             lab.gate.baseline_draws = lab.gate.baseline_draws.min(60);
             lab.gate.boot_iters = lab.gate.boot_iters.min(600);
             lab.gate.rc_iters = lab.gate.rc_iters.min(400);
+            if run_evolve {
+                println!("{}", evolve::calibrate_loop(&lab, &fam, panels, days, coins, edge, generations)?);
+                return Ok(());
+            }
             let mut tally: BTreeMap<&'static str, usize> = BTreeMap::new();
             let mut opened = 0;
             // Per check: (times run, times passed), in the order the gate runs them.
@@ -582,7 +642,7 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             for s in 0..panels {
                 let p = synth::panel(lab.seed + s as u64, coins, days, &fam.interval, edge);
                 let aux = Aux::default();
-                let ev = gate::evaluate(gate::Inputs { full: &p, aux: &aux, venue: None, fam: &fam, ledger_trials: 0, lockbox_reads: 0, force: None, design_trials: None }, &lab)?;
+                let ev = gate::evaluate(gate::Inputs { full: &p, aux: &aux, venue: None, fam: &fam, ledger_trials: 0, lockbox_reads: 0, force: None, design_trials: None, generation: None }, &lab)?;
                 *tally.entry(ev.verdict.word()).or_default() += 1;
                 opened += ev.lockbox_opened as usize;
                 for c in &ev.checks {
@@ -617,6 +677,63 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             Ok(())
         }
         LabCmd::Promote { family, candidate, spec, as_name } => promote(lab, &family, candidate, spec.as_deref(), as_name.as_deref()),
+        LabCmd::Learn => {
+            let (l, path) = evolve::learn_files(lab)?;
+            println!("{}", learn::markdown(&l));
+            eprintln!("lessons written to {}", path.display());
+            Ok(())
+        }
+        LabCmd::Propose { dry_run, from_lessons, max_trials } => {
+            let path = match from_lessons {
+                Some(p) => p,
+                None => evolve::learn_files(lab)?.1,
+            };
+            let lessons = evolve::read_lessons(&path)?;
+            let mut cfg = lab.evolve.clone();
+            if let Some(m) = max_trials {
+                cfg.trials_per_cycle = m;
+            }
+            let g = evolve::gather(lab);
+            let out = evolve::propose_from(&g, &lessons, &compare::Books::files(lab), lab, &cfg);
+            for p in &out.proposals {
+                println!("{} · {} of {} · {} specs, {} new trials\n  {}\n  {}\n", p.family.label(), p.family.operator.as_deref().unwrap_or(""), p.family.parent.as_deref().unwrap_or("nothing"), p.specs, p.new_trials, p.family.rule.as_ref().map(|r| r.describe()).unwrap_or_default(), p.family.reason);
+            }
+            for m in &out.messages {
+                println!("- {m}");
+            }
+            if dry_run {
+                eprintln!("dry run: nothing written");
+            } else {
+                for path in evolve::write_proposals(lab, &out.proposals)? {
+                    eprintln!("wrote {}", path.display());
+                }
+            }
+            Ok(())
+        }
+        LabCmd::Compare { generation } => {
+            let events = lineage::load(&lab.lineage_path());
+            let g = match generation {
+                Some(g) => g,
+                None => events.iter().filter(|e| e.event == "proposed" && !events.iter().any(|t| t.event == "tested" && t.family == e.family)).map(|e| e.generation).max().context("no generation waiting to be judged: run `lab propose` first")?,
+            };
+            let mut report = evolve::CycleReport { generation: g, dry_run: false, at: chrono::Utc::now(), lessons_file: String::new(), lessons_total: 0, lessons_usable: 0, studies: Vec::new(), proposals: Vec::new(), pairings: Vec::new(), forward: Vec::new(), messages: Vec::new(), promotable: Vec::new(), lockbox_openings: 0 };
+            let judged = evolve::compare_files(lab, g, &mut report)?;
+            for j in &judged {
+                println!("{} ({}): {}", j.label, j.family, j.eval.verdict.word());
+            }
+            let path = evolve::write_report(lab, &report)?;
+            eprintln!("report: {}", path.display());
+            Ok(())
+        }
+        LabCmd::Evolve { dry_run, max_trials, from_lessons } => {
+            let r = evolve::evolve(lab, &evolve::EvolveOpts { dry_run, max_trials, from_lessons })?;
+            println!("{}", evolve::markdown(&r));
+            Ok(())
+        }
+        LabCmd::Lineage => {
+            print!("{}", lineage::tree(&lineage::load(&lab.lineage_path())));
+            Ok(())
+        }
         LabCmd::Jev { cmd } => jev(cmd, lab, jev_cfg).await,
         LabCmd::Report => {
             let root = lab.data_dir.join("reports");
@@ -696,7 +813,7 @@ async fn jev(cmd: JevCmd, lab: &LabConfig, jev_cfg: &crate::config::JevConfig) -
     }
 }
 
-fn design_bars(full: &Panel, lab: &LabConfig) -> usize {
+pub(crate) fn design_bars(full: &Panel, lab: &LabConfig) -> usize {
     ((full.n_days() as f64) * (1.0 - lab.lockbox_frac)).floor() as usize * full.bars_per_day()
 }
 
