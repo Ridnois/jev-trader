@@ -79,6 +79,11 @@ pub struct Ledger {
     /// Open time of the last bar each strategy has acted on.
     #[serde(default)]
     pub last_bar: BTreeMap<String, i64>,
+    /// Open time of the first bar each strategy acted on: its paper history starts there, so
+    /// the simulator is only compared over bars at or after it (a strategy added to a running
+    /// engine has no paper counterpart for the bars before it arrived).
+    #[serde(default)]
+    pub first_bar: BTreeMap<String, i64>,
     /// UTC day number being accumulated, each strategy's equity when it began, and
     /// the seconds the engine was up during it.
     #[serde(default)]
@@ -344,6 +349,7 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
                     }
                 }
                 ledger.last_bar.insert(s.name.clone(), closed_open);
+                ledger.first_bar.entry(s.name.clone()).or_insert(closed_open);
                 dirty = true;
             }
             if let Some(jev) = &jev {

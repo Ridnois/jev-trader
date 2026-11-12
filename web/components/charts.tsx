@@ -1,0 +1,532 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Calibration, FamilyReport, ProbeQuestion, StrategyView } from "@/lib/v3/types";
+import { familyName, signed } from "@/lib/format";
+
+export const FAMILY_COLOR = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)"];
+const GRID = "#242424";
+const AXIS = "#8f8f8f";
+const INK = "#ededed";
+const SURFACE = "#111111";
+
+function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] {
+  const ref = useRef<T>(null);
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    if (!ref.current) return;
+    const ro = new ResizeObserver(([e]) => setW(Math.floor(e.contentRect.width)));
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, w];
+}
+
+function Tip({ x, y, width, children }: { x: number; y: number; width: number; children: React.ReactNode }) {
+  const right = x > width / 2;
+  return (
+    <div
+      role="status"
+      className="pointer-events-none absolute z-10 w-max max-w-[260px] rounded-md border bg-popover px-2.5 py-1.5 text-xs leading-5 shadow-lg shadow-black/40"
+      style={{ top: Math.max(0, y), ...(right ? { right: width - x + 12 } : { left: x + 12 }) }}
+    >
+      {children}
+    </div>
+  );
+}
+
+export function Sparkline({ values, width = 120, height = 28, up }: { values: number[]; width?: number; height?: number; up: boolean | null }) {
+  if (values.length < 2) return <svg width={width} height={height} aria-hidden />;
+  const [lo, hi] = [Math.min(...values), Math.max(...values)];
+  const span = hi - lo || 1;
+  const x = (i: number) => 2 + (i / (values.length - 1)) * (width - 6);
+  const y = (v: number) => 3 + (1 - (v - lo) / span) * (height - 6);
+  const d = values.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join("");
+  const color = up === null ? AXIS : up ? "var(--pos)" : "var(--neg)";
+  return (
+    <svg width={width} height={height} aria-hidden className="block">
+      <path d={d} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={x(values.length - 1)} cy={y(values[values.length - 1])} r={2.5} fill={color} />
+    </svg>
+  );
+}
+
+/** Where the sequential test stands between its two fixed lines. */
+export function TestGauge({ s }: { s: StrategyView }) {
+  const span = s.graduate - s.kill || 1;
+  const at = Math.min(100, Math.max(0, ((s.llr - s.kill) / span) * 100));
+  const state = s.llr <= s.kill ? "bg-neg" : s.llr >= s.graduate ? "bg-pos" : "bg-foreground";
+  return (
+    <div className="min-w-0">
+      <div className="relative h-1.5 rounded-full bg-secondary" aria-hidden>
+        <span className="absolute top-0 left-0 h-full w-px bg-neg/70" />
+        <span className="absolute top-0 right-0 h-full w-px bg-pos/70" />
+        <span className={`absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full ${state}`} style={{ left: `${at}%` }} />
+      </div>
+      <div className="mt-1.5 flex justify-between text-[11px] text-faint">
+        <span>kill {signed(s.kill)}</span>
+        <span className="text-muted-foreground">evidence {signed(s.llr)}</span>
+        <span>graduate {signed(s.graduate)}</span>
+      </div>
+    </div>
+  );
+}
+
+/** The sequential test as a path between two lines fixed before the run started. */
+export function SequentialChart({ s, zoom }: { s: StrategyView; zoom: boolean }) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const [hover, setHover] = useState<number | null>(null);
+  const H = 300;
+  const m = { l: 44, r: 16, t: 14, b: 30 };
+  const full = s.days.filter((d) => d.full);
+  const horizon = Math.max(s.card.days_if_real, s.card.days_if_none);
+  const xMax = zoom ? Math.max(30, full.length + 5) : Math.max(Math.ceil((horizon * 1.08) / 100) * 100, full.length + 10);
+  const pad = (s.graduate - s.kill) * 0.22;
+  const [yMin, yMax] = [s.kill - pad, s.graduate + pad];
+  const iw = Math.max(10, width - m.l - m.r);
+  const ih = H - m.t - m.b;
+  const x = (d: number) => m.l + (d / xMax) * iw;
+  const y = (v: number) => m.t + (1 - (Math.min(yMax, Math.max(yMin, v)) - yMin) / (yMax - yMin)) * ih;
+  const pts = [{ d: 0, llr: 0 }, ...full.map((r, i) => ({ d: i + 1, llr: r.llr }))];
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.d).toFixed(1)} ${y(p.llr).toFixed(1)}`).join("");
+  const last = pts[pts.length - 1];
+  const step = [10, 50, 100, 200, 500, 1000].find((k) => xMax / k <= 10) ?? 2000;
+  const ticks = Array.from({ length: Math.floor(xMax / step) + 1 }, (_, i) => i * step);
+  const marks = zoom ? [] : [
+    { d: s.card.days_if_none, label: "if there is no edge" },
+    { d: s.card.days_if_real, label: "if the edge is real" },
+  ];
+  const hp = hover !== null ? pts[hover] : null;
+
+  return (
+    <div ref={ref} className="relative" style={{ height: H }}>
+      {width > 0 && (
+        <svg
+          width={width}
+          height={H}
+          role="img"
+          aria-label={`Sequential test for ${s.name}: ${signed(s.llr)} after ${s.fullDays} full days; kill at ${signed(s.kill)}, graduate at ${signed(s.graduate)}.`}
+          onMouseLeave={() => setHover(null)}
+          onMouseMove={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            const d = Math.round(((e.clientX - r.left - m.l) / iw) * xMax);
+            setHover(pts.length > 1 ? Math.min(pts.length - 1, Math.max(0, d)) : null);
+          }}
+        >
+          <rect x={m.l} y={m.t} width={iw} height={y(s.graduate) - m.t} fill="var(--pos)" opacity={0.07} />
+          <rect x={m.l} y={y(s.kill)} width={iw} height={m.t + ih - y(s.kill)} fill="var(--neg)" opacity={0.07} />
+          {ticks.map((t) => (
+            <text key={t} x={x(t)} y={H - 10} fontSize={11} fill={AXIS} textAnchor="middle">
+              {t}
+            </text>
+          ))}
+          <text x={m.l + iw} y={H - 10} fontSize={11} fill={AXIS} textAnchor="end" dx={0} dy={-16}>
+            full paper days
+          </text>
+          <line x1={m.l} x2={m.l + iw} y1={y(0)} y2={y(0)} stroke={GRID} />
+          <text x={m.l - 8} y={y(0) + 4} fontSize={11} fill={AXIS} textAnchor="end">0</text>
+          <line x1={m.l} x2={m.l + iw} y1={y(s.graduate)} y2={y(s.graduate)} stroke="var(--pos)" strokeWidth={1.5} />
+          <text x={m.l - 8} y={y(s.graduate) + 4} fontSize={11} fill={AXIS} textAnchor="end">{signed(s.graduate)}</text>
+          <text x={m.l + 10} y={y(s.graduate) - 8} fontSize={12} fill={INK}>Graduate above this line</text>
+          <line x1={m.l} x2={m.l + iw} y1={y(s.kill)} y2={y(s.kill)} stroke="var(--neg)" strokeWidth={1.5} />
+          <text x={m.l - 8} y={y(s.kill) + 4} fontSize={11} fill={AXIS} textAnchor="end">{signed(s.kill)}</text>
+          <text x={m.l + 10} y={y(s.kill) + 18} fontSize={12} fill={INK}>Kill below this line</text>
+          {marks.map((k, i) => (
+            <g key={k.label}>
+              <line x1={x(k.d)} x2={x(k.d)} y1={y(s.graduate)} y2={y(s.kill)} stroke="#3a3a3a" />
+              <text y={i === 0 ? y(0) + 20 : y(s.graduate) + 22} fontSize={11} fill="#a1a1a1" textAnchor="end">
+                <tspan x={x(k.d) - 8}>Decision near day {Math.round(k.d)}</tspan>
+                <tspan x={x(k.d) - 8} dy={14}>{k.label}</tspan>
+              </text>
+            </g>
+          ))}
+          <path d={path} fill="none" stroke={INK} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+          <circle cx={x(last.d)} cy={y(last.llr)} r={5} fill={INK} stroke={SURFACE} strokeWidth={2} />
+          <text x={x(last.d)} y={y(last.llr) - 10} fontSize={11} fill={AXIS} textAnchor="middle">now</text>
+          {hp && (
+            <g>
+              <line x1={x(hp.d)} x2={x(hp.d)} y1={m.t} y2={m.t + ih} stroke="#4a4a4a" />
+              <circle cx={x(hp.d)} cy={y(hp.llr)} r={5} fill={INK} stroke={SURFACE} strokeWidth={2} />
+            </g>
+          )}
+        </svg>
+      )}
+      {hp && hover !== null && (
+        <Tip x={x(hp.d)} y={y(hp.llr) - 44} width={width}>
+          <div className="text-muted-foreground">{hover === 0 ? "Start" : `Day ${hp.d}, ${full[hover - 1].day}`}</div>
+          <div>
+            Test at <span className="font-medium">{signed(hp.llr)}</span>
+            {hover > 0 && <span className="text-muted-foreground"> after a {signed(full[hover - 1].ret * 1e4, 1, " bps")} day</span>}
+          </div>
+        </Tip>
+      )}
+    </div>
+  );
+}
+
+// ---- The gate as a line map ----
+
+const SHORT: Record<string, string> = {
+  "evidence": "Evidence",
+  "walk-forward": "Walk-forward",
+  "reality check": "Reality check",
+  "deflated Sharpe": "Deflated Sharpe",
+  "overfitting (PBO)": "Overfitting",
+  "plateau": "Plateau",
+  "costs ×2": "Costs ×2",
+  "one bar late": "One bar late",
+  "coins": "Coins",
+  "quarters": "Quarters",
+  "best days removed": "Best days removed",
+  "timing baseline": "Timing baseline",
+  "market-neutral part": "Market-neutral",
+};
+
+/** The check that ended a family's run, or -1 when it ran the whole gate. */
+export function stopIndex(f: FamilyReport): number {
+  if (f.verdict === "INSUFFICIENT_EVIDENCE") return Math.max(0, f.checks.findIndex((c) => !c.pass));
+  return f.checks.findIndex((c) => c.fatal && !c.pass);
+}
+
+/** Why a check ended a run: "p = 0.217" and "needs p < 0.05". */
+function why(c: FamilyReport["checks"][number]): [string, string] {
+  const v = c.value.replace(/\s*\(.*$/, "").replace(/\s+over .*$/, "").replace(/\s*\[.*?\]/g, "").replace(/(^|[\s[(,])-(?=\d)/g, "$1−");
+  return [v, `needs ${c.need.replace(/\s+with .*$/, "")}`];
+}
+
+/**
+ * How far each family got through the gate. One neutral bar per family, sorted by distance, so the rows form the
+ * funnel; the end cap says how the run ended and the label says why. Checks computed after the end stay on hover.
+ */
+export function GateLineMap({ families, selected, onSelect }: { families: FamilyReport[]; selected: string; onSelect: (family: string) => void }) {
+  const names = families[0]?.checks.map((c) => c.name) ?? [];
+  const N = names.length;
+  const rows = useMemo(
+    () =>
+      families
+        .map((f, order) => {
+          const stop = stopIndex(f);
+          return { f, order, stop, reach: stop < 0 ? N : stop };
+        })
+        .sort((a, b) => b.reach - a.reach || a.order - b.order),
+    [families, N],
+  );
+  const passedAll = families.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length;
+  const stillIn = names.map((_, i) => rows.filter((r) => r.reach >= i).length);
+  const sealed = !families.some((f) => f.lockbox_opened);
+  const wrap = useRef<HTMLDivElement>(null);
+  const [tip, setTip] = useState<{ r: number; c: number; x: number; y: number; below: boolean } | null>(null);
+  const cols = `var(--label) repeat(${N}, minmax(56px, 1fr)) 72px`;
+  // Column centres as a share of the track (the N check columns plus the lockbox column), for the bar geometry.
+  const at = (i: number) => `calc(${(i + 0.5) * 100}% / ${N})`;
+
+  const hover = (e: React.MouseEvent<HTMLDivElement>, r: number, c: number) => {
+    const box = wrap.current?.getBoundingClientRect();
+    const cell = e.currentTarget.getBoundingClientRect();
+    if (!box) return;
+    setTip({ r, c, x: cell.left - box.left + cell.width / 2, y: r < 2 ? cell.bottom - box.top : cell.top - box.top, below: r < 2 });
+  };
+  const tr = tip ? rows[tip.r] : null;
+  const tc = tr ? tr.f.checks[tip!.c] : null;
+
+  return (
+    <div className="overflow-x-auto">
+      <div ref={wrap} className="relative [--label:200px] sm:[--label:256px]" style={{ minWidth: `calc(var(--label) + 72px + ${N} * 56px)` }} onMouseLeave={() => setTip(null)}>
+        {/* Check names, then how many families were still in the run when each check came up. */}
+        <div className="grid items-end text-[11px] leading-[14px] text-muted-foreground" style={{ gridTemplateColumns: cols }}>
+          <span className="sticky left-0 z-[2] self-stretch bg-card" />
+          {names.map((n, i) => (
+            <span key={n} className={`px-0.5 text-center text-balance ${tip?.c === i ? "text-foreground" : ""}`}>{SHORT[n] ?? n}</span>
+          ))}
+          <span className="px-1 text-center text-info">Lockbox, {sealed ? "sealed" : "opened"}</span>
+        </div>
+        <div className="mt-2 grid items-center border-b pb-2 font-mono text-[13px] tabular-nums" style={{ gridTemplateColumns: cols }}>
+          <span className="sticky left-0 z-[2] bg-card font-sans text-xs text-faint">Families still in the run</span>
+          {/* Counts stop at the first zero: after that every column would only repeat it. */}
+          {stillIn.map((k, i) => (
+            <span key={names[i]} className={`text-center ${k === 0 ? "text-faint" : k < (stillIn[i - 1] ?? k) ? "text-foreground" : "text-muted-foreground"}`}>{k === 0 && stillIn[i - 1] === 0 ? "" : k}</span>
+          ))}
+          <span className={`text-center ${passedAll ? "text-pos" : "text-faint"}`}>{passedAll}</span>
+        </div>
+
+        <div className="relative pt-1">
+          {/* The finish: one line every run would have to reach. */}
+          <span aria-hidden className="pointer-events-none absolute top-1 bottom-0 right-[36px] w-px bg-info/60" />
+          {rows.map(({ f, stop, reach }, r) => {
+            const on = selected === f.family;
+            const insuff = f.verdict === "INSUFFICIENT_EVIDENCE";
+            const end = stop < 0 ? N - 1 : stop;
+            return (
+              <div
+                key={f.family}
+                onClick={() => onSelect(f.family)}
+                className={`grid min-h-12 cursor-pointer items-center rounded-md transition-colors ${on ? "bg-popover" : "bg-card hover:bg-[#141414]"}`}
+                style={{ gridTemplateColumns: cols }}
+              >
+                <button type="button" aria-pressed={on} onClick={(e) => { e.stopPropagation(); onSelect(f.family); }} className="sticky left-0 z-[2] flex flex-col self-stretch justify-center rounded-md bg-inherit py-2 pr-4 pl-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset">
+                  <span className="text-[13px] font-medium text-foreground">{familyName(f.family)}</span>
+                  <span className="text-[11px] leading-4 text-muted-foreground">
+                    {stop < 0 ? (f.verdict === "REVISE" ? "Ran the whole gate, short of the bar" : "Ran the whole gate") : (
+                      <>
+                        <span className={insuff ? "text-warn" : "text-neg"}>{SHORT[f.checks[stop].name] ?? f.checks[stop].name}</span>
+                        {" "}{why(f.checks[stop])[0]} · <span className="whitespace-nowrap">{why(f.checks[stop])[1]}</span>
+                      </>
+                    )}
+                  </span>
+                </button>
+                <div className="relative h-12" style={{ gridColumn: `2 / span ${N}` }}>
+                  {/* The road not taken: faint stations after the run ended. */}
+                  {names.map((n, i) => i > end && (
+                    <span key={n} aria-hidden className="absolute top-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#3a3a3a]" style={{ left: at(i) }} />
+                  ))}
+                  {/* Distance covered. */}
+                  <span aria-hidden className={`absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full ${on ? "bg-foreground" : "bg-foreground/70"}`} style={{ left: 0, width: reach === 0 ? 0 : at(end) }} />
+                  {f.checks.map((c, i) => i < end && !c.pass && (
+                    <span key={c.name} aria-hidden className="absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-foreground bg-card" style={{ left: at(i) }} />
+                  ))}
+                  {stop >= 0 && (
+                    <span aria-hidden className={`absolute top-1/2 h-5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-[2px] ${insuff ? "bg-warn" : "bg-neg"}`} style={{ left: at(stop) }} />
+                  )}
+                  {names.map((n, i) => (
+                    <div key={n} className="absolute inset-y-0 -translate-x-1/2" style={{ left: at(i), width: `calc(100% / ${N})` }} onMouseEnter={(e) => hover(e, r, i)} />
+                  ))}
+                </div>
+                <span />
+              </div>
+            );
+          })}
+        </div>
+
+        {tip && tr && tc && (
+          <div
+            role="status"
+            className="pointer-events-none absolute z-10 w-max max-w-[280px] rounded-md border bg-popover px-2.5 py-1.5 text-xs leading-5 shadow-lg shadow-black/40"
+            style={{ left: tip.x, top: tip.y, transform: `translate(-50%, ${tip.below ? "6px" : "calc(-100% - 6px)"})` }}
+          >
+            <div className="font-medium">{familyName(tr.f.family)}: {SHORT[tc.name] ?? tc.name}</div>
+            <div>{tc.value}</div>
+            <div className="text-muted-foreground">Needs {tc.need}</div>
+            <div className={tr.stop >= 0 && tip.c > tr.stop ? "text-muted-foreground" : tc.pass ? "text-pos" : tip.c === tr.stop ? (tr.f.verdict === "INSUFFICIENT_EVIDENCE" ? "text-warn" : "text-neg") : tc.fatal ? "text-neg" : "text-warn"}>
+              {tr.stop >= 0 && tip.c > tr.stop ? "Computed after the run ended: " : ""}
+              {tc.pass ? "passed" : tip.c === tr.stop && tr.f.verdict === "INSUFFICIENT_EVIDENCE" ? "not enough evidence to judge" : tc.fatal ? "fatal miss" : "short of the bar, not fatal"}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function MapLegend() {
+  const item = "flex items-center gap-2";
+  return (
+    <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
+      <span className={item}><span aria-hidden className="h-1.5 w-6 rounded-full bg-foreground/70" />Checks cleared</span>
+      <span className={item}><span aria-hidden className="size-2.5 rounded-full border-2 border-foreground" />Missed, not fatal</span>
+      <span className={item}><span aria-hidden className="h-4 w-1.5 rounded-[2px] bg-neg" />Fatal miss, the run ends</span>
+      <span className={item}><span aria-hidden className="h-4 w-1.5 rounded-[2px] bg-warn" />Not enough evidence to judge</span>
+    </div>
+  );
+}
+
+/** Walk-forward out-of-sample: cumulative return on one shared percent axis. */
+export function OosChart({ families, selected }: { families: FamilyReport[]; selected: string }) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const [hover, setHover] = useState<number | null>(null);
+  const series = useMemo(() => families.map((f, i) => ({ f, color: FAMILY_COLOR[i % FAMILY_COLOR.length] })).filter((s) => s.f.oosCum.length > 1), [families]);
+  const H = 280;
+  const m = { l: 44, r: 118, t: 12, b: 28 };
+  const n = Math.max(1, ...series.map((s) => s.f.oosCum.length));
+  const all = series.flatMap((s) => s.f.oosCum);
+  const lo = Math.min(0, ...all), hi = Math.max(0, ...all);
+  const stepY = [5, 10, 20, 25, 50, 100].find((s) => (hi - lo) / s <= 6) ?? 100;
+  const [yMin, yMax] = [Math.floor(lo / stepY) * stepY, Math.ceil(hi / stepY) * stepY];
+  const iw = Math.max(10, width - m.l - m.r), ih = H - m.t - m.b;
+  const x = (i: number) => m.l + (i / (n - 1)) * iw;
+  const y = (v: number) => m.t + (1 - (v - yMin) / (yMax - yMin || 1)) * ih;
+  const yTicks: number[] = [];
+  for (let v = yMin; v <= yMax + 1e-9; v += stepY) yTicks.push(v);
+  // End labels pushed apart so they never overlap.
+  const ends = series.map((s) => ({ ...s, y: y(s.f.oosCum[s.f.oosCum.length - 1]) })).sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 15) ends[i].y = ends[i - 1].y + 15;
+
+  if (!series.length) return <p className="py-8 text-center text-[13px] text-muted-foreground">No walk-forward results on file. Run <code className="font-mono">lab validate</code>.</p>;
+  return (
+    <div ref={ref} className="relative" style={{ height: H }}>
+      {width > 0 && (
+        <svg
+          width={width}
+          height={H}
+          role="img"
+          aria-label="Cumulative out-of-sample return of each family's walk-forward picks."
+          onMouseLeave={() => setHover(null)}
+          onMouseMove={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setHover(Math.min(n - 1, Math.max(0, Math.round(((e.clientX - r.left - m.l) / iw) * (n - 1)))));
+          }}
+        >
+          {yTicks.map((v) => (
+            <g key={v}>
+              <line x1={m.l} x2={m.l + iw} y1={y(v)} y2={y(v)} stroke={v === 0 ? "#3a3a3a" : GRID} />
+              <text x={m.l - 8} y={y(v) + 4} fontSize={11} fill={AXIS} textAnchor="end">{signed(v, 0, "%")}</text>
+            </g>
+          ))}
+          {[0, 100, 200, 300, 400, 500, 600].filter((d) => d < n).map((d) => (
+            <text key={d} x={x(d)} y={H - 8} fontSize={11} fill={AXIS} textAnchor={d === 0 ? "start" : "middle"}>
+              {d === 0 ? "day 0" : d}
+            </text>
+          ))}
+          {series.map((s) => (
+            <path
+              key={s.f.family}
+              d={s.f.oosCum.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join("")}
+              fill="none"
+              stroke={s.color}
+              strokeWidth={selected === s.f.family ? 2.5 : 1.75}
+              opacity={selected === s.f.family ? 1 : 0.8}
+              strokeLinejoin="round"
+            />
+          ))}
+          {ends.map((s) => (
+            <g key={s.f.family}>
+              <circle cx={x(s.f.oosCum.length - 1)} cy={y(s.f.oosCum[s.f.oosCum.length - 1])} r={4} fill={s.color} stroke={SURFACE} strokeWidth={2} />
+              <text x={m.l + iw + 10} y={s.y + 4} fontSize={12} fill={INK}>
+                {familyName(s.f.family)}
+              </text>
+            </g>
+          ))}
+          {hover !== null && <line x1={x(hover)} x2={x(hover)} y1={m.t} y2={m.t + ih} stroke="#4a4a4a" />}
+        </svg>
+      )}
+      {hover !== null && (
+        <Tip x={x(hover)} y={m.t + 4} width={width}>
+          <div className="text-muted-foreground">Out-of-sample day {hover + 1}</div>
+          {series.map((s) => (
+            <div key={s.f.family} className="flex items-center gap-2">
+              <span className="h-[3px] w-3 rounded-full" style={{ background: s.color }} />
+              <span className="mr-3">{familyName(s.f.family)}</span>
+              <span className="ml-auto font-medium">{signed(s.f.oosCum[Math.min(hover, s.f.oosCum.length - 1)], 1, "%")}</span>
+            </div>
+          ))}
+        </Tip>
+      )}
+    </div>
+  );
+}
+
+/** What Jev said against what happened, by fifths of its answer. On the diagonal is calibrated. */
+export function Reliability({ q }: { q: ProbeQuestion }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const S = 220, m = { l: 36, r: 10, t: 10, b: 30 };
+  const [lo, hi] = [0.1, 0.7];
+  const iw = S - m.l - m.r, ih = S - m.t - m.b;
+  const x = (v: number) => m.l + ((v - lo) / (hi - lo)) * iw;
+  const y = (v: number) => m.t + (1 - (v - lo) / (hi - lo)) * ih;
+  const ticks = [0.1, 0.3, 0.5, 0.7];
+  const pts = q.buckets;
+  return (
+    <div className="relative" style={{ width: S, height: S }}>
+      <svg width={S} height={S} role="img" aria-label={`Reliability of ${q.id}: Jev's answer against the observed rate in five groups.`}>
+        {ticks.map((t) => (
+          <g key={t}>
+            <line x1={m.l} x2={m.l + iw} y1={y(t)} y2={y(t)} stroke={GRID} />
+            <line x1={x(t)} x2={x(t)} y1={m.t} y2={m.t + ih} stroke={GRID} />
+            <text x={m.l - 6} y={y(t) + 4} fontSize={11} fill={AXIS} textAnchor="end">{Math.round(t * 100)}%</text>
+            <text x={x(t)} y={S - 12} fontSize={11} fill={AXIS} textAnchor="middle">{Math.round(t * 100)}%</text>
+          </g>
+        ))}
+        <line x1={x(lo)} y1={y(lo)} x2={x(hi)} y2={y(hi)} stroke="#5a5a5a" />
+        <line x1={m.l} x2={m.l + iw} y1={y(q.base_rate)} y2={y(q.base_rate)} stroke="var(--info)" opacity={0.7} />
+        <path d={pts.map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)} ${y(p[1]).toFixed(1)}`).join("")} fill="none" stroke={INK} strokeWidth={2} strokeLinejoin="round" />
+        <text x={m.l + iw / 2} y={S - 2} fontSize={10} fill={AXIS} textAnchor="middle">Jev said (%)</text>
+        <text transform={`translate(10 ${m.t + ih / 2}) rotate(-90)`} fontSize={10} fill={AXIS} textAnchor="middle">Happened (%)</text>
+        {pts.map((p, i) => (
+          <g key={i} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+            <circle cx={x(p[0])} cy={y(p[1])} r={12} fill="transparent" />
+            <circle cx={x(p[0])} cy={y(p[1])} r={hover === i ? 6 : 4.5} fill={INK} stroke={SURFACE} strokeWidth={2} />
+          </g>
+        ))}
+      </svg>
+      {hover !== null && (
+        <Tip x={x(pts[hover][0])} y={y(pts[hover][1]) + 10} width={S}>
+          <div>Jev said {(pts[hover][0] * 100).toFixed(0)}%</div>
+          <div>It happened {(pts[hover][1] * 100).toFixed(0)}% of the time</div>
+          <div className="text-muted-foreground">{pts[hover][3]} entries, {signed(pts[hover][2], 0, " bps")} mean</div>
+        </Tip>
+      )}
+    </div>
+  );
+}
+
+// ---- The gate's calibration: what it does when the answer is known ----
+
+const OUTCOME = [
+  { key: "PROMOTE_TO_PAPER", label: "Promoted", bar: "bg-pos", text: "text-[#0a0a0a]" },
+  { key: "REVISE", label: "Revise", bar: "bg-warn/45", text: "text-foreground" },
+  { key: "REJECT", label: "Rejected", bar: "bg-neg/35", text: "text-foreground" },
+] as const;
+
+/** The false-positive ceiling the gate is held to on markets with no edge. */
+const FALSE_POSITIVE_CEILING = 5;
+
+/**
+ * One 100% bar per synthetic market, from no edge to the strongest planted edge. The promoted share is the reading:
+ * near zero with no edge (a false positive), rising with the edge (the gate's power).
+ */
+export function CalibrationChart({ calibrations }: { calibrations: Calibration[] }) {
+  const rows = calibrations
+    .map((c) => {
+      const edge = Number(c.title.match(/edge\s+([\d.]+)/)?.[1] ?? NaN);
+      const total = c.rows.reduce((a, r) => a + r.panels, 0) || 1;
+      const share = (k: string) => ((c.rows.find((r) => r.outcome === k)?.panels ?? 0) / total) * 100;
+      return { c, edge, total, family: c.title.split(" ")[0], parts: OUTCOME.map((o) => ({ ...o, pct: share(o.key) })) };
+    })
+    .sort((a, b) => (a.edge || 0) - (b.edge || 0));
+
+  return (
+    <div className="flex flex-col">
+      <div className="grid grid-cols-[minmax(0,1fr)_72px] items-end gap-x-4 pb-2 text-[11px] text-faint sm:grid-cols-[200px_minmax(0,1fr)_88px]">
+        <span className="hidden sm:block">Synthetic market</span>
+        <span>Share of panels by verdict</span>
+        <span className="text-right">Promoted</span>
+      </div>
+      {rows.map(({ c, edge, total, family, parts }) => {
+        const none = edge === 0;
+        const promoted = parts[0].pct;
+        const over = none && promoted > FALSE_POSITIVE_CEILING;
+        return (
+          <div key={c.title} className="grid grid-cols-[minmax(0,1fr)_72px] items-center gap-x-4 gap-y-1.5 border-t py-3.5 sm:grid-cols-[200px_minmax(0,1fr)_88px]">
+            <div className="col-span-2 sm:col-span-1">
+              <div className="text-[13px] font-medium text-foreground">{none ? "No edge" : `Edge ${edge} planted`}</div>
+              <div className="text-[11px] text-muted-foreground">{total} panels, {familyName(family).toLowerCase()} rules</div>
+            </div>
+            <div className="relative">
+              <div className="flex h-7 overflow-hidden rounded-[6px]" role="img" aria-label={parts.map((p) => `${p.label} ${Math.round(p.pct)}%`).join(", ")}>
+                {parts.map((p) => p.pct > 0 && (
+                  <div key={p.key} className={`flex items-center overflow-hidden px-2 text-[11px] font-medium tabular-nums whitespace-nowrap ${p.bar} ${p.text}`} style={{ width: `${p.pct}%` }}>
+                    <span className="hidden sm:inline">{p.pct >= 7 ? `${Math.round(p.pct)}%` : ""}</span>
+                  </div>
+                ))}
+              </div>
+              {none && (
+                <div aria-hidden className="pointer-events-none absolute -top-1.5 -bottom-1.5 w-px bg-foreground/80" style={{ left: `${FALSE_POSITIVE_CEILING}%` }}>
+                  <span className="absolute top-full left-1.5 mt-0.5 text-[11px] whitespace-nowrap text-muted-foreground">Ceiling {FALSE_POSITIVE_CEILING}%</span>
+                </div>
+              )}
+            </div>
+            <div className="text-right">
+              <div className={`font-mono text-[19px] leading-6 tabular-nums ${over ? "text-neg" : !none && promoted > 0 ? "text-pos" : "text-foreground"}`}>{Math.round(promoted)}%</div>
+              <div className="text-[11px] text-faint">{none ? (over ? "above the ceiling" : "false positives") : "edge found"}</div>
+            </div>
+          </div>
+        );
+      })}
+      <div className="flex flex-wrap gap-x-5 gap-y-2 border-t pt-3 text-xs text-muted-foreground">
+        {OUTCOME.map((o) => (
+          <span key={o.key} className="flex items-center gap-2"><span aria-hidden className={`size-2.5 rounded-[3px] ${o.bar}`} />{o.key === "REVISE" ? "Sent back to revise" : o.label}</span>
+        ))}
+        <span className="flex items-center gap-2"><span aria-hidden className="h-3.5 w-px bg-foreground/80" />False-positive ceiling</span>
+      </div>
+    </div>
+  );
+}

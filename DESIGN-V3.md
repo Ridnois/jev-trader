@@ -115,7 +115,7 @@ Not tested yet: `direction` (H-J02), the full multi-year replay (about 16,000 en
 `trade run` loads `strategies/*.json`, splits capital equally, and for each strategy recomputes the plan at every bar close on Hyperliquid's own candles, then acts on the live book. Stops are checked every second, funding accrues, positions survive a restart. The book (`book.rs`) is a pure state machine; a test replays panels through it bar by bar and requires the simulator's trades.
 
 `trade monitor` answers three questions from files:
-1. **Parity**: do paper entries match the simulator's on the same days?
+1. **Parity**: do paper entries match the simulator's on the same days? Entries are matched by coin, side and the bar that *decided* them, over bars from that strategy's own first bar (a strategy added to a running engine has no paper history before it) up to the last bar the simulator can fill. An entry on a bar where the simulator already held that coin on that side is counted as a **late join**, not a disagreement: a breakout promoted into an open trend starts flat, so its book can only pick up positions the simulator opened days earlier. Everything else unmatched means the two engines disagree.
 2. **Sequential test**: KILL when "no edge" has become the better explanation of the paper days, GRADUATE when the card's edge has (5% false positives, 80% power).
 3. **Drawdown**: past the 99th percentile of the backtest's own bootstrap for the days elapsed is a KILL.
 
@@ -144,6 +144,8 @@ $B --env-file .env.local lab jev replay --probe probes/fade_judge.toml --entries
 $B lab jev score --probe probes/fade_judge.toml
 
 $B lab promote --family families/trend.toml --candidate             # unproven, labelled as such
+$B lab promote --family families/trend.toml --candidate \
+    --spec "trend:n=96,out_frac=0.25,shorts=1,stop=800" --as trend_fast  # another spec of the same family, beside the first
 $B --env-file .env.local trade run                  # paper; needs the Jev key only for the catalyst recorder
 $B trade monitor
 ```
@@ -155,7 +157,7 @@ $B trade monitor
 - Bars are the finest historical step (15m here). Fills between bars are modelled, not observed; the tick recorder starts fixing that from now on.
 - The gate is conservative. A real edge with Sharpe 1 to 2 will be rejected on 2.3 years of data and 200 to 400 trials. The way through is fewer, better-motivated trials, not looser thresholds.
 - Catalyst markouts pending when the engine stops are lost.
-- No dashboard page for the lab yet; reports are markdown under `lab-data/reports/`.
+- The dashboard (`web/`, Next.js, `scripts/v3-services.sh start`) is read-only: it shows the files, it cannot pause or stop the trader.
 
 ## 9. Next
 

@@ -391,6 +391,14 @@ pub enum LabCmd {
         family: PathBuf,
         #[arg(long)]
         candidate: bool,
+        /// Promote this exact spec (it must be in the family's declared grid) instead of the
+        /// verdict's candidate. Its card is recomputed from the design window.
+        #[arg(long)]
+        spec: Option<String>,
+        /// File stem to write under, default the family name. A second spec of the same
+        /// family runs alongside the first instead of overwriting it.
+        #[arg(long = "as")]
+        as_name: Option<String>,
     },
     /// List the verdicts on file.
     Report,
@@ -607,7 +615,7 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             }
             Ok(())
         }
-        LabCmd::Promote { family, candidate } => promote(lab, &family, candidate),
+        LabCmd::Promote { family, candidate, spec, as_name } => promote(lab, &family, candidate, spec.as_deref(), as_name.as_deref()),
         LabCmd::Jev { cmd } => jev(cmd, lab, jev_cfg).await,
         LabCmd::Report => {
             let root = lab.data_dir.join("reports");
@@ -756,18 +764,44 @@ pub struct Promoted {
     pub card: gate::Card,
 }
 
-fn promote(lab: &LabConfig, family: &Path, candidate: bool) -> Result<()> {
+fn promote(lab: &LabConfig, family: &Path, candidate: bool, spec_id: Option<&str>, as_name: Option<&str>) -> Result<()> {
     let fam = Family::load(family)?;
     let study = format!("{}-{}", lab.research_venue, fam.interval);
     let path = lab.report_dir(&study).join(format!("{}.json", fam.family));
     let ev: serde_json::Value = crate::status::read_json(&path).with_context(|| format!("no verdict at {}: run `lab validate` first", path.display()))?;
     let verdict = ev["verdict"].as_str().unwrap_or("");
-    let promoted = if verdict == "PROMOTE_TO_PAPER" {
+    let pick: Option<Spec> = serde_json::from_value(ev["pick"].clone()).ok();
+    // Which spec: the one asked for (it must be one the search actually charged for), else the pick.
+    let chosen = match spec_id {
+        Some(id) => {
+            let s = parse_spec(id)?;
+            if s.family != fam.family {
+                bail!("{id} is a `{}` spec, not `{}`", s.family, fam.family);
+            }
+            if !fam.specs().iter().any(|g| g.id() == s.id()) {
+                bail!("{id} is not in the grid declared by {} ({} specs): widening the search costs trials, so declare it there and re-run `lab validate`", family.display(), fam.specs().len());
+            }
+            Some(s)
+        }
+        None => None,
+    };
+    let spec = match chosen.clone().or(pick.clone()) {
+        Some(s) => s,
+        None => bail!("the verdict at {} has no candidate spec; pass --spec", path.display()),
+    };
+    let name = as_name.unwrap_or(&fam.family).to_string();
+    if name.is_empty() || name.contains(['/', '\\', '.']) {
+        bail!("--as must be a plain file stem (letters, digits, `_` or `-`)");
+    }
+    if !std::fs::read_to_string(lab.trials_path()).unwrap_or_default().contains(&format!("\"spec\":\"{}\"", spec.id())) {
+        tracing::warn!("{} is not in the trial ledger on {study}: this rule was never charged for, so the gate's multiple-testing correction does not cover it", spec.id());
+    }
+    let is_validated_pick = verdict == "PROMOTE_TO_PAPER" && chosen.is_none() && pick.as_ref().is_some_and(|p| p.id() == spec.id());
+    let promoted = if is_validated_pick {
         Promoted { status: "validated".into(), hypothesis: fam.hypothesis.clone(), card: serde_json::from_value(ev["card"].clone()).context("verdict file has no prediction card")? }
     } else if candidate {
         // Not validated: the card is built from the design window so the monitor can
         // still say when paper results fall outside what the backtest claimed.
-        let spec: Spec = serde_json::from_value(ev["pick"].clone()).context("the verdict has no candidate spec")?;
         let full = lab.panel(&lab.research_venue, &fam.interval, &lab.universe.coins)?;
         let design = full.head(design_bars(&full, lab));
         let cfg = sim::SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
@@ -783,13 +817,18 @@ fn promote(lab: &LabConfig, family: &Path, candidate: bool) -> Result<()> {
             hypothesis: fam.hypothesis.clone(),
             card: gate::Card { spec, interval: fam.interval.clone(), mu_daily: mu, sd_daily: sdv, alpha: g.paper_alpha, beta: g.paper_beta, days_if_real: d1, days_if_none: d0, dd99: [dd(30), dd(60), dd(90)], issued: chrono::Utc::now(), study: study.clone() },
         }
+    } else if chosen.is_some() {
+        bail!("{} is not the validated pick on {study} ({verdict}). Use --candidate to paper-trade it anyway, labelled as unproven.", spec.id())
     } else {
         bail!("{} on {study} is {verdict}, not PROMOTE_TO_PAPER. Use --candidate to paper-trade it anyway, labelled as unproven.", fam.family);
     };
     std::fs::create_dir_all(&lab.trade.strategies_dir)?;
-    let out = lab.trade.strategies_dir.join(format!("{}.json", fam.family));
+    let out = lab.trade.strategies_dir.join(format!("{name}.json"));
+    if out.exists() {
+        tracing::warn!("{} already exists and is being replaced", out.display());
+    }
     crate::status::write_atomic(&out, &serde_json::to_vec_pretty(&promoted)?)?;
-    println!("{} → {} ({}): `{}`", fam.family, out.display(), promoted.status, promoted.card.spec.id());
+    println!("{name} → {} ({}): `{}`", out.display(), promoted.status, promoted.card.spec.id());
     Ok(())
 }
 

@@ -142,7 +142,7 @@ pub struct Aux {
     pub jev: HashMap<String, Vec<Vec<f32>>>,
 }
 
-pub const FAMILIES: [&str; 6] = ["meanrev", "trend", "xs_reversal", "funding_carry", "jev_gate", "jev_direction"];
+pub const FAMILIES: [&str; 8] = ["meanrev", "trend", "xs_reversal", "funding_carry", "jev_gate", "jev_direction", "hvt", "ensemble"];
 
 pub fn plan(spec: &Spec, p: &Panel, aux: &Aux) -> Result<Plan> {
     match spec.family.as_str() {
@@ -152,6 +152,8 @@ pub fn plan(spec: &Spec, p: &Panel, aux: &Aux) -> Result<Plan> {
         "funding_carry" => funding_carry(spec, p),
         "jev_gate" => jev_gate(spec, p, aux),
         "jev_direction" => jev_direction(spec, p, aux),
+        "hvt" => hvt(spec, p),
+        "ensemble" => ensemble(spec, p, aux),
         other => bail!("unknown strategy family `{other}` (known: {})", FAMILIES.join(", ")),
     }
 }
@@ -452,6 +454,465 @@ fn jev_direction(spec: &Spec, p: &Panel, aux: &Aux) -> Result<Plan> {
         }
     }
     Ok(Plan { entry, exit: Vec::new(), policy: Policy { hold_bars: hold.max(1), stop_bps: spec.get("stop", 0.0), extend: false, max_positions: 0 } })
+}
+
+/// HVT (High Volume/Volatility Trading): volume-weighted mean reversion / breakout.
+/// - Volume-weighted VWAP as fair value anchor.
+/// - Volume-weighted z-score: stretch measured in volume-adjusted std dev.
+/// - Volume spike filter: only trade when volume > vol_mult × rolling median volume.
+/// - dir = 1: fade (mean-rev) when |z| ≥ z_thresh on high volume.
+/// - dir = -1: breakout (momentum) when z ≥ z_thresh on volume surge.
+/// - exit_mean = 1: also close when volume-weighted z crosses back through 0.
+fn hvt(spec: &Spec, p: &Panel) -> Result<Plan> {
+    let vol_look = spec.need("vol_look")? as usize;
+    let z_thresh = spec.need("z")?;
+    let vol_mult = spec.need("vol_mult")?;
+    let hold = spec.need("hold")? as usize;
+    let dir = spec.get("dir", 1.0);
+    let fade_mode = dir > 0.0;
+    let exit_mean = spec.get("exit_mean", 0.0) > 0.5;
+    let shorts = spec.get("shorts", 1.0) > 0.5;
+    let resid = spec.get("resid", 0.0) > 0.5;
+
+    if vol_look < 8 || z_thresh <= 0.0 || vol_mult <= 1.0 || hold == 0 {
+        bail!("hvt: need vol_look >= 8, z > 0, vol_mult > 1, hold >= 1");
+    }
+
+    let nc = p.coins.len();
+    let n = p.n;
+    let mut entry = empty(p);
+    let mut exit = if exit_mean && fade_mode { empty(p) } else { Vec::new() };
+
+    // Precompute per-coin: volume median, VWAP, volume-weighted mean & std
+    let mut vwap = vec![vec![f64::NAN; n]; nc];
+    let mut vw_mean = vec![vec![f64::NAN; n]; nc];
+    let mut vw_std = vec![vec![f64::NAN; n]; nc];
+    let mut vol_median = vec![vec![f64::NAN; n]; nc];
+
+    for c in 0..nc {
+        let mut vol_window: Vec<f64> = Vec::new();
+        let mut pv_sum = 0.0; // price * volume
+        let mut v_sum = 0.0;
+        let mut pvv_sum = 0.0; // (price - vwap)^2 * volume
+        let mut pv2_sum = 0.0; // price^2 * volume
+        let mut pv_hist: VecDeque<(f64, f64)> = VecDeque::new(); // (price, volume) for rolling VWAP
+        let mut vol_hist: VecDeque<f64> = VecDeque::new();
+
+        for i in 0..n {
+            let px = p.close[c][i];
+            let vol = p.volume[c][i];
+
+            // Rolling VWAP
+            if px.is_finite() && vol.is_finite() && vol > 0.0 {
+                pv_sum += px * vol;
+                v_sum += vol;
+                pv_hist.push_back((px, vol));
+                pvv_sum += px * px * vol;
+            }
+            while pv_hist.len() > vol_look {
+                let (old_px, old_vol) = pv_hist.pop_front().unwrap();
+                pv_sum -= old_px * old_vol;
+                v_sum -= old_vol;
+                pvv_sum -= old_px * old_px * old_vol;
+            }
+            if v_sum > 0.0 {
+                vwap[c][i] = pv_sum / v_sum;
+                // Volume-weighted variance
+                let vw_var = (pvv_sum / v_sum) - vwap[c][i] * vwap[c][i];
+                if vw_var > 1e-18 {
+                    vw_std[c][i] = vw_var.sqrt();
+                }
+                vw_mean[c][i] = vwap[c][i];
+            }
+
+            // Rolling volume median
+            if vol.is_finite() && vol > 0.0 {
+                vol_hist.push_back(vol);
+            }
+            while vol_hist.len() > vol_look {
+                vol_hist.pop_front();
+            }
+            if vol_hist.len() >= 8 {
+                let mut sorted: Vec<f64> = vol_hist.iter().copied().collect();
+                sorted.sort_by(f64::total_cmp);
+                vol_median[c][i] = sorted[sorted.len() / 2];
+            }
+        }
+    }
+
+    // Basket for residual mode
+    let basket: Vec<f64> = if resid {
+        let mut acc = 0.0;
+        p.basket_ret.iter().map(|r| { acc += r; acc }).collect()
+    } else {
+        Vec::new()
+    };
+
+    for c in 0..nc {
+        for i in 0..n {
+            let px = p.close[c][i];
+            if !px.is_finite() {
+                continue;
+            }
+            let vw = vwap[c][i];
+            let std = vw_std[c][i];
+            let vmed = vol_median[c][i];
+            let vol = p.volume[c][i];
+
+            if !vw.is_finite() || !std.is_finite() || !vmed.is_finite() || !vol.is_finite() || std <= 1e-12 || vmed <= 0.0 {
+                continue;
+            }
+
+            // Volume spike condition
+            let vol_spike = vol >= vol_mult * vmed;
+
+            // Volume-weighted z-score (or residual vs basket)
+            let z = if resid {
+                let log_px = px.ln();
+                let basket_val = basket[i];
+                (log_px - basket_val - vw + vwap[c][i]) / std // simplified: stretch of residual vs own VWAP
+            } else {
+                (px - vw) / std
+            };
+
+            if !z.is_finite() {
+                continue;
+            }
+
+            if fade_mode {
+                // Mean-reversion fade
+                if vol_spike && z <= -z_thresh {
+                    entry[c][i] = 1;
+                } else if vol_spike && z >= z_thresh && shorts {
+                    entry[c][i] = -1;
+                }
+                if exit_mean {
+                    exit[c][i] = if z >= 0.0 { 1 } else { -1 };
+                }
+            } else {
+                // Breakout / momentum
+                if vol_spike && z >= z_thresh {
+                    entry[c][i] = 1;
+                } else if vol_spike && z <= -z_thresh && shorts {
+                    entry[c][i] = -1;
+                }
+            }
+        }
+    }
+
+    Ok(Plan {
+        entry,
+        exit,
+        policy: Policy {
+            hold_bars: hold,
+            stop_bps: spec.get("stop", 0.0),
+            extend: false,
+            max_positions: spec.get("max_positions", 0.0) as usize,
+        },
+    })
+}
+
+/// Ensemble: combines signals from multiple sub-families with learned weights.
+/// - Sub-families are listed in the family file's `sub_families` (fixed, not in grid).
+/// - On each rebalance bar, trains weights on the previous `train_days` days.
+/// - Weighting methods: "vote" (weighted sign), "sharpe" (proportional to in-sample Sharpe).
+/// - Final signal = sign(sum(weight_f * signal_f)) per coin/bar.
+fn ensemble(spec: &Spec, p: &Panel, aux: &Aux) -> Result<Plan> {
+    // Which sub-families to include. Each is a 0/1 flag `use_<family>` in [fixed].
+    // When any flag is present, only flagged families are used. When none is present we
+    // fall back to every data-only family — never the Jev ones, whose signals need a
+    // replay cache the caller may not have populated.
+    let known = [
+        "meanrev",
+        "trend",
+        "xs_reversal",
+        "funding_carry",
+        "jev_gate",
+        "jev_direction",
+        "hvt",
+    ];
+    let has_flags = known
+        .iter()
+        .any(|f| spec.params.contains_key(&format!("use_{f}")));
+    let sub_families: Vec<String> = if has_flags {
+        known
+            .iter()
+            .filter(|f| spec.get(&format!("use_{f}"), 0.0) > 0.5)
+            .map(|f| (*f).to_string())
+            .collect()
+    } else {
+        vec![
+            "meanrev".into(),
+            "trend".into(),
+            "xs_reversal".into(),
+            "funding_carry".into(),
+            "hvt".into(),
+        ]
+    };
+    if sub_families.is_empty() {
+        bail!("ensemble: no sub-families selected (set use_<family> = 1 in [fixed])");
+    }
+
+    let train_days = spec.need("train_days")? as usize;
+    let rebalance = spec.need("rebalance")? as usize;
+    let min_weight = spec.get("min_weight", 0.1);
+    let combine = spec.get("combine", 1.0); // 1 = vote, 2 = sharpe
+    let hold = spec.need("hold")? as usize;
+    let shorts = spec.get("shorts", 1.0) > 0.5;
+    let exit_on_flip = spec.get("exit_on_flip", 1.0) > 0.5;
+    // Diagnostic: invert the consensus. Used to tell a reliably-wrong edge (flipping it
+    // turns a persistent loss into a persistent gain) from a broken simulator.
+    let flip = spec.get("flip", 0.0) > 0.5;
+    // How many sub-families must agree on a side before the ensemble opens a trade.
+    let min_agree = spec.get("min_agree", 1.0).max(1.0) as usize;
+
+    if train_days == 0 || rebalance == 0 || hold == 0 {
+        bail!("ensemble: need train_days > 0, rebalance > 0, hold >= 1");
+    }
+
+    // Build plans for each sub-family using their fixed params from this ensemble spec
+    // (In practice, sub-families have their own fixed params; here we use defaults from the ensemble's fixed)
+    let mut sub_plans: Vec<Plan> = Vec::new();
+    for fam_name in &sub_families {
+        // Create a spec for this sub-family using the ensemble's fixed params as defaults
+        // This is a simplification; real use would load each family's own fixed params
+        let mut sub_spec = Spec {
+            family: fam_name.clone(),
+            params: BTreeMap::new(),
+        };
+        // Copy relevant fixed params from ensemble spec
+        for (k, v) in &spec.params {
+            if !["sub_families", "train_days", "rebalance", "min_weight", "combine", "hold", "stop", "max_positions", "shorts", "exit_on_flip"].contains(&k.as_str()) {
+                sub_spec.params.insert(k.clone(), *v);
+            }
+        }
+        // Ensure required params exist (use sensible defaults)
+        match fam_name.as_str() {
+            "meanrev" => {
+                sub_spec.params.entry("n".to_string()).or_insert(288.0);
+                sub_spec.params.entry("z".to_string()).or_insert(2.0);
+                sub_spec.params.entry("hold".to_string()).or_insert(24.0);
+                sub_spec.params.entry("stop".to_string()).or_insert(500.0);
+                sub_spec.params.entry("shorts".to_string()).or_insert(1.0);
+                sub_spec.params.entry("exit_mean".to_string()).or_insert(1.0);
+                sub_spec.params.entry("resid".to_string()).or_insert(0.0);
+                sub_spec.params.entry("max_positions".to_string()).or_insert(0.0);
+            }
+            "trend" => {
+                sub_spec.params.entry("n".to_string()).or_insert(96.0);
+                sub_spec.params.entry("out_frac".to_string()).or_insert(0.5);
+                sub_spec.params.entry("stop".to_string()).or_insert(0.0);
+                sub_spec.params.entry("shorts".to_string()).or_insert(1.0);
+                sub_spec.params.entry("hold_days".to_string()).or_insert(30.0);
+                sub_spec.params.entry("max_positions".to_string()).or_insert(0.0);
+            }
+            "xs_reversal" => {
+                sub_spec.params.entry("look".to_string()).or_insert(24.0);
+                sub_spec.params.entry("hold".to_string()).or_insert(12.0);
+                sub_spec.params.entry("k".to_string()).or_insert(2.0);
+                sub_spec.params.entry("dir".to_string()).or_insert(1.0);
+                sub_spec.params.entry("stop".to_string()).or_insert(0.0);
+            }
+            "funding_carry" => {
+                sub_spec.params.entry("look".to_string()).or_insert(24.0);
+                sub_spec.params.entry("hold".to_string()).or_insert(8.0);
+                sub_spec.params.entry("k".to_string()).or_insert(2.0);
+                sub_spec.params.entry("mode".to_string()).or_insert(0.0);
+                sub_spec.params.entry("stop".to_string()).or_insert(0.0);
+            }
+            "jev_gate" => {
+                sub_spec.params.entry("n".to_string()).or_insert(288.0);
+                sub_spec.params.entry("z".to_string()).or_insert(2.0);
+                sub_spec.params.entry("hold".to_string()).or_insert(24.0);
+                sub_spec.params.entry("stop".to_string()).or_insert(500.0);
+                sub_spec.params.entry("min_p".to_string()).or_insert(0.6);
+            }
+            "jev_direction" => {
+                sub_spec.params.entry("long_p".to_string()).or_insert(0.7);
+                sub_spec.params.entry("hold".to_string()).or_insert(24.0);
+                sub_spec.params.entry("stop".to_string()).or_insert(0.0);
+                sub_spec.params.entry("shorts".to_string()).or_insert(1.0);
+            }
+            "hvt" => {
+                sub_spec.params.entry("vol_look".to_string()).or_insert(96.0);
+                sub_spec.params.entry("z".to_string()).or_insert(2.0);
+                sub_spec.params.entry("vol_mult".to_string()).or_insert(2.0);
+                sub_spec.params.entry("hold".to_string()).or_insert(24.0);
+                sub_spec.params.entry("stop".to_string()).or_insert(300.0);
+                sub_spec.params.entry("dir".to_string()).or_insert(1.0);
+                sub_spec.params.entry("exit_mean".to_string()).or_insert(1.0);
+                sub_spec.params.entry("resid".to_string()).or_insert(0.0);
+                sub_spec.params.entry("shorts".to_string()).or_insert(1.0);
+                sub_spec.params.entry("max_positions".to_string()).or_insert(0.0);
+            }
+            _ => {}
+        }
+        let plan = crate::lab::strategy::plan(&sub_spec, p, aux)?;
+        sub_plans.push(plan);
+    }
+
+    let nc = p.coins.len();
+    let n = p.n;
+    let bpd = p.bars_per_day();
+    let train_bars = train_days * bpd;
+    let mut entry = empty(p);
+    let mut exit = if exit_on_flip { empty(p) } else { Vec::new() };
+
+    // Current weights per sub-family
+    let mut weights = vec![1.0 / sub_plans.len() as f64; sub_plans.len()];
+
+    for i in 0..n {
+        // Rebalance weights every `rebalance` bars (after we have training data)
+        if i >= train_bars && i % rebalance == 0 {
+            // Score each sub-family on the training window [train_start, i). A trade
+            // opened at bar b is scored on its close-to-close return over `hold` bars;
+            // only bars whose exit lands at or before `i` are used, so the weights never
+            // see a return past the rebalance bar.
+            let train_start = i - train_bars;
+            let last_scored = i.saturating_sub(hold + 1);
+            let mut perf = vec![0.0; sub_plans.len()];
+
+            for (si, splan) in sub_plans.iter().enumerate() {
+                let mut sum = 0.0;
+                let mut sum_sq = 0.0;
+                let mut cnt = 0usize;
+                for b in train_start..=last_scored {
+                    let mut bar_return = 0.0;
+                    let mut legs = 0usize;
+                    for c in 0..nc {
+                        let e = splan.entry[c][b];
+                        if e == 0 {
+                            continue;
+                        }
+                        let exit_idx = b + hold;
+                        let (px0, px1) = (p.close[c][b], p.close[c][exit_idx]);
+                        if px0.is_finite() && px1.is_finite() && px0 > 0.0 {
+                            bar_return += (px1 / px0 - 1.0) * e as f64;
+                            legs += 1;
+                        }
+                    }
+                    if legs > 0 {
+                        let r = bar_return / legs as f64;
+                        sum += r;
+                        sum_sq += r * r;
+                        cnt += 1;
+                    }
+                }
+                if cnt > 1 {
+                    let mean = sum / cnt as f64;
+                    let var = (sum_sq / cnt as f64 - mean * mean).max(0.0);
+                    let sd = var.sqrt();
+                    perf[si] = if sd > 1e-12 { mean / sd } else { 0.0 };
+                }
+            }
+
+            // Update weights
+            if combine >= 1.5 {
+                // Sharpe-weighting: positive Sharpe gets weight proportional to Sharpe
+                let pos_sum: f64 = perf.iter().filter(|x| **x > 0.0).sum();
+                if pos_sum > 0.0 {
+                    for si in 0..sub_plans.len() {
+                        weights[si] = if perf[si] > 0.0 { perf[si] / pos_sum } else { 0.0 };
+                    }
+                }
+            } else {
+                // Vote weighting: equal weight to positive performers
+                let pos_count = perf.iter().filter(|x| **x > 0.0).count().max(1) as f64;
+                for si in 0..sub_plans.len() {
+                    weights[si] = if perf[si] > 0.0 { 1.0 / pos_count } else { 0.0 };
+                }
+            }
+
+            // Apply min_weight floor and renormalize
+            let mut total = 0.0;
+            for w in &mut weights {
+                if *w < min_weight {
+                    *w = 0.0;
+                }
+                total += *w;
+            }
+            if total > 0.0 {
+                for w in &mut weights {
+                    *w /= total;
+                }
+            } else {
+                // All zero: fall back to equal
+                for w in &mut weights {
+                    *w = 1.0 / sub_plans.len() as f64;
+                }
+            }
+        }
+
+        // Generate ensemble signal at this bar. The consensus is a position target:
+        // enter only when it switches on (or flips side) so the hold/stop policy owns
+        // the trade instead of re-entering every bar. `min_agree` demands that at least
+        // that many sub-families point the same way — without it a single noisy family
+        // can open a trade, and the turnover eats the edge.
+        for c in 0..nc {
+            let mut weighted_sum = 0.0;
+            let mut prev_sum = 0.0;
+            let (mut long_n, mut short_n) = (0usize, 0usize);
+            for (si, splan) in sub_plans.iter().enumerate() {
+                let e = splan.entry[c][i];
+                if e > 0 {
+                    long_n += 1;
+                    weighted_sum += weights[si];
+                } else if e < 0 {
+                    short_n += 1;
+                    weighted_sum -= weights[si];
+                }
+                if i > 0 {
+                    let pv = splan.entry[c][i - 1];
+                    if pv != 0 {
+                        prev_sum += weights[si] * pv as f64;
+                    }
+                }
+            }
+            if flip {
+                weighted_sum = -weighted_sum;
+                prev_sum = -prev_sum;
+            }
+            let cur = if weighted_sum > 0.0 {
+                1i8
+            } else if weighted_sum < 0.0 {
+                -1i8
+            } else {
+                0i8
+            };
+            let prev = if prev_sum > 0.0 {
+                1i8
+            } else if prev_sum < 0.0 {
+                -1i8
+            } else {
+                0i8
+            };
+            let agree = if cur > 0 {
+                long_n
+            } else if cur < 0 {
+                short_n
+            } else {
+                0
+            };
+
+            if cur != 0 && cur != prev && agree >= min_agree && (cur > 0 || shorts) {
+                entry[c][i] = cur;
+            }
+            if exit_on_flip && prev != 0 && cur != prev {
+                exit[c][i] = prev;
+            }
+        }
+    }
+
+    Ok(Plan {
+        entry,
+        exit,
+        policy: Policy {
+            hold_bars: hold,
+            stop_bps: spec.get("stop", 0.0),
+            extend: false,
+            max_positions: spec.get("max_positions", 0.0) as usize,
+        },
+    })
 }
 
 #[cfg(test)]

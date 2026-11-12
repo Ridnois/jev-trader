@@ -47,3 +47,14 @@ No historical performance yet; the bot has not run with a Jev key. Any numbers s
 3. Safety over convenience: stopping is one deliberate action; changing strategy is not a browser action.
 4. Honest numbers: paper results are labelled paper, testnet results testnet, synthetic data synthetic.
 5. Self-explaining: each view says which desk it belongs to, how to read it, and what its jargon means, without leaving the page.
+
+## v3 dashboard (`web/`)
+
+Everything above describes v1 (`jev-trader dashboard`). The v3 dashboard is a separate surface with its own truth:
+
+- Stack: Next.js (app router), Tailwind, shadcn components, in `web/`. It needs Node and pnpm; start it with `scripts/v3-services.sh start`.
+- Read-only: it reads `data-v3/`, `lab-data/`, `strategies/`, `lab.toml` and `hypotheses.toml` and has no controls. It cannot pause, stop or flatten anything.
+- Paper only, Hyperliquid perps, 20 coins. v3 places no real orders.
+- What it shows: the paper trader and its sequential test, the Jev catalyst recorder (record mode), the lab's gate verdicts, Jev probe scores, and the 1-second recorder's quotes. Design and results: `DESIGN-V3.md`.
+- Evidence on hand: the lab rejected all four strategy families and the lockbox is sealed; the trend family runs on paper as a labelled, unproven candidate. No number on the page may claim an edge.
+- Its design record is `web/DESIGN.md`; the root `DESIGN.md` is the v1 departure board's.

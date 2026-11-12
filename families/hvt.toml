@@ -1,0 +1,30 @@
+# HVT (High Volume/Volatility Trading): volume-weighted mean reversion + breakout
+# Uses volume as conviction filter: fade stretches only on high volume; breakout only on volume surge.
+# Interval: 15m (volume patterns are clearest intraday)
+family = "hvt"
+interval = "15m"
+hypothesis = "H-V01"
+
+[grid]
+# Volume lookback for VWAP and volume stats
+vol_look = [48, 96, 192]        # 12h, 24h, 48h of 15m bars
+# Z-score threshold for mean-rev fade (volume-weighted)
+z = [1.5, 2.0, 2.5]
+# Volume spike multiplier vs rolling median
+vol_mult = [1.5, 2.0, 3.0]
+# Hold bars (time stop)
+hold = [12, 24, 48]             # 3h, 6h, 12h
+# Stop in bps
+stop = [0, 300, 600]
+# Direction: 1 = fade (mean-rev), -1 = breakout (momentum)
+dir = [1, -1]
+
+[fixed]
+# Exit when volume-weighted z crosses back through 0 (mean-rev mode only)
+exit_mean = 1
+# Residual mode: measure stretch against basket instead of own price
+resid = 0
+# Shorts allowed
+shorts = 1
+# Max positions at once
+max_positions = 0

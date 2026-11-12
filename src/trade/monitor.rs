@@ -2,9 +2,10 @@
 //!
 //! Three questions per strategy, each answered from files only:
 //! 1. **Parity.** The simulator replays the same days on Hyperliquid's candles. Its
-//!    trades are matched to the paper trades by coin, side and entry bar. Trades that
-//!    exist on one side only mean the backtest and the engine disagree (or the engine
-//!    was down), and nothing else on this page can be trusted until that is explained.
+//!    trades are matched to the paper trades by coin, side and the bar that decided
+//!    them. Trades that exist on one side only mean the backtest and the engine disagree
+//!    (or the engine was down), and nothing else on this page can be trusted until that
+//!    is explained.
 //! 2. **Sequential test.** Paper daily returns against the card: KILL when "no edge"
 //!    has become the better explanation, GRADUATE when the predicted edge has, at the
 //!    error rates fixed in lab.toml. The card says up front how long this should take.
@@ -69,6 +70,23 @@ fn z(x: f64) -> f64 {
     if x == 0.0 { 0.0 } else { x }
 }
 
+/// A decision bar worth comparing: the strategy existed for it (its paper history starts at
+/// `started`), the engine has processed it, and the simulator has the bar after it to fill on.
+fn comparable(decision: i64, started: Option<i64>, last_processed: i64, sim_last_fill: i64, ims: i64) -> bool {
+    match started {
+        Some(start) => decision >= start && decision <= last_processed && decision + ims <= sim_last_fill,
+        None => false,
+    }
+}
+
+fn side_word(side: i8) -> &'static str {
+    if side > 0 { "long" } else { "short" }
+}
+
+fn stamp(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| ms.to_string())
+}
+
 pub fn run(lab: &LabConfig) -> Result<()> {
     let paths = Paths::new(&lab.trade.data_dir);
     let strategies = load_strategies(&lab.trade.strategies_dir)?;
@@ -97,7 +115,9 @@ pub fn run(lab: &LabConfig) -> Result<()> {
         });
 
         // Parity with the simulator over the paper period.
-        let Some(start) = ledger.started.map(|d| d.timestamp_millis()) else { continue };
+        if ledger.started.is_none() {
+            continue;
+        }
         let panel = match lab.panel(HL, &card.interval, &lab.universe.coins) {
             Ok(p) => p,
             Err(e) => {
@@ -110,26 +130,63 @@ pub fn run(lab: &LabConfig) -> Result<()> {
         cfg.costs.funding = true;
         let plan = strategy::plan(&card.spec, &panel, &Aux::default())?;
         let run = sim::simulate(&panel, &plan, &cfg);
+        // Trades are matched on the bar that DECIDED them, not the bar that filled them: the
+        // engine fills on the live book at the open after that bar, which the archive need not
+        // have yet. A strategy's paper history starts at its own first bar, so the bars before
+        // it arrived are not compared either.
+        let ims = panel.interval_ms;
+        let started = ledger.first_bar.get(&s.name).copied().or_else(|| ledger.started.map(|d| d.timestamp_millis()));
         let last_bar = ledger.last_bar.get(&s.name).copied().unwrap_or(0);
-        // Entries the engine could have made: bars opened after it started, up to the last one it processed.
-        let sim_entries: BTreeMap<(String, i8, i64), f64> = run.trades.iter().filter(|t| panel.time(t.entry_i) > start && panel.time(t.entry_i) <= last_bar + panel.interval_ms).map(|t| ((panel.coins[t.coin].clone(), t.side, panel.time(t.entry_i)), t.bps())).collect();
+        let sim_last_fill = panel.time(panel.n.saturating_sub(1));
+        let decided = |t: &sim::Trade| panel.time(t.entry_i) - ims;
+        let sim_entries: BTreeMap<(String, i8, i64), f64> = run.trades.iter().filter(|t| comparable(decided(t), started, last_bar, sim_last_fill, ims)).map(|t| ((panel.coins[t.coin].clone(), t.side, decided(t)), t.bps())).collect();
         let mut paper: BTreeMap<(String, i8, i64), Option<f64>> = BTreeMap::new();
         for t in trades.iter().filter(|t| t["strategy"] == s.name.as_str()) {
             if let (Some(c), Some(side), Some(bar)) = (t["coin"].as_str(), t["side"].as_i64(), t["entry_bar_ms"].as_i64()) {
-                paper.insert((c.to_string(), side as i8, bar), t["pnl_bps"].as_f64());
+                let k = (c.to_string(), side as i8, bar - ims);
+                if comparable(k.2, started, last_bar, sim_last_fill, ims) {
+                    paper.insert(k, t["pnl_bps"].as_f64());
+                }
             }
         }
         if let Some(b) = ledger.books.get(&s.name) {
             for p in b.positions.values() {
-                paper.insert((p.coin.clone(), p.side, p.entry_bar_ms), None);
+                let k = (p.coin.clone(), p.side, p.entry_bar_ms - ims);
+                if comparable(k.2, started, last_bar, sim_last_fill, ims) {
+                    paper.insert(k, None);
+                }
             }
         }
         let (sk, pk): (HashSet<_>, HashSet<_>) = (sim_entries.keys().cloned().collect(), paper.keys().cloned().collect());
         let both: Vec<_> = sk.intersection(&pk).collect();
         let diffs: Vec<f64> = both.iter().filter_map(|k| Some(paper[*k]? - sim_entries[*k])).collect();
-        let _ = writeln!(md, "- Parity: {} entries in both, {} only in the simulator, {} only on paper{}.", both.len(), sk.difference(&pk).count(), pk.difference(&sk).count(), if diffs.is_empty() { String::new() } else { format!("; closed pairs differ by {:+.1} bps on average (paper minus simulator)", stat::mean(&diffs)) });
-        if sk.difference(&pk).count() + pk.difference(&sk).count() > 0 {
+        // A paper entry on a bar where the simulator already held that coin on that side is a
+        // late join, not a disagreement: a strategy promoted into an open trend starts flat, so
+        // its book can only pick up positions the simulator opened days earlier. Everything else
+        // unmatched is a real question.
+        let sim_held: Vec<(String, i8, i64, i64)> = run.trades.iter().map(|t| (panel.coins[t.coin].clone(), t.side, panel.time(t.entry_i) - ims, if matches!(t.reason, sim::Reason::End) { i64::MAX } else { panel.time(t.exit_i) })).collect();
+        let (mut late, mut only_paper): (Vec<_>, Vec<_>) = (Vec::new(), Vec::new());
+        for k in pk.difference(&sk).cloned() {
+            if sim_held.iter().any(|(c, s, from, to)| *c == k.0 && *s == k.1 && *from < k.2 && k.2 < *to) {
+                late.push(k)
+            } else {
+                only_paper.push(k)
+            }
+        }
+        let only_sim: Vec<_> = sk.difference(&pk).cloned().collect();
+        let _ = writeln!(md, "- Parity: {} entries in both, {} joined a position the simulator already held, {} only in the simulator, {} only on paper{}.", both.len(), late.len(), only_sim.len(), only_paper.len(), if diffs.is_empty() { String::new() } else { format!("; closed pairs differ by {:+.1} bps on average (paper minus simulator)", stat::mean(&diffs)) });
+        if only_sim.is_empty() && only_paper.is_empty() && both.is_empty() && late.is_empty() {
+            let _ = writeln!(md, "  No bar is comparable yet: the engine needs the close after the bar that decided a trade before the simulator can fill it.");
+        } else if !only_sim.is_empty() || !only_paper.is_empty() {
+            for k in only_sim.iter().take(5) {
+                let _ = writeln!(md, "  simulator only: {} {} decided at {}", side_word(k.1), k.0, stamp(k.2));
+            }
+            for k in only_paper.iter().take(5) {
+                let _ = writeln!(md, "  paper only: {} {} decided at {}", side_word(k.1), k.0, stamp(k.2));
+            }
             let _ = writeln!(md, "  Unmatched entries mean the engine was down at a bar close, a quote was missing, or the two disagree. Explain them before trusting the numbers above.");
+        } else if !late.is_empty() {
+            let _ = writeln!(md, "  Joined late (the paper book started flat while the simulator was already in these): {}.", late.iter().take(6).map(|k| format!("{} {}", side_word(k.1), k.0)).collect::<Vec<_>>().join(", "));
         }
         let _ = writeln!(md);
     }
@@ -177,5 +234,22 @@ mod tests {
         assert!(matches!(sequential(&crash, &c).0, Call::Kill(why) if why.contains("drawdown")));
         // A candidate whose backtest was negative can't graduate.
         assert!(matches!(sequential(&real, &card(-0.001)).0, Call::Kill(_)));
+    }
+
+    #[test]
+    fn parity_compares_only_decision_bars_both_sides_could_have() {
+        let ims = 3_600_000i64;
+        let start = 100 * ims;
+        let (last, sim_last) = (110 * ims, 120 * ims);
+        // Decided before the strategy arrived, after the engine's last bar, or on a bar the
+        // simulator has no following bar to fill on: not comparable.
+        assert!(!comparable(start - ims, Some(start), last, sim_last, ims));
+        assert!(!comparable(111 * ims, Some(start), last, sim_last, ims));
+        assert!(!comparable(120 * ims, Some(start), 130 * ims, sim_last, ims));
+        // The edges that are: the strategy's first bar, and the newest bar the simulator can fill.
+        assert!(comparable(start, Some(start), last, sim_last, ims));
+        assert!(comparable(119 * ims, Some(start), 130 * ims, sim_last, ims));
+        // A strategy with no recorded first bar compares nothing.
+        assert!(!comparable(start, None, last, sim_last, ims));
     }
 }

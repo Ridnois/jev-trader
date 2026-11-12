@@ -1,0 +1,44 @@
+# ENSEMBLE: meta-strategy that combines several families' signals
+# Each sub-strategy produces entry signals (+1/-1/0) per coin/bar.
+# The ensemble learns a weight per family on a training window, then applies
+# a weighted vote on the test window. Rebalances weights every `rebalance` bars.
+# A trade opens only when at least `min_agree` sub-families point the same way.
+family = "ensemble"
+interval = "15m"
+hypothesis = "H-E01"
+
+# Sub-families are selected with the use_* flags in [fixed]. Data-only families
+# (no Jev replay cache needed) are the default; jev_gate / jev_direction need
+# `lab jev replay` first, so they stay off here.
+
+[grid]
+# Training window for weight learning (in days)
+train_days = [30, 60]
+# Rebalance weights every N bars (24h / 48h of 15m bars)
+rebalance = [96, 192]
+# Minimum weight a family must have to be included
+min_weight = [0.1]
+# How to combine: 1=vote (weighted sign), 2=sharpe (weight by in-sample Sharpe)
+combine = [2]
+# Hold bars for the ensemble position (24h)
+hold = [96]
+# Stop in bps
+stop = [0]
+# Max concurrent positions (0 = gross cap only)
+max_positions = [0]
+# Sub-families that must agree on the side before a trade opens
+min_agree = [2, 3, 4]
+
+[fixed]
+# Exit when weighted signal flips sign
+exit_on_flip = 1
+# Shorts allowed
+shorts = 1
+# Sub-family membership (0/1). Only flagged families are combined.
+use_meanrev = 1
+use_trend = 1
+use_xs_reversal = 1
+use_funding_carry = 1
+use_hvt = 1
+use_jev_gate = 0
+use_jev_direction = 0
