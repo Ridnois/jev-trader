@@ -72,6 +72,9 @@ const VERDICTS: Record<string, { label: string; cls: string }> = {
   triggered: { label: "Triggered", cls: "border-border bg-muted text-muted-foreground" },
   proposed: { label: "Not tested yet", cls: "border-border bg-muted text-muted-foreground" },
   continue: { label: "No verdict yet", cls: "border-border bg-muted text-muted-foreground" },
+  PROMOTED: { label: "On paper", cls: "border-warn/30 bg-warn/10 text-warn" },
+  KILLED: { label: "Killed on paper", cls: "border-neg/30 bg-neg/10 text-neg" },
+  GRADUATED: { label: "Graduated on paper", cls: "border-pos/30 bg-pos/10 text-pos" },
   kill: { label: "Kill", cls: "border-neg/30 bg-neg/10 text-neg" },
   graduate: { label: "Graduate", cls: "border-pos/30 bg-pos/10 text-pos" },
 };

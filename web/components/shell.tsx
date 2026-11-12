@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, BookOpen, CandlestickChart, FlaskConical, LineChart, Newspaper, ScanSearch } from "lucide-react";
+import { Activity, BookOpen, CandlestickChart, FlaskConical, GitBranch, LineChart, Newspaper, ScanSearch } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarHeader, SidebarInset, SidebarMenu,
   SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger, useSidebar,
@@ -14,6 +14,7 @@ import { duration } from "@/lib/format";
 const NAV: { href: string; label: string; icon: typeof Activity; station: "lab" | "paper" | "news" | "jev" | null }[] = [
   { href: "/", label: "Now", icon: Activity, station: null },
   { href: "/lab", label: "Lab", icon: FlaskConical, station: "lab" },
+  { href: "/generations", label: "Generations", icon: GitBranch, station: null },
   { href: "/paper", label: "Paper run", icon: LineChart, station: "paper" },
   { href: "/catalysts", label: "News recorder", icon: Newspaper, station: "news" },
   { href: "/probes", label: "Jev tests", icon: ScanSearch, station: "jev" },

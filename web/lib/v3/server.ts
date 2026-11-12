@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import type {
-  Calibration, Candidate, Card, DayRow, EngineStatus, FamilyReport, HorizonSummary, Hypothesis, Lab, LabSummary, Live,
-  NewsEvent, ProbeReport, Quote, StrategyView, Trade,
+  Calibration, Candidate, Card, CycleReport, DayRow, EngineStatus, FamilyReport, GenNode, GenRoot, Generations, HorizonSummary,
+  Hypothesis, Lab, LabSummary, LineageEvent, Live, NewsEvent, Pairing, ProbeReport, ProposalRow, Quote, StrategyView, StudyCost,
+  Trade,
 } from "./types";
 
 /** The v3 worktree: the folder that holds data-v3/, lab-data/, strategies/ and lab.toml. */
@@ -386,4 +387,133 @@ export function getLab(): Lab {
   const lab: Lab = { families, probes, hypotheses: hypotheses(), calibrations: calibrations(), trials, trialsByStudy: [...byStudy].map(([study, n]) => ({ study, n })) };
   labCached = { at: now, lab };
   return lab;
+}
+
+// ---- the evolve loop: `lab evolve` writes lineage.jsonl and reports/evolve/(dry-)gNNN.json ----
+
+const str = (x: unknown, d = ""): string => (typeof x === "string" ? x : d);
+const num = (x: unknown, d = 0): number => (typeof x === "number" && Number.isFinite(x) ? x : d);
+const strs = (x: unknown): string[] => (Array.isArray(x) ? x.filter((v): v is string => typeof v === "string") : []);
+const arr = (x: unknown): Record<string, unknown>[] => (Array.isArray(x) ? x.filter((v) => v && typeof v === "object") : []);
+const optStr = (x: unknown): string | null => (typeof x === "string" ? x : null);
+
+function lineageEvent(r: Record<string, unknown>): LineageEvent | null {
+  if (typeof r.event !== "string" || typeof r.family !== "string") return null;
+  return {
+    at: optStr(r.at), event: r.event, family: r.family, name: str(r.name), parent: optStr(r.parent), generation: num(r.generation),
+    operator: str(r.operator), lessons: strs(r.lessons), trials: num(r.trials), verdict: optStr(r.verdict), study: str(r.study),
+    key: str(r.key), note: str(r.note),
+  };
+}
+
+function pairing(r: Record<string, unknown>): Pairing {
+  return {
+    challenger: str(r.challenger), incumbent: str(r.incumbent), incumbent_spec: str(r.incumbent_spec), days: num(r.days),
+    challenger_bps: num(r.challenger_bps), incumbent_bps: num(r.incumbent_bps), diff_bps: num(r.diff_bps), lo_bps: num(r.lo_bps),
+    hi_bps: num(r.hi_bps), corr: num(r.corr), duplicate: r.duplicate === true,
+  };
+}
+
+function cycleReport(file: string, r: Record<string, unknown>): CycleReport | null {
+  if (typeof r.generation !== "number") return null;
+  const studies: StudyCost[] = arr(r.studies).map((c) => ({
+    study: str(c.study), trials_before: num(c.trials_before), trials_after: num(c.trials_after), design_days: num(c.design_days),
+    luck_bar_before: num(c.luck_bar_before, NaN), luck_bar_after: num(c.luck_bar_after, NaN),
+  }));
+  const proposals: ProposalRow[] = arr(r.proposals).map((p) => ({
+    name: str(p.name), family: str(p.family), operator: str(p.operator), parent: optStr(p.parent), lessons: strs(p.lessons),
+    reason: str(p.reason), rule: str(p.rule), specs: num(p.specs), new_trials: num(p.new_trials), approximate: p.approximate === true,
+    verdict: optStr(p.verdict), failed: strs(p.failed), pick: optStr(p.pick),
+  }));
+  return {
+    file, generation: r.generation, dry_run: r.dry_run === true || file.startsWith("dry-"), at: optStr(r.at),
+    lessons_file: str(r.lessons_file), lessons_total: num(r.lessons_total), lessons_usable: num(r.lessons_usable), studies, proposals,
+    pairings: arr(r.pairings).map(pairing), forward: arr(r.forward).map(pairing), messages: strs(r.messages),
+    promotable: strs(r.promotable), lockbox_openings: num(r.lockbox_openings),
+  };
+}
+
+function cycleReports(): CycleReport[] {
+  const dir = path.join(LAB, "reports", "evolve");
+  let files: string[] = [];
+  try {
+    // The dry-gNNN/ folders beside them hold would-be family files, not reports.
+    files = fs.readdirSync(dir).filter((f) => /^(dry-)?g\d+\.json$/.test(f));
+  } catch {
+    /* the loop never ran */
+  }
+  const out: CycleReport[] = [];
+  for (const f of files) {
+    const d = readJson<Record<string, unknown>>(path.join(dir, f));
+    const r = d && typeof d === "object" ? cycleReport(f, d) : null;
+    if (r) out.push(r);
+  }
+  const t = (r: CycleReport) => (r.at ? Date.parse(r.at) || 0 : 0);
+  return out.sort((a, b) => t(b) - t(a) || b.generation - a.generation || Number(a.dry_run) - Number(b.dry_run));
+}
+
+let gensCached: { at: number; gens: Generations } | null = null;
+
+/** The lineage as a tree, the same reading as `lab lineage`, plus every cycle report. */
+export function getGenerations(): Generations {
+  const now = Date.now();
+  if (gensCached && now - gensCached.at < 5000) return gensCached.gens;
+  const events = readJsonl<Record<string, unknown>>(path.join(LAB, "lineage.jsonl"))
+    .map((r) => (r && typeof r === "object" ? lineageEvent(r) : null))
+    .filter((e): e is LineageEvent => e !== null);
+  const last = new Map<string, LineageEvent>();
+  const failed = new Map<string, string>();
+  const tested = new Map<string, string>();
+  const charged = new Map<string, number>();
+  const loopByStudy = new Map<string, number>();
+  for (const e of events) {
+    last.set(e.family, e);
+    if (e.event === "tested") {
+      failed.set(e.family, e.note);
+      if (e.verdict) tested.set(e.family, e.verdict);
+    }
+    charged.set(e.family, (charged.get(e.family) ?? 0) + e.trials);
+    if (e.trials > 0) loopByStudy.set(e.study, (loopByStudy.get(e.study) ?? 0) + e.trials);
+  }
+  const proposed = events.filter((e) => e.event === "proposed");
+  const names: Record<string, string> = {};
+  for (const p of proposed) if (p.name) names[p.family] = p.name;
+  const known = new Set(proposed.map((p) => p.family));
+  const kids = new Map<string, LineageEvent[]>();
+  for (const p of proposed) {
+    const k = p.parent ?? "";
+    kids.set(k, [...(kids.get(k) ?? []), p]);
+  }
+  const state = (family: string): string => {
+    const e = last.get(family);
+    if (!e || e.event === "proposed") return "proposed";
+    if (e.event === "tested") return e.verdict ?? "proposed";
+    return e.event.toUpperCase();
+  };
+  const build = (parent: string, depth: number, seen: Set<string>): GenNode[] =>
+    (kids.get(parent) ?? []).filter((p) => !seen.has(p.family)).map((p) => {
+      const s = state(p.family);
+      return {
+        family: p.family, name: p.name || p.family, generation: p.generation, operator: p.operator, study: p.study, lessons: p.lessons,
+        state: s, failed: failed.get(p.family) ?? "", trials: charged.get(p.family) ?? 0,
+        children: depth < 32 ? build(p.family, depth + 1, new Set([...seen, p.family])) : [],
+      };
+    });
+  const roots: GenRoot[] = [...kids.keys()].filter((k) => !known.has(k)).sort().map((family) => ({ family, children: build(family, 1, new Set()) }));
+  const verdicts: Record<string, number> = {};
+  for (const v of tested.values()) verdicts[v] = (verdicts[v] ?? 0) + 1;
+  const ledger = new Map(getLab().trialsByStudy.map((s) => [s.study, s.n]));
+  const studies = new Set([...loopByStudy.keys()]);
+  const gens: Generations = {
+    roots,
+    proposed: proposed.length,
+    verdicts,
+    generations: events.reduce((m, e) => Math.max(m, e.generation), 0),
+    trials: events.reduce((n, e) => n + e.trials, 0),
+    byStudy: [...studies].sort().map((study) => ({ study, loop: loopByStudy.get(study) ?? 0, ledger: ledger.get(study) ?? 0 })),
+    names,
+    reports: cycleReports(),
+  };
+  gensCached = { at: now, gens };
+  return gens;
 }

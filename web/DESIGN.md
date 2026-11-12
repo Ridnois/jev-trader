@@ -56,7 +56,7 @@ Examples:
 
 ## Layout
 
-- 240px sidebar: wordmark, six destinations, How this works, engine footer with venue, money and read-only.
+- 240px sidebar: wordmark, seven destinations, How this works, engine footer with venue, money and read-only.
 - 56px header: page title, engine state and the time of the last status write.
 - Page body max 1320px, 32px gutters on desktop, 16px on phones.
 - No second navigation strip. The four stations are a footer index (`StationIndex`) on station pages, and the full four-column lifecycle on Now and How this works. A duplicate strip was tried and removed: it restated the sidebar at the cost of 44px and became a 1002px scroller on a phone.
@@ -66,6 +66,10 @@ Examples:
 ## Home (Now)
 
 The home is a console, not a reading page. One answer line, then the four stations as an instrument rail: a mono value, its unit, an evidence bar where a denominator exists, and one note. Below it the paper book with a gauge per strategy, three book figures, four latest headlines and six prices. The explanation lives on How this works and on each station page; the home carries no definitions, no lede and no station index. Every rail cell is the link to its station. The sidebar is navigation only; station state lives in the rail, not in nav dots.
+
+## Generations
+
+`/generations` is the evolve loop's record, read from `lab-data/lineage.jsonl` and `lab-data/reports/evolve/(dry-)gNNN.json`. The state line counts generated families that passed; then the lineage tree (hand-written roots, generated descendants, newest state and trials charged), trials per study, and one panel per cycle report, newest first. Dry runs carry a blue Dry run tag and say nothing was simulated or charged. In-sample and paper comparisons are neutral text, never coloured, because neither is evidence. With no lineage and no report it says so and names `jev-trader lab evolve --dry-run`.
 
 ## Motion
 

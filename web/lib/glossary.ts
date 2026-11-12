@@ -200,6 +200,22 @@ const RECORDS = {
     good: "Above 0. 0 is no better than the base rate.",
     misreading: "Calibration and skill are different; a calibrated answer can still be useless.",
   },
+  generation: {
+    term: "Generation",
+    meaning: "One run of lab evolve: the families it proposed from what earlier verdicts taught, judged together by the same gate.",
+    misreading: "A later generation is not a better one. Each one charges trials and raises the bar for the next.",
+  },
+  operator: {
+    term: "Operator",
+    meaning: "How a generated family was made from its parent: restrict (long only or shorter holds), shrink (fix settings that made no difference), recombine (two entries must agree), condition (a market-state filter), invert (the opposite side) or explore (an untried pairing).",
+    misreading: "The operator names the change, not its effect. A child is judged from scratch, never on its parent's record.",
+  },
+  "luck-bar": {
+    term: "Luck bar",
+    meaning: "The annualised Sharpe the best of that many no-edge rules would show over the design window, counting every trial as independent.",
+    good: "Rising slowly. Every trial raises it, so each new family has to beat a higher bar than the last one did.",
+    misreading: "It is the cost of searching, not a result any family reached. It is not the gate's own bar either: the gate discounts correlated trials.",
+  },
   "evidence-days": {
     term: "Evidence days",
     meaning: "Distinct UTC days that contain at least one measured outcome.",

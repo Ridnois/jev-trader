@@ -266,3 +266,124 @@ export type Lab = {
   trials: number;
   trialsByStudy: { study: string; n: number }[];
 };
+
+// ---- the evolve loop: `lab-data/lineage.jsonl` and `lab-data/reports/evolve/*.json` ----
+
+/** One row of `lab-data/lineage.jsonl` (`src/lab/lineage.rs` `Event`). */
+export type LineageEvent = {
+  at: string | null;
+  event: "proposed" | "tested" | "promoted" | "killed" | "graduated" | string;
+  /** The family: the rule id (`c…`) for a composed family. */
+  family: string;
+  /** Readable name, such as `g0007`. */
+  name: string;
+  parent: string | null;
+  generation: number;
+  operator: string;
+  lessons: string[];
+  /** New specs charged to the ledger by this event; only `tested` rows carry any. */
+  trials: number;
+  verdict: string | null;
+  study: string;
+  key: string;
+  note: string;
+};
+
+/** A proposed family in the lineage tree, with its newest state. */
+export type GenNode = {
+  family: string;
+  name: string;
+  generation: number;
+  operator: string;
+  study: string;
+  lessons: string[];
+  /** A gate verdict (`REJECT`, …), `PROMOTED`, `KILLED`, `GRADUATED`, or `proposed` when not tested yet. */
+  state: string;
+  /** Failed checks from the `tested` row, comma separated. */
+  failed: string;
+  trials: number;
+  children: GenNode[];
+};
+
+/** A root of the tree: a hand-written family (or none) that generated families descend from. */
+export type GenRoot = { family: string; children: GenNode[] };
+
+/** `StudyCost` in `src/lab/evolve.rs`. */
+export type StudyCost = {
+  study: string;
+  trials_before: number;
+  trials_after: number;
+  design_days: number;
+  luck_bar_before: number;
+  luck_bar_after: number;
+};
+
+/** `ProposalRow` in `src/lab/evolve.rs`. */
+export type ProposalRow = {
+  name: string;
+  family: string;
+  operator: string;
+  parent: string | null;
+  lessons: string[];
+  reason: string;
+  rule: string;
+  specs: number;
+  new_trials: number;
+  approximate: boolean;
+  verdict: string | null;
+  failed: string[];
+  pick: string | null;
+};
+
+/** `Pairing` in `src/lab/compare.rs`: a challenger against one incumbent on common days, bps/day. */
+export type Pairing = {
+  challenger: string;
+  incumbent: string;
+  incumbent_spec: string;
+  days: number;
+  challenger_bps: number;
+  incumbent_bps: number;
+  diff_bps: number;
+  lo_bps: number;
+  hi_bps: number;
+  corr: number;
+  duplicate: boolean;
+};
+
+/** `CycleReport` in `src/lab/evolve.rs`, one per `lab evolve` run. */
+export type CycleReport = {
+  /** `g001.json` or `dry-g001.json`. */
+  file: string;
+  generation: number;
+  dry_run: boolean;
+  at: string | null;
+  lessons_file: string;
+  lessons_total: number;
+  lessons_usable: number;
+  studies: StudyCost[];
+  proposals: ProposalRow[];
+  pairings: Pairing[];
+  /** Child against parent on paper, where both run. */
+  forward: Pairing[];
+  messages: string[];
+  promotable: string[];
+  lockbox_openings: number;
+};
+
+export type Generations = {
+  roots: GenRoot[];
+  /** Proposed families in the lineage. */
+  proposed: number;
+  /** Judged families by their gate verdict (the newest `tested` row of each). */
+  verdicts: Record<string, number>;
+  /** The highest generation in the lineage. */
+  generations: number;
+  /** Trials charged by the loop (every lineage row). */
+  trials: number;
+  /** Per study: trials the loop charged, and every trial on the ledger. */
+  byStudy: { study: string; loop: number; ledger: number }[];
+  /** Family id or root name to its readable name (`c…` → `g0001`). */
+  names: Record<string, string>;
+  /** Newest first, dry runs included. */
+  reports: CycleReport[];
+};
