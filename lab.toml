@@ -69,6 +69,7 @@ data_dir = "data-v3"
 strategies_dir = "strategies" # written by `lab promote`
 record_ticks = true           # 1-second rows per coin: about 140 MB a day for 20 coins
 tick_days_kept = 14           # older tick files are deleted at UTC midnight (about 2 GB at most)
+capital_per_strategy = 5000.0 # paper capital of each new book; existing books keep theirs
 live_probes = []              # e.g. ["probes/direction.toml"]: asked live each bar, costs Jev tokens
 
 [trade.catalyst]              # Jev catalyst scalper, record mode: headlines are scored and marked out, nothing is ordered

@@ -211,12 +211,16 @@ pub struct TradeCfg {
     /// Probes asked live at each bar close and cached like a replay. Each costs Jev
     /// tokens on every bar it applies to; empty = none.
     pub live_probes: Vec<PathBuf>,
+    /// Paper capital each new strategy's book is given. Fixed, so adding a challenger
+    /// never changes an incumbent's sizing or its sequential test. Existing books keep
+    /// the capital they were opened with. 0 = the old rule (lab capital ÷ strategies).
+    pub capital_per_strategy: f64,
     pub catalyst: CatalystCfg,
 }
 
 impl Default for TradeCfg {
     fn default() -> Self {
-        Self { data_dir: "data-v3".into(), strategies_dir: "strategies".into(), record_ticks: true, tick_days_kept: 14, live_probes: Vec::new(), catalyst: CatalystCfg::default() }
+        Self { data_dir: "data-v3".into(), strategies_dir: "strategies".into(), record_ticks: true, tick_days_kept: 14, live_probes: Vec::new(), capital_per_strategy: 5_000.0, catalyst: CatalystCfg::default() }
     }
 }
 
@@ -975,6 +979,9 @@ fn promote(lab: &LabConfig, family: &Path, candidate: bool, spec_id: Option<&str
         tracing::warn!("{} already exists and is being replaced", out.display());
     }
     crate::status::write_atomic(&out, &serde_json::to_vec_pretty(&promoted)?)?;
+    if fam.rule.is_some() {
+        lineage::append(&lab.lineage_path(), &lineage::Event { at: Some(chrono::Utc::now()), event: "promoted".into(), family: fam.family.clone(), name: fam.label().into(), parent: fam.parent.clone(), generation: fam.generation.unwrap_or(0), study: study.clone(), note: format!("{} as {name}: `{}`", promoted.status, promoted.card.spec.id()), ..Default::default() });
+    }
     println!("{name} → {} ({}): `{}`", out.display(), promoted.status, promoted.card.spec.id());
     Ok(())
 }

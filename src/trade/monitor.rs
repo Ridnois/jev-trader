@@ -205,10 +205,29 @@ pub fn execution(trades: &[serde_json::Value], lab: &LabConfig) -> Execution {
 pub fn run(lab: &LabConfig) -> Result<()> {
     let (report, md) = build(lab)?;
     let paths = Paths::new(&lab.trade.data_dir);
+    record_calls(&lab.lineage_path(), &report);
     crate::status::write_atomic(&paths.monitor, md.as_bytes())?;
     crate::status::write_atomic(&paths.monitor.with_extension("json"), &serde_json::to_vec_pretty(&report)?)?;
     println!("{md}");
     Ok(())
+}
+
+/// Writes each strategy's KILL or GRADUATE to the lab's lineage, once per strategy and
+/// call. Nothing is stopped or started: the lineage only remembers it.
+pub fn record_calls(path: &std::path::Path, report: &Report) {
+    let known = crate::lab::lineage::load(path);
+    for s in &report.strategies {
+        let event = match s.call.as_str() {
+            "KILL" => "killed",
+            "GRADUATE" => "graduated",
+            _ => continue,
+        };
+        let family = s.spec.split(':').next().unwrap_or("").to_string();
+        if known.iter().any(|e| e.event == event && e.name == s.name && e.family == family) {
+            continue;
+        }
+        crate::lab::lineage::append(path, &crate::lab::lineage::Event { at: report.generated, event: event.into(), family, name: s.name.clone(), parent: s.parent.clone(), note: format!("after {} paper days: {}", s.paper_days, s.call_reason), ..Default::default() });
+    }
 }
 
 /// The monitor's verdicts, as a typed report and as the page `monitor.md` shows.
@@ -354,6 +373,15 @@ pub fn build(lab: &LabConfig) -> Result<(Report, String)> {
         }
         let _ = writeln!(md);
     }
+    // Children next to their parents, on the days both were up.
+    let pairs = crate::lab::compare::forward_pairs(&daily, &strategies, lab);
+    if !pairs.is_empty() {
+        let _ = writeln!(md, "## Parent and child on paper\n\n| Child | Parent | Days | Child | Parent | Difference [95%] |\n|---|---|---|---|---|---|");
+        for p in &pairs {
+            let _ = writeln!(md, "| {} | {} | {} | {:+.1} | {:+.1} | {:+.1} [{:+.1}, {:+.1}] |", p.challenger, p.incumbent, p.days, p.challenger_bps, p.incumbent_bps, p.diff_bps, p.lo_bps, p.hi_bps);
+        }
+        let _ = writeln!(md, "\nbps/day on paper. Each keeps its own card and its own sequential test: the child does not inherit the parent's days.\n");
+    }
     // The catalyst recorder: forward evidence only.
     let marks: Vec<super::catalyst::Markout> = crate::status::read_jsonl(&paths.catalyst_markouts);
     let _ = writeln!(md, "## Jev catalyst scalper (record mode, no orders)\n");
@@ -398,6 +426,22 @@ mod tests {
         assert!(matches!(sequential(&crash, &c).0, Call::Kill(why) if why.contains("drawdown")));
         // A candidate whose backtest was negative can't graduate.
         assert!(matches!(sequential(&real, &card(-0.001)).0, Call::Kill(_)));
+    }
+
+    #[test]
+    fn kills_are_remembered_once() {
+        let dir = std::env::temp_dir().join(format!("jev-monitor-lineage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("lineage.jsonl");
+        let mut r = Report::default();
+        r.strategies.push(StrategyReport { name: "g0007".into(), spec: "c4628412b4bd4:n=96".into(), call: "KILL".into(), call_reason: "drawdown".into(), ..Default::default() });
+        r.strategies.push(StrategyReport { name: "trend".into(), spec: "trend:n=384".into(), call: "CONTINUE".into(), ..Default::default() });
+        record_calls(&path, &r);
+        record_calls(&path, &r);
+        let ev = crate::lab::lineage::load(&path);
+        assert_eq!(ev.len(), 1);
+        assert_eq!((ev[0].event.as_str(), ev[0].family.as_str(), ev[0].name.as_str()), ("killed", "c4628412b4bd4", "g0007"));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

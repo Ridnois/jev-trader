@@ -59,6 +59,14 @@ pub struct Loaded {
     pub promoted: Promoted,
 }
 
+/// Opens a book for each strategy that has none. Books that exist keep their capital,
+/// so adding a strategy never resizes the others.
+pub fn open_books(ledger: &mut Ledger, names: &[String], capital: f64) {
+    for n in names {
+        ledger.books.entry(n.clone()).or_insert_with(|| Book::new(capital));
+    }
+}
+
 pub fn load_strategies(dir: &Path) -> Result<Vec<Loaded>> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -171,12 +179,13 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
     let paths = Paths::new(&tc.data_dir);
     let coins = lab.universe.coins.clone();
     let ar = lab.archive();
-    let share = lab.capital / strategies.len().max(1) as f64;
+    let share = if tc.capital_per_strategy > 0.0 { tc.capital_per_strategy } else { lab.capital / strategies.len().max(1) as f64 };
+    // Books size against their own capital; the config's capital is not read by them.
     let cfg = SimCfg::new(share, lab.costs.clone(), lab.sizing.clone());
     let mut ledger: Ledger = crate::status::read_json(&paths.ledger).unwrap_or_default();
     ledger.started.get_or_insert_with(Utc::now);
+    open_books(&mut ledger, &strategies.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), share);
     for s in &strategies {
-        ledger.books.entry(s.name.clone()).or_insert_with(|| Book::new(share));
         info!("strategy {} ({}): {} on {} bars · expects {:+.2} bps/day", s.name, s.promoted.status, s.promoted.card.spec.id(), s.promoted.card.interval, s.promoted.card.mu_daily * 1e4);
     }
     let live_probes: Vec<probe::Probe> = tc.live_probes.iter().map(|p| probe::Probe::load(p)).collect::<Result<_>>()?;
@@ -439,5 +448,25 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
         if once && now_ms - started_ms > 180_000 {
             bail!("--once: no bar could be processed in 3 minutes (feed or candles unavailable)");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A third strategy joins at the fixed paper capital; the first two keep theirs.
+    #[test]
+    fn adding_a_strategy_leaves_existing_books_alone() {
+        let mut ledger = Ledger::default();
+        open_books(&mut ledger, &["trend".into(), "trend_fast".into()], 5_000.0);
+        ledger.books.get_mut("trend").unwrap().realized = 12.0;
+        open_books(&mut ledger, &["trend".into(), "trend_fast".into(), "g0007".into()], 5_000.0);
+        assert_eq!(ledger.books.len(), 3);
+        assert!(ledger.books.values().all(|b| b.capital == 5_000.0));
+        assert_eq!(ledger.books["trend"].realized, 12.0);
+        // Under the old rule the newcomer would have been sized at a third of the lab's capital.
+        open_books(&mut ledger, &["x".into()], 10_000.0 / 4.0);
+        assert_eq!(ledger.books["trend"].capital, 5_000.0);
     }
 }
