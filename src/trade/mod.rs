@@ -65,6 +65,7 @@ pub fn load_strategies(dir: &Path) -> Result<Vec<Loaded>> {
         let path = e.path();
         if path.extension().is_some_and(|x| x == "json") {
             let promoted: Promoted = serde_json::from_slice(&std::fs::read(&path)?).with_context(|| format!("parsing {}", path.display()))?;
+            promoted.register().with_context(|| format!("{}", path.display()))?;
             out.push(Loaded { name: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), promoted });
         }
     }

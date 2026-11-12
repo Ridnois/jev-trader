@@ -11,6 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use super::compose::{self, Rule};
 use super::panel::Panel;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,8 +42,11 @@ impl Spec {
 
 /// A family file (`families/<name>.toml`): the rule, the bar size, and the grid the
 /// search may try. The grid is the declared search space; nothing outside it is tested.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Family {
+    /// The rule's name. For a composed family this is the rule id (`c…`), filled in
+    /// at load when the file leaves it out.
+    #[serde(default)]
     pub family: String,
     pub interval: String,
     /// Entry in hypotheses.toml this search belongs to.
@@ -58,21 +62,68 @@ pub struct Family {
     pub grid: BTreeMap<String, Vec<f64>>,
     #[serde(default)]
     pub fixed: BTreeMap<String, f64>,
+    /// A composed rule (`compose.rs`) instead of a hand-written one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<Rule>,
+    /// Lineage of a generated family: a readable name (`g0007`), the family it was
+    /// derived from, the operator and lessons that produced it, and why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lessons: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 impl Family {
     pub fn load(path: &Path) -> Result<Family> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let f: Family = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        for (k, v) in &f.grid {
+        Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    /// Parses and checks a family file; a composed rule is registered so `plan` finds it.
+    pub fn parse(text: &str) -> Result<Family> {
+        let mut f: Family = toml::from_str(text)?;
+        f.check()?;
+        Ok(f)
+    }
+
+    pub fn check(&mut self) -> Result<()> {
+        for (k, v) in &self.grid {
             if v.is_empty() {
-                bail!("{}: grid `{k}` is empty", path.display());
+                bail!("grid `{k}` is empty");
             }
-            if f.fixed.contains_key(k) {
-                bail!("{}: `{k}` is both in [grid] and [fixed]", path.display());
+            if self.fixed.contains_key(k) {
+                bail!("`{k}` is both in [grid] and [fixed]");
             }
         }
-        Ok(f)
+        if let Some(rule) = &self.rule {
+            rule.validate()?;
+            let id = rule.id();
+            if !self.family.is_empty() && self.family != id {
+                bail!("a composed family is named by its rule id: `family` must be `{id}` or left out (got `{}`)", self.family);
+            }
+            for r in rule.refs() {
+                if !self.grid.contains_key(&r) && !self.fixed.contains_key(&r) {
+                    bail!("the rule refers to `${r}`, which is in neither [grid] nor [fixed]");
+                }
+            }
+            self.family = compose::register(rule);
+        } else if self.family.is_empty() {
+            bail!("`family` is missing");
+        }
+        Ok(())
+    }
+
+    /// What a person calls it: the generated name, else the family.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.family)
     }
 
     /// Every combination of the grid, in a fixed order (last key varies fastest).
@@ -154,11 +205,15 @@ pub fn plan(spec: &Spec, p: &Panel, aux: &Aux) -> Result<Plan> {
         "jev_direction" => jev_direction(spec, p, aux),
         "hvt" => hvt(spec, p),
         "ensemble" => ensemble(spec, p, aux),
-        other => bail!("unknown strategy family `{other}` (known: {})", FAMILIES.join(", ")),
+        other => match compose::lookup(other) {
+            Some(rule) => compose::plan(&rule, spec, p),
+            None if compose::is_composed_id(other) => bail!("composed rule `{other}` is not loaded: load its family file or the promoted strategy that embeds it"),
+            None => bail!("unknown strategy family `{other}` (known: {}, or a composed rule)", FAMILIES.join(", ")),
+        },
     }
 }
 
-fn empty(p: &Panel) -> Vec<Vec<i8>> {
+pub(crate) fn empty(p: &Panel) -> Vec<Vec<i8>> {
     vec![vec![0i8; p.n]; p.coins.len()]
 }
 
@@ -244,7 +299,7 @@ fn meanrev(spec: &Spec, p: &Panel) -> Result<Plan> {
 }
 
 /// Rolling max of the previous `n` values (not including the current one).
-fn prev_extreme(x: &[f64], n: usize, max: bool) -> Vec<f64> {
+pub(crate) fn prev_extreme(x: &[f64], n: usize, max: bool) -> Vec<f64> {
     let mut out = vec![f64::NAN; x.len()];
     let mut dq: VecDeque<usize> = VecDeque::new();
     let mut finite = 0usize;
@@ -310,7 +365,7 @@ fn trend(spec: &Spec, p: &Panel) -> Result<Plan> {
 
 /// True on bars whose close lands on a multiple of `every` bars since the epoch, so
 /// rebalance times don't depend on where a panel starts.
-fn rebalance_bar(p: &Panel, i: usize, every: usize) -> bool {
+pub(crate) fn rebalance_bar(p: &Panel, i: usize, every: usize) -> bool {
     ((p.time(i) / p.interval_ms) + 1).rem_euclid(every as i64) == 0
 }
 
@@ -916,7 +971,7 @@ fn ensemble(spec: &Spec, p: &Panel, aux: &Aux) -> Result<Plan> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::panel::testing::*;
     use super::*;
     use crate::scalp::features::revert_z;
@@ -1061,23 +1116,59 @@ mod tests {
         assert!(plan(&Spec::new("jev_gate", &[("n", 96.0), ("z", 2.0), ("hold", 24.0), ("min_p", 0.6)]), &p, &Aux::default()).is_err());
     }
 
+    /// Every family file on disk (`families/` and `families/gen/`), hand-written or
+    /// composed. Families that read Jev answers are left out: they need a replay cache.
+    pub(crate) fn repo_families() -> Vec<(std::path::PathBuf, Family)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("families");
+        let mut out = Vec::new();
+        for dir in [root.clone(), root.join("gen")] {
+            let mut paths: Vec<_> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "toml")).collect();
+            paths.sort();
+            for path in paths {
+                let fam = Family::load(&path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+                out.push((path, fam));
+            }
+        }
+        out
+    }
+
     /// The contract every family must keep: signals up to a bar don't change when the
-    /// future is cut off. A rule that peeks ahead fails here.
+    /// future is cut off. A rule that peeks ahead fails here. It runs over every family
+    /// file, so a generated family is covered the moment it is written.
     #[test]
     fn plans_do_not_look_ahead() {
         let mut full = random_panel(42, 6, 24, "1h");
         full.funding = (0..6).map(|c| (0..full.n as i64).map(|i| (i * 3_600_000, 0.00001 * ((c as f64 + 1.0) * (i as f64 / 50.0).sin()))).collect()).collect();
-        let specs = [
+        // Volume that moves, so volume rules get to fire.
+        let mut rng = crate::stats::Rng::new(7);
+        for v in full.volume.iter_mut().flatten() {
+            *v *= (0.6 * rng.normal()).exp();
+        }
+        full.rederive(NO_RULE);
+        let mut specs = vec![
             Spec::new("meanrev", &[("n", 48.0), ("z", 1.5), ("hold", 12.0)]),
             Spec::new("meanrev", &[("n", 48.0), ("z", 1.5), ("hold", 12.0), ("resid", 1.0), ("exit_mean", 1.0)]),
             Spec::new("trend", &[("n", 48.0), ("out_frac", 0.5)]),
             Spec::new("xs_reversal", &[("look", 24.0), ("hold", 6.0), ("k", 2.0)]),
             Spec::new("funding_carry", &[("look", 48.0), ("hold", 8.0), ("k", 2.0)]),
         ];
+        // A few specs spread over each family's grid.
+        let mut families = Vec::new();
+        for (path, fam) in repo_families() {
+            if fam.probe.is_some() {
+                continue;
+            }
+            let all = fam.specs();
+            let pick: Vec<Spec> = (0..4).map(|k| all[k * (all.len() - 1) / 3].clone()).collect();
+            families.push((path.display().to_string(), specs.len(), pick.len()));
+            specs.extend(pick);
+        }
+        assert!(families.len() >= 4);
+        let mut traded = vec![false; specs.len()];
         for cut in [24 * 9 + 7, 24 * 17] {
             let mut head = full.head(cut);
             head.rederive(NO_RULE);
-            for s in &specs {
+            for (k, s) in specs.iter().enumerate() {
                 let (a, b) = (plan(s, &full, &Aux::default()).unwrap(), plan(s, &head, &Aux::default()).unwrap());
                 for c in 0..6 {
                     assert_eq!(&a.entry[c][..cut], &b.entry[c][..], "{} entry, coin {c}, cut {cut}", s.id());
@@ -1085,8 +1176,15 @@ mod tests {
                         assert_eq!(&a.exit[c][..cut], &b.exit[c][..], "{} exit, coin {c}", s.id());
                     }
                 }
-                assert!(a.entry.iter().flatten().any(|e| *e != 0), "{} never trades in the test panel", s.id());
+                traded[k] |= a.entry.iter().flatten().any(|e| *e != 0);
             }
+        }
+        for (k, s) in specs.iter().enumerate().take(5) {
+            assert!(traded[k], "{} never trades in the test panel", s.id());
+        }
+        // A family whose sampled specs never trade here was not really checked.
+        for (path, from, n) in families {
+            assert!(traded[from..from + n].iter().any(|t| *t), "{path}: no sampled spec trades in the test panel, so look-ahead was not checked");
         }
     }
 }

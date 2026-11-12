@@ -9,6 +9,7 @@
 //! - `promote`   hand a validated spec (or a labelled candidate) to the trader
 //! - `report`    list the verdicts so far
 
+pub mod compose;
 pub mod data;
 pub mod gate;
 pub mod panel;
@@ -762,6 +763,32 @@ pub struct Promoted {
     pub status: String,
     pub hypothesis: String,
     pub card: gate::Card,
+    /// A composed rule travels with the strategy, so the trader never depends on a
+    /// family file that may change later. Its id must equal `card.spec.family`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<compose::Rule>,
+    /// Readable name of a generated family (`g0007`) and the family it was derived from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+}
+
+impl Promoted {
+    /// Registers an embedded rule after checking it is the one the spec names.
+    pub fn register(&self) -> Result<()> {
+        match &self.rule {
+            Some(rule) => {
+                let id = compose::register(rule);
+                if id != self.card.spec.family {
+                    bail!("embedded rule hashes to {id}, but the spec names {}: the file was edited by hand", self.card.spec.family);
+                }
+                Ok(())
+            }
+            None if compose::is_composed_id(&self.card.spec.family) && compose::lookup(&self.card.spec.family).is_none() => bail!("{} is a composed rule but the file does not embed it", self.card.spec.family),
+            None => Ok(()),
+        }
+    }
 }
 
 fn promote(lab: &LabConfig, family: &Path, candidate: bool, spec_id: Option<&str>, as_name: Option<&str>) -> Result<()> {
@@ -798,7 +825,7 @@ fn promote(lab: &LabConfig, family: &Path, candidate: bool, spec_id: Option<&str
     }
     let is_validated_pick = verdict == "PROMOTE_TO_PAPER" && chosen.is_none() && pick.as_ref().is_some_and(|p| p.id() == spec.id());
     let promoted = if is_validated_pick {
-        Promoted { status: "validated".into(), hypothesis: fam.hypothesis.clone(), card: serde_json::from_value(ev["card"].clone()).context("verdict file has no prediction card")? }
+        Promoted { status: "validated".into(), hypothesis: fam.hypothesis.clone(), card: serde_json::from_value(ev["card"].clone()).context("verdict file has no prediction card")?, rule: fam.rule.clone(), label: fam.name.clone(), parent: fam.parent.clone() }
     } else if candidate {
         // Not validated: the card is built from the design window so the monitor can
         // still say when paper results fall outside what the backtest claimed.
@@ -816,6 +843,9 @@ fn promote(lab: &LabConfig, family: &Path, candidate: bool, spec_id: Option<&str
             status: "candidate".into(),
             hypothesis: fam.hypothesis.clone(),
             card: gate::Card { spec, interval: fam.interval.clone(), mu_daily: mu, sd_daily: sdv, alpha: g.paper_alpha, beta: g.paper_beta, days_if_real: d1, days_if_none: d0, dd99: [dd(30), dd(60), dd(90)], issued: chrono::Utc::now(), study: study.clone() },
+            rule: fam.rule.clone(),
+            label: fam.name.clone(),
+            parent: fam.parent.clone(),
         }
     } else if chosen.is_some() {
         bail!("{} is not the validated pick on {study} ({verdict}). Use --candidate to paper-trade it anyway, labelled as unproven.", spec.id())
@@ -853,9 +883,8 @@ mod tests {
         assert!(lab.universe.coins.len() >= 8);
         assert!(lab.gate.rc_p_pass <= lab.gate.rc_p_fatal && lab.gate.dsr_fatal <= lab.gate.dsr_pass);
         let mut n = 0;
-        for f in std::fs::read_dir(root.join("families")).unwrap().flatten() {
-            let fam = Family::load(&f.path()).unwrap();
-            assert!(strategy::FAMILIES.contains(&fam.family.as_str()), "{}", fam.family);
+        for (_, fam) in strategy::tests::repo_families() {
+            assert!(strategy::FAMILIES.contains(&fam.family.as_str()) || fam.rule.is_some(), "{}", fam.family);
             assert!(crate::market::interval_ms(&fam.interval).is_some());
             let specs = fam.specs();
             assert!(!specs.is_empty() && specs.len() <= 600, "{}: {} specs", fam.family, specs.len());

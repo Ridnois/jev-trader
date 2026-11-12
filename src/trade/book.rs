@@ -301,6 +301,17 @@ mod tests {
         agree(&Spec::new("xs_reversal", &[("look", 12.0), ("hold", 6.0), ("k", 2.0)]), 14);
     }
 
+    /// A composed rule goes through the same book: a fade with a volume filter, a
+    /// feature exit and the opposite-signal exit, and a clocked cross-sectional rule.
+    #[test]
+    fn book_and_simulator_agree_on_composed_rules() {
+        use crate::lab::compose::{self, Rule};
+        let fade: Rule = toml::from_str("long = { feature = \"z\", n = \"$n\", op = \"<=\", level = \"$z*-1\" }\nexit = { feature = \"z\", n = \"$n\", op = \">=\", level = 0.0 }\nexit_opposite = true\n").unwrap();
+        agree(&Spec::new(&compose::register(&fade), &[("n", 24.0), ("z", 1.5), ("hold", 12.0), ("stop", 400.0)]), 15);
+        let xs: Rule = toml::from_str("long = { feature = \"xs_ret\", n = 12, op = \"<=\", level = -0.5 }\nevery = 6\nextend = true\n").unwrap();
+        agree(&Spec::new(&compose::register(&xs), &[("hold", 6.0)]), 16);
+    }
+
     #[test]
     fn live_stop_fills_at_the_touched_side() {
         let mut book = Book::new(10_000.0);
