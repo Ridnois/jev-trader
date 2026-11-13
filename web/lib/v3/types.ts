@@ -152,6 +152,10 @@ export type Trade = {
 
 export type LabSummary = {
   families: number;
+  /** Of `families`, how many the evolve loop generated. */
+  generated: number;
+  /** The family that failed the fewest checks, and the first check it fell short on. */
+  closest: { name: string; generation: number | null; failed: number; check: string; value: string; need: string } | null;
   promoted: number;
   lastJudged: string | null;
   lockboxSealed: boolean;
@@ -224,6 +228,10 @@ export type FamilyReport = {
   notes: string[];
   /** When the verdict file was written, ISO. */
   judged: string;
+  /** Screen name for a generated family (`g0045`); hand-written families use their family name. */
+  name?: string;
+  /** Generation number, for a family the evolve loop proposed. */
+  generation?: number;
 };
 
 export type ProbeQuestion = {
@@ -258,8 +266,29 @@ export type Hypothesis = { id: string; statement: string; status: string; result
 
 export type Calibration = { title: string; rows: { outcome: string; panels: number; share: string }[] };
 
+/** One `calibration-evolve-*.md`: the evolve loop run on synthetic panels with a known answer. */
+export type LoopCalibration = {
+  file: string;
+  seed: string;
+  interval: string;
+  panels: number;
+  generations: number;
+  edge: number;
+  /** Ran under `lab evolve --auto` stop rules (file name has `auto`). */
+  auto: boolean;
+  anyPromoted: number;
+  seedPromoted: number;
+  loopOnly: number;
+};
+
 export type Lab = {
+  /** Hand-written families (one verdict per family and study). */
   families: FamilyReport[];
+  /** Families the evolve loop generated and the gate judged. */
+  generated: FamilyReport[];
+  /** Trials the evolve loop charged (lineage), part of `trials`. */
+  loopTrials: number;
+  loopCalibrations: LoopCalibration[];
   probes: ProbeReport[];
   hypotheses: Hypothesis[];
   calibrations: Calibration[];
@@ -350,6 +379,46 @@ export type Pairing = {
   duplicate: boolean;
 };
 
+/** `AutoReport` in `src/lab/evolve.rs`: one `lab evolve --auto` run and why it ended. */
+export type AutoRun = {
+  started: string | null;
+  finished: string | null;
+  /** Why the run stopped: `passed`, `nothing_new`, `stalled` or `max_generations`. */
+  stop: string;
+  /** One row per generation the run completed, in order. */
+  generations: { generation: number; proposals: number; verdicts: string[]; trials: number }[];
+  /** Loop trials per study when the run ended. */
+  loop_trials: { study: string; n: number }[];
+  /** The per-study trial budget the run was allowed (`[evolve] auto_trial_budget`). */
+  budget: number;
+};
+
+/** The cron entry that runs `scripts/v3-evolve-hourly.sh`, and the ticks it logged. */
+export type EvolveSchedule = {
+  /** The five cron fields, or null when no crontab line runs the script. */
+  cron: string | null;
+  /** Minutes between starts when the entry is a plain "M * * * *" (60), else null. */
+  everyMinutes: number | null;
+  /** The minute past the hour it starts at, for a plain hourly entry. */
+  minute: number | null;
+  /** The next start (ISO), for a plain hourly entry. */
+  next: string | null;
+  /** Logged ticks, oldest first: when each started, when it finished, its exit code. */
+  ticks: { at: string; done: string | null; exit: number | null; skipped: boolean }[];
+};
+
+/** The `[evolve]` caps in `lab.toml` that the loop runs under. */
+export type EvolveCfg = {
+  proposals: number;
+  specs_per_proposal: number;
+  trials_per_cycle: number;
+  auto_trial_budget: number;
+  /** Per-study overrides (`[evolve.auto_trial_budgets]`). */
+  auto_trial_budgets: Record<string, number>;
+  auto_stall: number;
+  auto_max_generations: number;
+};
+
 /** `CycleReport` in `src/lab/evolve.rs`, one per `lab evolve` run. */
 export type CycleReport = {
   /** `g001.json` or `dry-g001.json`. */
@@ -386,4 +455,12 @@ export type Generations = {
   names: Record<string, string>;
   /** Newest first, dry runs included. */
   reports: CycleReport[];
+  /** The newest `lab evolve --auto` summary, or null when every cycle was run by hand. */
+  auto: AutoRun | null;
+  /** Every `lab evolve --auto` run, oldest first. */
+  runs: AutoRun[];
+  /** When the loop starts on its own, read from the user's crontab and `data-v3/evolve.log`. */
+  schedule: EvolveSchedule;
+  /** The caps the loop runs under, read from `lab.toml`. */
+  cfg: EvolveCfg;
 };

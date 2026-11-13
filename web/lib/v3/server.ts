@@ -1,9 +1,10 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type {
-  Calibration, Candidate, Card, CycleReport, DayRow, EngineStatus, FamilyReport, GenNode, GenRoot, Generations, HorizonSummary,
-  Hypothesis, Lab, LabSummary, LineageEvent, Live, NewsEvent, Pairing, ProbeReport, ProposalRow, Quote, StrategyView, StudyCost,
-  Trade,
+  AutoRun, Calibration, Candidate, Card, CycleReport, DayRow, EngineStatus, EvolveCfg, EvolveSchedule, LoopCalibration, FamilyReport, GenNode, GenRoot, Generations,
+  HorizonSummary, Hypothesis, Lab, LabSummary, LineageEvent, Live, NewsEvent, Pairing, ProbeReport, ProposalRow, Quote, StrategyView,
+  StudyCost, Trade,
 } from "./types";
 
 /** The v3 worktree: the folder that holds data-v3/, lab-data/, strategies/ and lab.toml. */
@@ -238,11 +239,20 @@ export function getLive(): Live {
   const now = Date.now();
   if (cached && now - cached.at < 900) return cached.live;
   const lab = getLab();
+  const judgedAll = [...lab.families, ...lab.generated];
+  // Fewest failed checks; a family stopped for want of evidence before any check ran has no distance.
+  const fails = (f: FamilyReport) => f.checks.filter((c) => !c.pass);
+  const near = judgedAll
+    .filter((f) => f.checks.length > 0 && !(f.verdict === "INSUFFICIENT_EVIDENCE" && f.checks.every((c) => c.name === "evidence" || c.pass)) && f.verdict !== "PROMOTE_TO_PAPER")
+    .sort((a, b) => fails(a).length - fails(b).length || (a.generation ?? 0) - (b.generation ?? 0) || (a.name ?? "").localeCompare(b.name ?? ""))[0];
+  const nearCheck = near ? fails(near)[0] : undefined;
   const labSummary: LabSummary = {
-    families: lab.families.length,
-    promoted: lab.families.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length,
-    lastJudged: lab.families.map((f) => f.judged).filter(Boolean).sort().at(-1) ?? null,
-    lockboxSealed: lab.families.every((f) => !f.lockbox_opened),
+    families: judgedAll.length,
+    generated: lab.generated.length,
+    closest: near && nearCheck ? { name: near.name ?? near.family, generation: near.generation ?? null, failed: fails(near).length, check: nearCheck.name, value: nearCheck.value.replace(/\s*\(.*$/, ""), need: nearCheck.need } : null,
+    promoted: judgedAll.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length,
+    lastJudged: judgedAll.map((f) => f.judged).filter(Boolean).sort().at(-1) ?? null,
+    lockboxSealed: judgedAll.every((f) => !f.lockbox_opened),
     lockboxDays: lab.families.length ? Math.max(...lab.families.map((f) => f.lockbox_days)) : 0,
     questions: lab.probes.flatMap((p) => p.questions).length,
     acceptedQuestions: lab.probes.flatMap((p) => p.questions).filter((q) => q.auc > 0.55 && q.ic_null_pct > 95).length,
@@ -314,7 +324,7 @@ function calibrations(): Calibration[] {
   const dir = path.join(LAB, "reports");
   let files: string[] = [];
   try {
-    files = fs.readdirSync(dir).filter((f) => f.startsWith("calibration-") && f.endsWith(".md")).sort();
+    files = fs.readdirSync(dir).filter((f) => f.startsWith("calibration-") && !f.startsWith("calibration-evolve-") && f.endsWith(".md")).sort();
   } catch {
     /* never calibrated */
   }
@@ -334,6 +344,31 @@ function calibrations(): Calibration[] {
   });
 }
 
+/** `calibration-evolve-*.md`: the loop on synthetic panels, read from its title and its promotion table. */
+function loopCalibrations(): LoopCalibration[] {
+  const dir = path.join(LAB, "reports");
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.startsWith("calibration-evolve-") && f.endsWith(".md")).sort();
+  } catch {
+    return [];
+  }
+  const out: LoopCalibration[] = [];
+  for (const file of files) {
+    const t = readText(path.join(dir, file)) ?? "";
+    const h = t.match(/seed `([^`]+)` \(([^)]+)\), (\d+) synthetic panels.*?, (\d+) generations, edge ([\d.]+)/);
+    if (!h) continue;
+    const row = (label: string) => Number(t.match(new RegExp(`^\\| ${label}[^|]*\\| (\\d+) \\|`, "m"))?.[1] ?? 0);
+    out.push({
+      file, seed: h[1], interval: h[2], panels: Number(h[3]), generations: Number(h[4]), edge: Number(h[5]), auto: file.includes("-auto-"),
+      anyPromoted: row("Any promotion"), seedPromoted: row("Seed family promoted"), loopOnly: row("Promoted only by the loop"),
+    });
+  }
+  return out;
+}
+
+const COMPOSED = /^c[0-9a-f]{12}$/;
+
 let labCached: { at: number; lab: Lab } | null = null;
 
 export function getLab(): Lab {
@@ -341,6 +376,15 @@ export function getLab(): Lab {
   if (labCached && now - labCached.at < 5000) return labCached.lab;
   const reports = path.join(LAB, "reports");
   const families: FamilyReport[] = [];
+  const generated: FamilyReport[] = [];
+  // Generated families are named and numbered in the lineage; read it directly (getGenerations reads this function).
+  const born = new Map<string, { name: string; generation: number }>();
+  let loopTrials = 0;
+  for (const r of readJsonl<Record<string, unknown>>(path.join(LAB, "lineage.jsonl"))) {
+    if (!r || typeof r !== "object") continue;
+    if (r.event === "proposed" && typeof r.family === "string") born.set(r.family, { name: str(r.name, r.family), generation: num(r.generation) });
+    loopTrials += num(r.trials);
+  }
   const probes: ProbeReport[] = [];
   let studies: string[] = [];
   try {
@@ -362,7 +406,9 @@ export function getLab(): Lab {
       if (Array.isArray(d.checks)) {
         let cum = 0;
         const oosCum = ((d.walk?.oos ?? []) as number[]).map((r) => (cum += r * 100));
-        families.push({
+        const gen = COMPOSED.test(String(d.family ?? "")) ? born.get(d.family) ?? { name: d.family, generation: 0 } : null;
+        (gen ? generated : families).push({
+          ...(gen ? { name: gen.name, generation: gen.generation } : {}),
           study: d.study, family: d.family, hypothesis: d.hypothesis, panel: d.panel, specs: d.specs,
           trials_ledger: d.trials_ledger, trials_effective: d.trials_effective, design_days: d.design_days,
           lockbox_days: d.lockbox_days, lockbox_opened: d.lockbox_opened, leaders: d.leaders ?? [], checks: d.checks,
@@ -384,7 +430,8 @@ export function getLab(): Lab {
     trials += 1;
     byStudy.set(m[1], (byStudy.get(m[1]) ?? 0) + 1);
   }
-  const lab: Lab = { families, probes, hypotheses: hypotheses(), calibrations: calibrations(), trials, trialsByStudy: [...byStudy].map(([study, n]) => ({ study, n })) };
+  generated.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+  const lab: Lab = { families, generated, loopTrials, loopCalibrations: loopCalibrations(), probes, hypotheses: hypotheses(), calibrations: calibrations(), trials, trialsByStudy: [...byStudy].map(([study, n]) => ({ study, n })) };
   labCached = { at: now, lab };
   return lab;
 }
@@ -452,6 +499,97 @@ function cycleReports(): CycleReport[] {
   return out.sort((a, b) => t(b) - t(a) || b.generation - a.generation || Number(a.dry_run) - Number(b.dry_run));
 }
 
+/** A `[name]` table of `key = number` lines. */
+function tomlTable(t: string, name: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  const at = t.indexOf(`[${name}]`);
+  if (at < 0) return out;
+  for (const line of t.slice(at).split("\n").slice(1)) {
+    if (line.trim().startsWith("[")) break;
+    const m = line.match(/^\s*"?([\w.-]+)"?\s*=\s*([\d.]+)/);
+    if (m) out[m[1]] = Number(m[2]);
+  }
+  return out;
+}
+
+/** The `[evolve]` caps in `lab.toml`: what one cycle may try and when `--auto` stops. */
+function evolveCfg(): EvolveCfg {
+  const t = readText(path.join(ROOT, "lab.toml")) ?? "";
+  return {
+    proposals: tomlNumber(t, "proposals", 4),
+    specs_per_proposal: tomlNumber(t, "specs_per_proposal", 12),
+    trials_per_cycle: tomlNumber(t, "trials_per_cycle", 40),
+    auto_trial_budget: tomlNumber(t, "auto_trial_budget", 200),
+    auto_trial_budgets: tomlTable(t, "evolve.auto_trial_budgets"),
+    auto_stall: tomlNumber(t, "auto_stall", 3),
+    auto_max_generations: tomlNumber(t, "auto_max_generations", 20),
+  };
+}
+
+/** Every `lab-data/reports/evolve/auto-<time>.json`, oldest first. */
+function autoRuns(): AutoRun[] {
+  const dir = path.join(LAB, "reports", "evolve");
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(dir).filter((f) => /^auto-.*\.json$/.test(f)).sort();
+  } catch {
+    return [];
+  }
+  const out: AutoRun[] = [];
+  for (const f of files) {
+    const d = readJson<Record<string, unknown>>(path.join(dir, f));
+    if (!d || typeof d !== "object") continue;
+    const loop = d.loop_trials && typeof d.loop_trials === "object" ? (d.loop_trials as Record<string, unknown>) : {};
+    out.push({
+      started: optStr(d.started),
+      finished: optStr(d.finished),
+      stop: str(d.stop),
+      generations: arr(d.generations).map((g) => ({
+        generation: num(g.generation),
+        proposals: arr(g.proposals).length,
+        verdicts: arr(g.proposals).map((p) => str(p.verdict, "untested")),
+        trials: arr(g.studies).reduce((n, c) => n + Math.max(0, num(c.trials_after) - num(c.trials_before)), 0),
+      })),
+      loop_trials: Object.entries(loop).map(([study, n]) => ({ study, n: num(n) })).sort((a, b) => a.study.localeCompare(b.study)),
+      budget: num(d.budget, 200),
+    });
+  }
+  return out;
+}
+
+const EVOLVE_SCRIPT = "v3-evolve-hourly.sh";
+
+/** The crontab line that runs the hourly script, and the ticks it wrote to `data-v3/evolve.log`. */
+function evolveSchedule(): EvolveSchedule {
+  let cron: string | null = null;
+  try {
+    const tab = execFileSync("crontab", ["-l"], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+    const line = tab.split("\n").find((l) => !l.trim().startsWith("#") && l.includes(EVOLVE_SCRIPT));
+    if (line) cron = line.trim().split(/\s+/).slice(0, 5).join(" ");
+  } catch {
+    /* no crontab, or no cron on this machine */
+  }
+  const m = cron?.match(/^(\d{1,2}) \* \* \* \*$/);
+  const ticks: EvolveSchedule["ticks"] = [];
+  for (const l of (readText(path.join(DATA, "evolve.log")) ?? "").split("\n")) {
+    const start = l.match(/^=== (\S+Z) evolve tick/);
+    if (start) ticks.push({ at: start[1], done: null, exit: null, skipped: false });
+    const done = l.match(/^=== (\S+Z) done \(exit (\d+)\)/);
+    if (done && ticks.length) Object.assign(ticks[ticks.length - 1], { done: done[1], exit: Number(done[2]) });
+    const skip = l.match(/^(\S+Z) previous tick still running/);
+    if (skip) ticks.push({ at: skip[1], done: skip[1], exit: 0, skipped: true });
+  }
+  let next: string | null = null;
+  if (m) {
+    const d = new Date();
+    d.setUTCSeconds(0, 0);
+    d.setUTCMinutes(Number(m[1]));
+    if (d.getTime() <= Date.now()) d.setUTCHours(d.getUTCHours() + 1);
+    next = d.toISOString();
+  }
+  return { cron, everyMinutes: m ? 60 : null, minute: m ? Number(m[1]) : null, next, ticks };
+}
+
 let gensCached: { at: number; gens: Generations } | null = null;
 
 /** The lineage as a tree, the same reading as `lab lineage`, plus every cycle report. */
@@ -504,6 +642,7 @@ export function getGenerations(): Generations {
   for (const v of tested.values()) verdicts[v] = (verdicts[v] ?? 0) + 1;
   const ledger = new Map(getLab().trialsByStudy.map((s) => [s.study, s.n]));
   const studies = new Set([...loopByStudy.keys()]);
+  const runs = autoRuns();
   const gens: Generations = {
     roots,
     proposed: proposed.length,
@@ -513,6 +652,10 @@ export function getGenerations(): Generations {
     byStudy: [...studies].sort().map((study) => ({ study, loop: loopByStudy.get(study) ?? 0, ledger: ledger.get(study) ?? 0 })),
     names,
     reports: cycleReports(),
+    auto: runs[runs.length - 1] ?? null,
+    runs,
+    schedule: evolveSchedule(),
+    cfg: evolveCfg(),
   };
   gensCached = { at: now, gens };
   return gens;

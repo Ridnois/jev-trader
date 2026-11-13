@@ -184,6 +184,7 @@ const SHORT: Record<string, string> = {
 
 /** The check that ended a family's run, or -1 when it ran the whole gate. */
 export function stopIndex(f: FamilyReport): number {
+  if (f.checks.length === 0) return -1;
   if (f.verdict === "INSUFFICIENT_EVIDENCE") return Math.max(0, f.checks.findIndex((c) => !c.pass));
   return f.checks.findIndex((c) => c.fatal && !c.pass);
 }
@@ -194,30 +195,66 @@ function why(c: FamilyReport["checks"][number]): [string, string] {
   return [v, `needs ${c.need.replace(/\s+with .*$/, "")}`];
 }
 
+/** Check names across families, in gate order: a check only some families ran is slotted after its predecessor. */
+function checkColumns(families: FamilyReport[]): string[] {
+  const names: string[] = [];
+  for (const f of families) {
+    let after = -1;
+    for (const c of f.checks) {
+      const at = names.indexOf(c.name);
+      if (at >= 0) after = at;
+      else names.splice(++after, 0, c.name);
+    }
+  }
+  return names;
+}
+
+/** A family's run on the shared columns: its check per column (or none), and the column it stopped at (-1 = ran it all). */
+function aligned(f: FamilyReport, names: string[]) {
+  const by = new Map(f.checks.map((c) => [c.name, c]));
+  const at = names.map((n) => by.get(n));
+  const s = stopIndex(f);
+  const stopName = s >= 0 ? f.checks[s]?.name : undefined;
+  const stop = stopName ? names.indexOf(stopName) : f.checks.length === 0 ? 0 : -1;
+  const ran = at.reduce((last, c, i) => (c ? i : last), -1);
+  return { at, stop, end: stop < 0 ? ran : stop, reach: stop < 0 ? names.length : stop };
+}
+
+export type Cohort = { label: string; families: FamilyReport[] };
+
 /**
  * How far each family got through the gate. One neutral bar per family, sorted by distance, so the rows form the
- * funnel; the end cap says how the run ended and the label says why. Checks computed after the end stay on hover.
+ * funnel; the end cap says how the run ended and the label says why. Above the rows, one count line per cohort says
+ * how many of its families were still in the run when each check came up.
  */
-export function GateLineMap({ families, selected, onSelect }: { families: FamilyReport[]; selected: string; onSelect: (family: string) => void }) {
-  const names = families[0]?.checks.map((c) => c.name) ?? [];
+export function GateLineMap({ families, selected, onSelect, cohorts }: { families: FamilyReport[]; selected: string; onSelect: (family: string) => void; cohorts: Cohort[] }) {
+  const names = useMemo(() => checkColumns([...cohorts.flatMap((c) => c.families), ...families]), [cohorts, families]);
   const N = names.length;
   const rows = useMemo(
     () =>
       families
-        .map((f, order) => {
-          const stop = stopIndex(f);
-          return { f, order, stop, reach: stop < 0 ? N : stop };
-        })
+        .map((f, order) => ({ f, order, ...aligned(f, names) }))
         .sort((a, b) => b.reach - a.reach || a.order - b.order),
-    [families, N],
+    [families, names],
   );
-  const passedAll = families.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length;
-  const stillIn = names.map((_, i) => rows.filter((r) => r.reach >= i).length);
+  const counts = useMemo(
+    () =>
+      cohorts.map((c) => {
+        const runs = c.families.map((f) => aligned(f, names));
+        return {
+          label: c.label,
+          // null where no family in the cohort has that check at all: "0 still in" would read as a result.
+          still: names.map((_, i) => (runs.some((r) => r.at[i]) ? runs.filter((r) => r.reach >= i).length : null)),
+          passed: c.families.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length,
+        };
+      }),
+    [cohorts, names],
+  );
   const sealed = !families.some((f) => f.lockbox_opened);
   const wrap = useRef<HTMLDivElement>(null);
   const [tip, setTip] = useState<{ r: number; c: number; x: number; y: number; below: boolean } | null>(null);
   const cols = `var(--label) repeat(${N}, minmax(56px, 1fr)) 72px`;
-  // Column centres as a share of the track (the N check columns plus the lockbox column), for the bar geometry.
+  // Column centres as a share of the track (the N check columns), for the bar geometry.
   const at = (i: number) => `calc(${(i + 0.5) * 100}% / ${N})`;
 
   const hover = (e: React.MouseEvent<HTMLDivElement>, r: number, c: number) => {
@@ -227,12 +264,13 @@ export function GateLineMap({ families, selected, onSelect }: { families: Family
     setTip({ r, c, x: cell.left - box.left + cell.width / 2, y: r < 2 ? cell.bottom - box.top : cell.top - box.top, below: r < 2 });
   };
   const tr = tip ? rows[tip.r] : null;
-  const tc = tr ? tr.f.checks[tip!.c] : null;
+  const tc = tr ? tr.at[tip!.c] : null;
+  const label = (f: FamilyReport) => f.name ?? familyName(f.family);
 
   return (
     <div className="overflow-x-auto">
       <div ref={wrap} className="relative [--label:200px] sm:[--label:256px]" style={{ minWidth: `calc(var(--label) + 72px + ${N} * 56px)` }} onMouseLeave={() => setTip(null)}>
-        {/* Check names, then how many families were still in the run when each check came up. */}
+        {/* Check names, then per cohort how many families were still in the run when each check came up. */}
         <div className="grid items-end text-[11px] leading-[14px] text-muted-foreground" style={{ gridTemplateColumns: cols }}>
           <span className="sticky left-0 z-[2] self-stretch bg-card" />
           {names.map((n, i) => (
@@ -240,48 +278,69 @@ export function GateLineMap({ families, selected, onSelect }: { families: Family
           ))}
           <span className="px-1 text-center text-info">Lockbox, {sealed ? "sealed" : "opened"}</span>
         </div>
-        <div className="mt-2 grid items-center border-b pb-2 font-mono text-[13px] tabular-nums" style={{ gridTemplateColumns: cols }}>
-          <span className="sticky left-0 z-[2] bg-card font-sans text-xs text-faint">Families still in the run</span>
-          {/* Counts stop at the first zero: after that every column would only repeat it. */}
-          {stillIn.map((k, i) => (
-            <span key={names[i]} className={`text-center ${k === 0 ? "text-faint" : k < (stillIn[i - 1] ?? k) ? "text-foreground" : "text-muted-foreground"}`}>{k === 0 && stillIn[i - 1] === 0 ? "" : k}</span>
+        <div className="mt-2 border-b pb-2">
+          {counts.map((c) => (
+            <div key={c.label} className="grid items-center py-0.5 font-mono text-[13px] tabular-nums" style={{ gridTemplateColumns: cols }}>
+              <span className="sticky left-0 z-[2] bg-card pr-3 font-sans text-xs text-faint">{c.label}</span>
+              {/* Counts stop at the first zero: after that every column would only repeat it. */}
+              {c.still.map((k, i) => {
+                const prev = c.still.slice(0, i).filter((x): x is number => x !== null).at(-1);
+                if (k === null) return <span key={names[i]} className="text-center text-faint" title="No family in this group runs this check">–</span>;
+                return (
+                  <span key={names[i]} className={`text-center ${k === 0 ? "text-faint" : k < (prev ?? k) ? "text-foreground" : "text-muted-foreground"}`}>{k === 0 && prev === 0 ? "" : k}</span>
+                );
+              })}
+              <span className={`text-center ${c.passed ? "text-pos" : "text-faint"}`}>{c.passed}</span>
+            </div>
           ))}
-          <span className={`text-center ${passedAll ? "text-pos" : "text-faint"}`}>{passedAll}</span>
         </div>
 
         <div className="relative pt-1">
           {/* The finish: one line every run would have to reach. */}
           <span aria-hidden className="pointer-events-none absolute top-1 bottom-0 right-[36px] w-px bg-info/60" />
-          {rows.map(({ f, stop, reach }, r) => {
+          {rows.map(({ f, at: checksAt, stop, end, reach }, r) => {
             const on = selected === f.family;
             const insuff = f.verdict === "INSUFFICIENT_EVIDENCE";
-            const end = stop < 0 ? N - 1 : stop;
+            const ended = stop >= 0 ? checksAt[stop] : undefined;
             return (
               <div
-                key={f.family}
+                key={`${f.study}-${f.family}`}
                 onClick={() => onSelect(f.family)}
                 className={`grid min-h-12 cursor-pointer items-center rounded-md transition-colors ${on ? "bg-popover" : "bg-card hover:bg-[#141414]"}`}
                 style={{ gridTemplateColumns: cols }}
               >
                 <button type="button" aria-pressed={on} onClick={(e) => { e.stopPropagation(); onSelect(f.family); }} className="sticky left-0 z-[2] flex flex-col self-stretch justify-center rounded-md bg-inherit py-2 pr-4 pl-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset">
-                  <span className="text-[13px] font-medium text-foreground">{familyName(f.family)}</span>
+                  <span className="flex items-baseline gap-2 text-[13px] font-medium text-foreground">
+                    <span className={f.name ? "font-mono" : ""}>{label(f)}</span>
+                    {f.generation !== undefined && <span className="text-[11px] font-normal text-faint">generation {f.generation}</span>}
+                  </span>
                   <span className="text-[11px] leading-4 text-muted-foreground">
-                    {stop < 0 ? (f.verdict === "REVISE" ? "Ran the whole gate, short of the bar" : "Ran the whole gate") : (
+                    {!ended ? (() => {
+                      const short = f.checks.filter((c) => !c.pass);
+                      if (short.length === 0) return "Ran the whole gate";
+                      const c = short[0];
+                      return (
+                        <>
+                          Ran the whole gate, short on <span className="text-warn">{SHORT[c.name] ?? c.name}</span> {why(c)[0]} · <span className="whitespace-nowrap">{why(c)[1]}</span>
+                          {short.length > 1 && ` and ${short.length - 1} more`}
+                        </>
+                      );
+                    })() : (
                       <>
-                        <span className={insuff ? "text-warn" : "text-neg"}>{SHORT[f.checks[stop].name] ?? f.checks[stop].name}</span>
-                        {" "}{why(f.checks[stop])[0]} · <span className="whitespace-nowrap">{why(f.checks[stop])[1]}</span>
+                        <span className={insuff ? "text-warn" : "text-neg"}>{SHORT[ended.name] ?? ended.name}</span>
+                        {" "}{why(ended)[0]} · <span className="whitespace-nowrap">{why(ended)[1]}</span>
                       </>
                     )}
                   </span>
                 </button>
                 <div className="relative h-12" style={{ gridColumn: `2 / span ${N}` }}>
-                  {/* The road not taken: faint stations after the run ended. */}
-                  {names.map((n, i) => i > end && (
+                  {/* The road not taken: faint stations after the run ended, or checks this family never had. */}
+                  {names.map((n, i) => (i > end || !checksAt[i]) && (
                     <span key={n} aria-hidden className="absolute top-1/2 size-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#3a3a3a]" style={{ left: at(i) }} />
                   ))}
                   {/* Distance covered. */}
-                  <span aria-hidden className={`absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full ${on ? "bg-foreground" : "bg-foreground/70"}`} style={{ left: 0, width: reach === 0 ? 0 : at(end) }} />
-                  {f.checks.map((c, i) => i < end && !c.pass && (
+                  <span aria-hidden className={`absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full ${on ? "bg-foreground" : "bg-foreground/70"}`} style={{ left: 0, width: reach === 0 || end < 0 ? 0 : at(end) }} />
+                  {checksAt.map((c, i) => c && i < end && !c.pass && (
                     <span key={c.name} aria-hidden className="absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-foreground bg-card" style={{ left: at(i) }} />
                   ))}
                   {stop >= 0 && (
@@ -303,7 +362,7 @@ export function GateLineMap({ families, selected, onSelect }: { families: Family
             className="pointer-events-none absolute z-10 w-max max-w-[280px] rounded-md border bg-popover px-2.5 py-1.5 text-xs leading-5 shadow-lg shadow-black/40"
             style={{ left: tip.x, top: tip.y, transform: `translate(-50%, ${tip.below ? "6px" : "calc(-100% - 6px)"})` }}
           >
-            <div className="font-medium">{familyName(tr.f.family)}: {SHORT[tc.name] ?? tc.name}</div>
+            <div className="font-medium">{label(tr.f)}: {SHORT[tc.name] ?? tc.name}</div>
             <div>{tc.value}</div>
             <div className="text-muted-foreground">Needs {tc.need}</div>
             <div className={tr.stop >= 0 && tip.c > tr.stop ? "text-muted-foreground" : tc.pass ? "text-pos" : tip.c === tr.stop ? (tr.f.verdict === "INSUFFICIENT_EVIDENCE" ? "text-warn" : "text-neg") : tc.fatal ? "text-neg" : "text-warn"}>

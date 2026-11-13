@@ -72,6 +72,8 @@ const VERDICTS: Record<string, { label: string; cls: string }> = {
   triggered: { label: "Triggered", cls: "border-border bg-muted text-muted-foreground" },
   proposed: { label: "Not tested yet", cls: "border-border bg-muted text-muted-foreground" },
   continue: { label: "No verdict yet", cls: "border-border bg-muted text-muted-foreground" },
+  /** Not a state and not a near miss: the same bet under another name, so it is neutral, never amber. */
+  duplicate: { label: "Duplicate", cls: "border-border bg-muted text-muted-foreground" },
   PROMOTED: { label: "On paper", cls: "border-warn/30 bg-warn/10 text-warn" },
   KILLED: { label: "Killed on paper", cls: "border-neg/30 bg-neg/10 text-neg" },
   GRADUATED: { label: "Graduated on paper", cls: "border-pos/30 bg-pos/10 text-pos" },
@@ -203,7 +205,7 @@ export function Side({ side }: { side: number }) {
 
 export function Th({ className, ...rest }: React.ComponentProps<"th">) {
   return (
-    <th className={cn("h-9 px-3 text-left text-xs font-medium whitespace-nowrap text-muted-foreground first:pl-5 last:pr-5", className)} {...rest} />
+    <th scope="col" className={cn("h-9 px-3 text-left text-xs font-medium whitespace-nowrap text-muted-foreground first:pl-5 last:pr-5", className)} {...rest} />
   );
 }
 
@@ -215,10 +217,11 @@ export function Td({ children, className, ...rest }: React.ComponentProps<"td">)
   );
 }
 
-export function DataTable({ children, className, minWidth }: { children: React.ReactNode; className?: string; minWidth?: number }) {
+export function DataTable({ children, className, minWidth, label }: { children: React.ReactNode; className?: string; minWidth?: number; label?: string }) {
   return (
     <div className="overflow-x-auto">
       <table className={cn("w-full border-collapse text-[13px] [&_tbody_tr]:border-t [&_tbody_tr:hover]:bg-muted/50 [&_thead_tr]:border-t", className)} style={{ minWidth }}>
+        {label && <caption className="sr-only">{label}</caption>}
         {children}
       </table>
     </div>

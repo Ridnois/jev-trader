@@ -72,6 +72,11 @@ const RECORDS = {
     meaning: "The days the search was allowed to look at. Its winner was chosen from many rules, so it flatters itself.",
     misreading: "The best in-sample number is the view that fools people; it is not what the gate judged.",
   },
+  "design-window": {
+    term: "Design window",
+    meaning: "The days a family is fitted and judged on: everything before the lockbox days, which no search may look at.",
+    misreading: "A good number here is not evidence: the family was chosen by looking at these days. The lockbox and paper days are its only clean test.",
+  },
   sharpe: {
     term: "Sharpe",
     meaning: "A rule's yearly return divided by how much it swings day to day.",
@@ -202,13 +207,46 @@ const RECORDS = {
   },
   generation: {
     term: "Generation",
-    meaning: "One run of lab evolve: the families it proposed from what earlier verdicts taught, judged together by the same gate.",
+    meaning: "One round of the loop: it reads every verdict so far, proposes up to four new families from what failed, charges their trials and has the gate judge them together.",
     misreading: "A later generation is not a better one. Each one charges trials and raises the bar for the next.",
+  },
+  run: {
+    term: "Run",
+    meaning: "One hourly start of the loop. A run repeats generations until a stop rule: a family passes, nothing new is left to propose, the trial budget is spent, or several generations in a row produce nothing better than rejected.",
+    misreading: "A run that stops early is working as designed. The stop rules exist so the loop cannot search its way into a lucky winner.",
+  },
+  "checks-failed": {
+    term: "Checks failed",
+    meaning: "How many of the gate's checks a family failed. A family passes only when it fails none, so 0 is the goal and the count is the distance to it.",
+    good: "0. Lower is closer.",
+    misreading: "The checks are not equal, and a check failed by a wide margin is fatal on its own. A family 2 checks short can be further from passing than one 6 short.",
+  },
+  "trial-budget": {
+    term: "Trial budget",
+    meaning: "The most trials the loop may charge to one study over its whole life, across every run ([evolve] auto_trial_budget in lab.toml). Once it is spent, each hourly run stops at once.",
+    misreading: "It does not refill. Raising it lets the loop search more and raises the bar for every family, hand-written ones included.",
   },
   operator: {
     term: "Operator",
     meaning: "How a generated family was made from its parent: restrict (long only or shorter holds), shrink (fix settings that made no difference), recombine (two entries must agree), condition (a market-state filter), invert (the opposite side) or explore (an untried pairing).",
     misreading: "The operator names the change, not its effect. A child is judged from scratch, never on its parent's record.",
+  },
+  "generation-reality-check": {
+    term: "Generation reality check",
+    meaning: "The reality check run over every rule the whole generation tried at once, not just one family. It stops a generation whose winner is only the best of four simultaneous attempts.",
+    good: "Under 0.05 passes.",
+    misreading: "It is charged to each family but it measures the generation's search, so a family can fail it while its own checks passed.",
+  },
+  duplicate: {
+    term: "Duplicate",
+    meaning: "A challenger whose daily returns move with an incumbent's at a correlation of 0.9 or more: the same bet under a new name.",
+    good: "Never promotable, however good its numbers look.",
+    misreading: "A duplicate is not a near miss. There is nothing new to test.",
+  },
+  "dry-run": {
+    term: "Dry run",
+    meaning: "A generation that reads and proposes but simulates nothing: no trial is charged and no family file is written where the lab reads families.",
+    misreading: "Its cost table is what a real generation would charge, not what it did. A dry run adds no evidence either way.",
   },
   "luck-bar": {
     term: "Luck bar",

@@ -48,7 +48,7 @@ function fullDays(live: Live): number {
 }
 
 function labStation(live: Live): Station {
-  const { families: n, promoted, lastJudged: last, lockboxSealed, lockboxDays } = live.lab;
+  const { families: n, promoted, lastJudged: last, lockboxSealed, lockboxDays, generated, closest } = live.lab;
   if (n === 0)
     return {
       id: "lab", name: "Lab", short: "Lab", question: "Is the rule real?", href: "/lab", tone: "neutral",
@@ -60,10 +60,12 @@ function labStation(live: Live): Station {
     id: "lab", name: "Lab", short: "Lab", question: "Is the rule real?", href: "/lab", tone: promoted > 0 ? "good" : "neutral",
     role: "Judges a family of rules on old days before any money is involved.",
     state: `${promoted} of ${n} families passed`,
-    detail: promoted === 0
-      ? `All ${n} families were rejected or not enough evidence was collected. That is the result, not a failure to report.`
-      : `${promoted} of ${n} families passed the gate; the rest did not.`,
-    meta: `${last ? `Last judged ${new Date(last).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}` : "Never judged"} · ${lockboxSealed ? `Lockbox: ${lockboxDays} days held back` : "Lockbox: opened"}`,
+    detail: promoted > 0
+      ? `${promoted} of ${n} families passed the gate; the rest did not.`
+      : closest
+        ? `Closest: ${closest.name}${closest.generation !== null ? ` (generation ${closest.generation})` : ""}, ${closest.failed === 1 ? `short only on ${closest.check}` : `${closest.failed} checks short`}: ${closest.value}, needs ${closest.need}.`
+        : `All ${n} families were rejected or not enough evidence was collected. That is the result, not a failure to report.`,
+    meta: `${generated > 0 ? `${n - generated} by hand, ${generated} by the loop · ` : ""}${last ? `Last verdict ${new Date(last).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC` : "Never judged"} · ${lockboxSealed ? `Lockbox: ${lockboxDays} days held back` : "Lockbox: opened"}`,
   };
 }
 

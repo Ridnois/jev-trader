@@ -106,7 +106,13 @@ export default function Now() {
       tone: byId.get("lab")?.tone ?? "neutral",
       value: lab.families ? `${lab.promoted}/${lab.families}` : "–",
       unit: "families passed",
-      note: lab.lastJudged ? `Judged ${new Date(lab.lastJudged).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}` : "Never judged",
+      // With nothing passed, the useful line is the near miss: who came closest and on what.
+      note:
+        lab.promoted === 0 && lab.closest
+          ? `Closest ${lab.closest.name}: ${lab.closest.failed === 1 ? `${lab.closest.check} ${lab.closest.value}, needs ${lab.closest.need}` : `${lab.closest.failed} checks short`}`
+          : lab.lastJudged
+            ? `Judged ${new Date(lab.lastJudged).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`
+            : "Never judged",
       ratio: lab.families ? { value: lab.promoted, max: lab.families, met: lab.promoted > 0 } : undefined,
     },
     {

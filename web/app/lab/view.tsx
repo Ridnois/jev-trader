@@ -8,9 +8,9 @@ import { Gloss, GlossList } from "@/components/gloss";
 import { StationIndex } from "@/components/pipeline";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useLive } from "@/components/live";
-import { familyName, sentence, signed } from "@/lib/format";
+import { familyName, plural, sentence, signed } from "@/lib/format";
 import { stations } from "@/lib/v3/stations";
-import type { FamilyReport, Lab } from "@/lib/v3/types";
+import type { FamilyReport, Lab, LoopCalibration } from "@/lib/v3/types";
 
 /** The leading figure of a check's value: "+3.85 bps/day [..] over 600 days" → "+3.85 bps/day [..]". */
 function lead(f: FamilyReport, name: string): string {
@@ -34,6 +34,82 @@ function CheckName({ name }: { name: string }) {
   return <>{id ? <Gloss id={id}>{sentence(name)}</Gloss> : sentence(name)}</>;
 }
 
+/** Checks a family failed; a family stopped for want of evidence before any check ran has none and no distance. */
+function failed(f: FamilyReport) {
+  return f.checks.filter((c) => !c.pass);
+}
+
+function scored(f: FamilyReport) {
+  return f.checks.length > 0 && !(f.verdict === "INSUFFICIENT_EVIDENCE" && f.checks.every((c) => c.name === "evidence" || c.pass));
+}
+
+/** Fewest failed checks first; on a tie the family that got there first (hand-written, then the earlier generation). */
+function byCloseness(a: FamilyReport, b: FamilyReport) {
+  return failed(a).length - failed(b).length || (a.generation ?? 0) - (b.generation ?? 0) || (a.name ?? "").localeCompare(b.name ?? "");
+}
+
+const label = (f: FamilyReport) => f.name ?? familyName(f.family);
+
+const dayTime = (iso: string) =>
+  `${new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC`;
+
+/** The loop on synthetic panels, under the stop rules it runs with now (`--auto`). */
+function LoopCalibrationRows({ rows }: { rows: LoopCalibration[] }) {
+  const current = rows.filter((r) => r.auto);
+  const shown = current.length ? current : rows;
+  if (shown.length === 0) return null;
+  const nulls = shown.filter((r) => r.edge === 0);
+  const edges = shown.filter((r) => r.edge > 0);
+  const noisePanels = nulls.reduce((n, r) => n + r.panels, 0);
+  const noisePromoted = nulls.reduce((n, r) => n + r.anyPromoted, 0);
+  return (
+    <div className="mt-5 border-t pt-4">
+      <p className="text-[13px] font-medium">With the loop searching on top</p>
+      <p className="mt-1 max-w-[72ch] text-[13px] leading-5 text-pretty text-muted-foreground">
+        The same synthetic markets, with the evolve loop breeding families for up to {shown[0].generations} generations under the
+        hourly run&apos;s stop rules. Every family it generates counts as one more look at the lockbox, so searching longer cannot
+        buy a pass.
+      </p>
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full min-w-[560px] border-collapse text-[13px]">
+          <caption className="sr-only">Evolve loop calibration: promotions on synthetic markets with and without a planted edge</caption>
+          <thead>
+            <tr className="text-left text-[11px] text-faint">
+              <th scope="col" className="pb-2 font-normal">Synthetic market</th>
+              <th scope="col" className="pb-2 font-normal">Seed family</th>
+              <th scope="col" className="pb-2 text-right font-normal">Seed alone passed</th>
+              <th scope="col" className="pb-2 text-right font-normal">Only the loop found it</th>
+              <th scope="col" className="pb-2 text-right font-normal">Promoted</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...nulls, ...edges].map((r) => {
+              const pct = Math.round((r.anyPromoted / Math.max(1, r.panels)) * 100);
+              return (
+                <tr key={r.file} className="border-t">
+                  <td className="py-2.5">{r.edge === 0 ? "No edge" : `Edge ${r.edge} planted`}<span className="ml-2 text-[11px] text-faint">{r.panels} panels{r.file.includes("seed2") ? ", second set" : ""}</span></td>
+                  <td className="py-2.5 text-muted-foreground">{familyName(r.seed)}, {r.interval}</td>
+                  <td className="py-2.5 text-right tabular-nums text-muted-foreground">{r.seedPromoted}</td>
+                  <td className="py-2.5 text-right tabular-nums text-muted-foreground">{r.loopOnly}</td>
+                  <td className={`py-2.5 text-right font-mono tabular-nums ${r.edge === 0 ? (pct > 5 ? "text-neg" : "text-foreground") : pct > 0 ? "text-pos" : "text-foreground"}`}>
+                    {r.anyPromoted} of {r.panels}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {noisePanels > 0 && (
+        <p className="mt-2 text-xs leading-4 text-faint">
+          {noisePromoted} of {noisePanels} no-edge markets promoted with the loop running.
+          {edges.length > 0 && ` Where an edge was planted, the loop found ${plural(edges.reduce((n, r) => n + r.loopOnly, 0), "more market")} than the seed alone.`}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function LabView({ lab }: { lab: Lab }) {
   const { live } = useLive();
   const [selected, setSelected] = useState(lab.families.find((f) => f.family === "trend")?.family ?? lab.families[0]?.family ?? "");
@@ -45,29 +121,36 @@ export function LabView({ lab }: { lab: Lab }) {
         </Empty>
       </Panel>
     );
-  const promoted = lab.families.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length;
-  const rejected = lab.families.filter((f) => f.verdict === "REJECT").length;
-  const thin = lab.families.filter((f) => f.verdict === "INSUFFICIENT_EVIDENCE").length;
-  const opened = lab.families.filter((f) => f.lockbox_opened).length;
+  const all = [...lab.families, ...lab.generated];
+  const promoted = all.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length;
+  const opened = all.filter((f) => f.lockbox_opened).length;
   const lockDays = Math.max(...lab.families.map((f) => f.lockbox_days));
   const lockMin = Math.min(...lab.families.map((f) => f.lockbox_days));
-  const revise = lab.families.filter((f) => f.verdict === "REVISE").length;
-  const judged = lab.families.map((f) => f.judged).filter(Boolean).sort().at(-1);
+  const judged = all.map((f) => f.judged).filter(Boolean).sort().at(-1);
+  const closest = all.filter(scored).sort(byCloseness)[0];
+  const nearest = lab.generated.filter(scored).sort(byCloseness).slice(0, 3);
+  const shown = [...lab.families, ...nearest];
+  const handTrials = lab.trials - lab.loopTrials;
   const pick = (family: string) => {
     setSelected(family);
     document.getElementById("family-detail")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   };
+  const closeLine = closest
+    ? `Closest: ${label(closest)}${closest.generation !== undefined ? ` (generation ${closest.generation})` : ""}, which failed ${
+        failed(closest).length <= 2 ? failed(closest).map((c) => c.name).join(" and ") : plural(failed(closest).length, "check")
+      }.`
+    : "";
 
   return (
     <div className="flex flex-col gap-6">
       <PageHead
-        question="Should any of this be trusted with money?"
+        question="Has anything earned the paper run?"
         lede={
           <>
-            The Lab searches a family of rules over old days, then judges the winner against what that search alone can
-            produce by luck: the more rules tried, the better the best one has to be. A family must pass every check, then
-            the sealed lockbox, the newest days no search may see. Passing is the only door to the paper run.{" "}
-            <Link href="/paper" className="text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground">Paper follows whatever comes through.</Link>
+            The Lab is the gate. Every family, written by hand or generated by the hourly loop, is searched over old days and its
+            winner judged against what that much searching produces by luck: the more rules tried, the better the best one has to
+            be. Passing every check, then the sealed lockbox, is the only door to the{" "}
+            <Link href="/paper" className="text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground">paper run</Link>.
           </>
         }
         verdict={
@@ -75,38 +158,66 @@ export function LabView({ lab }: { lab: Lab }) {
             rule={false}
             kind={promoted > 0 ? "good" : "calm"}
             label="Lab"
-            meta={`${lab.families.length} families judged`}
-            line={`${promoted} of ${lab.families.length} families passed`}
+            meta={judged ? `Last verdict ${dayTime(judged)}` : "Never judged"}
+            line={`${promoted} of ${plural(all.length, "family", "families")} passed`}
             detail={
-              promoted === 0
-                ? `${rejected} families were rejected and ${thin} did not have enough evidence${revise > 0 ? `, and ${revise} were sent back to revise` : ""}. A rejected family is not proof that no version could work; it is proof this search did not find one.`
-                : `${lab.families.length - promoted} families did not pass. The promoted ones are running on paper against their cards.`
+              <>
+                {lab.families.length} written by hand, {lab.generated.length} generated by the loop. {promoted === 0 ? closeLine : `${promoted} passed and run on paper; promoting stays your decision.`}
+              </>
             }
-            href="/start"
-            link="What the gate is for"
+            href="/generations"
+            link="What the loop is trying"
           />
         }
       />
 
       <Figures
         items={[
-          { label: "Families judged", value: `${lab.families.length}`, sub: `${rejected} families rejected, ${thin} with not enough evidence${revise > 0 ? `, ${revise} to revise` : ""}` },
-          { label: "Trials on the ledger", value: lab.trials.toLocaleString("en-US"), sub: "Every rule run once on one data set, across every study; the Rules column covers these families only" },
+          { label: "Families judged", value: all.length.toLocaleString("en-US"), sub: `${lab.families.length} by hand, ${lab.generated.length} by the loop` },
+          { label: "Trials on the ledger", value: lab.trials.toLocaleString("en-US"), sub: `${handTrials.toLocaleString("en-US")} from hand-written searches, ${lab.loopTrials.toLocaleString("en-US")} from the loop. Every one raises the bar.` },
           {
             label: "Lockbox",
-            value: opened ? `Opened for ${opened} ${opened === 1 ? "family" : "families"}` : "Sealed",
-            sub: `Withheld per family: ${lockMin} to ${lockDays} days`,
+            value: opened ? `Opened for ${plural(opened, "family", "families")}` : "Sealed",
+            sub: `The newest ${lockMin} to ${lockDays} days of each study, unseen by any search`,
             tone: opened > 1 ? "warn" : undefined,
           },
           {
-            label: "Last judged",
+            label: "Last verdict",
             value: judged ? new Date(judged).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "–",
-            sub: "The date every verdict on this page was written",
+            sub: judged ? `${dayTime(judged)}; the loop judges new families every hour` : "",
           },
         ]}
       />
 
-      <Panel flush title="Verdicts" description="The best rule of each family in sample, then what its walk-forward picks made out of sample. Rows are families, not a ranking: the best Sharpe can sit on a family that did not pass. Read this table first; the chart below shows how far each family got.">
+      <Panel
+        title="How far each family got"
+        description={
+          <>
+            Every family meets the same checks in order, and the first fatal miss ends its run. The count lines say how many of each
+            group were still in when a check came up; the rows are the {lab.families.length} hand-written families and the{" "}
+            {plural(nearest.length, "generated family", "generated families")} that came closest. {promoted === 0 ? "None reached the lockbox." : `${promoted} reached the lockbox.`}{" "}
+            A generated family is built after its design window was seen, so its walk-forward is not truly out of sample: the
+            lockbox is its first clean test. Hover a check for its numbers; select a family to read them all.
+          </>
+        }
+      >
+        <div className="border-t pt-4">
+          <GateLineMap
+            families={shown}
+            selected={selected}
+            onSelect={pick}
+            cohorts={[
+              { label: `Hand-written, ${lab.families.length}`, families: lab.families },
+              ...(lab.generated.length ? [{ label: `Generated, ${lab.generated.length}`, families: lab.generated }] : []),
+            ]}
+          />
+        </div>
+        <div className="mt-4 border-t pt-3">
+          <MapLegend />
+        </div>
+      </Panel>
+
+      <Panel flush title="Hand-written families" description="The best rule of each family in sample, then what its walk-forward picks made out of sample. Rows are families, not a ranking: the best Sharpe can sit on a family that did not pass. Generated families are on Generations.">
         <DataTable minWidth={820}>
           <thead>
             <tr>
@@ -124,10 +235,9 @@ export function LabView({ lab }: { lab: Lab }) {
                 <tr key={f.family} onClick={() => pick(f.family)} className={`cursor-pointer ${selected === f.family ? "bg-muted/60" : ""}`}>
                   <Td>
                     <button type="button" className="flex items-center gap-2 font-medium whitespace-nowrap" onClick={() => pick(f.family)}>
-                      <span className="h-[3px] w-3.5 rounded-full bg-foreground/30" />
                       {familyName(f.family)}
                     </button>
-                    <div className="pl-[22px] text-xs whitespace-nowrap text-faint">{f.hypothesis}, {f.study.replace("-", " ")}</div>
+                    <div className="text-xs whitespace-nowrap text-faint">{f.hypothesis}, {f.study.replace("-", " ")}</div>
                   </Td>
                   <Td className="text-right">{f.specs}</Td>
                   <Td className="text-right"><span className="tabular-nums text-foreground/80">{f.leaders[0] ? signed(f.leaders[0].sharpe_annual) : "–"}</span></Td>
@@ -155,18 +265,6 @@ export function LabView({ lab }: { lab: Lab }) {
         />
       </Panel>
 
-      <Panel
-        title="How far each family got"
-        description={`Every family runs the same ${lab.families[0]?.checks.length ?? 0} checks in order, and the first fatal miss ends its run. ${promoted === 0 ? "None reached the lockbox." : `${promoted} reached the lockbox.`} Hover a check for its numbers; select a family to read them all.`}
-      >
-        <div className="border-t pt-4">
-          <GateLineMap families={lab.families} selected={selected} onSelect={pick} />
-        </div>
-        <div className="mt-4 border-t pt-3">
-          <MapLegend />
-        </div>
-      </Panel>
-
       <div id="family-detail" className="scroll-mt-28">
         <Tabs value={selected} onValueChange={setSelected}>
           <Panel
@@ -176,12 +274,15 @@ export function LabView({ lab }: { lab: Lab }) {
           >
             <div className="overflow-x-auto px-5 pb-3">
               <TabsList className="h-8">
-                {lab.families.map((f) => (
-                  <TabsTrigger key={f.family} value={f.family} className="text-xs">{familyName(f.family)}</TabsTrigger>
+                {shown.map((f, i) => (
+                  <span key={f.family} className="flex items-center">
+                    {f.name && !shown[i - 1]?.name && <span aria-hidden className="mx-1.5 h-4 w-px bg-border" />}
+                    <TabsTrigger value={f.family} className={`text-xs ${f.name ? "font-mono" : ""}`}>{label(f)}</TabsTrigger>
+                  </span>
                 ))}
               </TabsList>
             </div>
-            {lab.families.map((f) => {
+            {shown.map((f) => {
               const stop = stopIndex(f);
               const insuff = f.verdict === "INSUFFICIENT_EVIDENCE";
               return (
@@ -205,7 +306,7 @@ export function LabView({ lab }: { lab: Lab }) {
                             {i === stop && <span className={`ml-2 text-xs font-normal ${insuff ? "text-warn" : "text-neg"}`}>{insuff ? "not enough evidence to judge" : "the line ends here"}</span>}
                           </Td>
                           <Td className="max-w-[520px] leading-5">{c.value.replace(/(^|[\s[(,])-(?=\d)/g, "$1−")}</Td>
-                          <Td className="text-muted-foreground">{sentence(c.need)}</Td>
+                          <Td className="text-muted-foreground">{/^[a-z]{2}/i.test(c.need) ? sentence(c.need) : c.need}</Td>
                         </tr>
                       ))}
                     </tbody>
@@ -264,6 +365,7 @@ export function LabView({ lab }: { lab: Lab }) {
           <p className="mt-3 text-xs leading-4 text-faint">
             This is the gate&apos;s calibration, not a result. It is how a reader can tell a strict gate from a lucky one.
           </p>
+          <LoopCalibrationRows rows={lab.loopCalibrations} />
         </Panel>
       )}
 

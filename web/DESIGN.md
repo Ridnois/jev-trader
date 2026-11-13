@@ -67,9 +67,23 @@ Examples:
 
 The home is a console, not a reading page. One answer line, then the four stations as an instrument rail: a mono value, its unit, an evidence bar where a denominator exists, and one note. Below it the paper book with a gauge per strategy, three book figures, four latest headlines and six prices. The explanation lives on How this works and on each station page; the home carries no definitions, no lede and no station index. Every rail cell is the link to its station. The sidebar is navigation only; station state lives in the rail, not in nav dots.
 
+## Lab
+
+`/lab` is the gate's page and answers **has anything earned the paper run?** for every family the gate has judged: the hand-written ones (one verdict per family) and the ones the hourly loop generated (composed rule ids, named `gNNNN` from the lineage). The state line counts both (`0 of 72 families passed`), the detail splits them and names the closest family and the check it failed, and the link goes to Generations.
+
+Figures: families judged (by hand / by the loop), trials on the ledger (hand-written searches / the loop), the lockbox, the last verdict with its time. **How far each family got** comes before the tables: one count line per cohort (hand-written, generated) saying how many were still in at each check, `–` where a cohort never runs that check, then rows for the hand-written families and the three generated families that came closest. Checks are aligned by name across families, because generated families carry the generation reality check. A REVISE row names the check it fell short on. **Hand-written families** is the verdict table; **Check by check** tabs cover every row of the map. The calibration panel shows the gate on synthetic markets, then **With the loop searching on top**: the `--auto` loop calibrations as a small table (no-edge markets promoted, edge markets found by the seed alone and only by the loop). Loop calibration files never feed the gate chart.
+
 ## Generations
 
-`/generations` is the evolve loop's record, read from `lab-data/lineage.jsonl` and `lab-data/reports/evolve/(dry-)gNNN.json`. The state line counts generated families that passed; then the lineage tree (hand-written roots, generated descendants, newest state and trials charged), trials per study, and one panel per cycle report, newest first. Dry runs carry a blue Dry run tag and say nothing was simulated or charged. In-sample and paper comparisons are neutral text, never coloured, because neither is evidence. With no lineage and no report it says so and names `jev-trader lab evolve --dry-run`.
+`/generations` answers one question: **is the loop getting closer?** It reads `lab-data/lineage.jsonl`, `lab-data/reports/evolve/(dry-)gNNN.json`, every `auto-<time>.json`, the user's crontab line for `scripts/v3-evolve-hourly.sh` and the ticks in `data-v3/evolve.log`.
+
+**Three words, nested.** The hourly cron starts a **run**; a run repeats **generations** until a stop rule; a generation proposes up to four **families** for the gate. The page never says cycle. The goal is stated once and in the same words everywhere: one family that fails none of the gate's checks. "Checks failed" is the distance to it, glossed with its misreading (checks are not equal).
+
+Order: question and state (`0 of 24 families passed`, the closest family and how many checks short, the next start in the meta), **How the loop runs** (four cells: every hour, each run, each generation, the goal, each with its live fact in the footer; then the lifetime trial budget per study as an n-of-N bar with runs left at the recent pace and the luck bar first → last; then the one glossary disclosure), **Distance to the goal** (the progress chart), **What stands in the way** (each check, families it stopped overall and in the latest generation; a 0 there is the only green, because it is progress), **Every generation** (reports grouped by run, newest run first, all collapsed, each run headed by when it started, its size and why it stopped), and the **Family tree** collapsed last.
+
+The progress chart is HTML, not a chart library: one column per generation, a dot per judged family by checks failed, 0 at the top as a dashed `--pos` goal line, the closest family per generation in foreground and joined by a line, the rest at 35%, "not enough evidence" hollow. Run spans label the columns above. One sentence under the title states the trend in words (closest generation, and whether the ones since beat it).
+
+Display rules kept: no fact printed twice, repeated machine prose hoisted once, in-sample and paper comparisons never coloured, verdict tallies in words (`3 rejected · 1 not enough evidence`, never "better than rejected").
 
 ## Motion
 
