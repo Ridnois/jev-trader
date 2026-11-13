@@ -1,0 +1,36 @@
+# g0008 — generation 2 — restrict
+# funding_carry's trades held > 168 bars lost -202.1 bps each while those held ≤ 168
+# bars made +55.6 (L46). Shorter holds should keep the second. The parent is hand-written
+# and its block form is an approximation, so this child is not a strict variant of it.
+# Rule: long when xs_funding($look) <= -0.5; short on the mirror; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c814dca20cc1d"
+interval = "1h"
+hypothesis = "H-G0008"
+name = "g0008"
+parent = "funding_carry"
+generation = 2
+operator = "restrict"
+lessons = ["L46"]
+reason = "funding_carry's trades held > 168 bars lost -202.1 bps each while those held ≤ 168 bars made +55.6 (L46). Shorter holds should keep the second. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+hold = [6.0, 12.0]
+look = [84.0, 168.0, 336.0]
+
+[fixed]
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$look"
+op = "<="
+level = -0.5

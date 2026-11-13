@@ -1,0 +1,50 @@
+# g0038 — generation 10 — restrict
+# g0036's shorts lost -30.9 bps per trade while its longs made +104.3 (L564). The long
+# side alone is the hypothesis.
+# Rule: long when channel($n) > 1 and vol_ratio($n) >= $vol_mult and xs_ret($b_look) >= $b_cut; long only
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c4985153e362d"
+interval = "1h"
+hypothesis = "H-G0038"
+name = "g0038"
+parent = "c920de65510cc"
+generation = 10
+operator = "restrict"
+lessons = ["L564"]
+reason = "g0036's shorts lost -30.9 bps per trade while its longs made +104.3 (L564). The long side alone is the hypothesis."
+
+[grid]
+n = [12.0, 24.0, 48.0]
+
+[fixed]
+b_cut = 0.6
+b_look = 336.0
+hold_days = 3.0
+stop = 600.0
+vol_mult = 2.5
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$n"
+op = ">="
+level = "$vol_mult"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = "$b_cut"

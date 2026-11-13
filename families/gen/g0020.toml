@@ -1,0 +1,34 @@
+# g0020 — generation 5 — explore
+# Budget was left after the lessons were used: cross-sectional momentum on the clock, a
+# pairing of blocks not yet in the lineage.
+# Rule: long when xs_ret($look) >= $cut; short on the mirror; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cf549dac63825"
+interval = "1h"
+hypothesis = "H-G0020"
+name = "g0020"
+generation = 5
+operator = "explore"
+reason = "Budget was left after the lessons were used: cross-sectional momentum on the clock, a pairing of blocks not yet in the lineage."
+
+[grid]
+cut = [0.6, 0.8]
+look = [72.0, 168.0]
+
+[fixed]
+hold = 24.0
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$look"
+op = ">="
+level = "$cut"

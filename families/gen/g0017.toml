@@ -1,0 +1,52 @@
+# g0017 — generation 5 — recombine
+# g0016 and funding_carry both made money on the design window with a daily correlation of
+# -0.16 (L189). Entering only when both agree tests whether each confirms the other. The
+# parent is hand-written and its block form is an approximation, so this child is not a
+# strict variant of it.
+# Rule: long when ret($n) > $min_ret and xs_funding($b_look) <= -0.5; short on the mirror; only when mkt_ret($mkt_n) > 0
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c177ecc7043e1"
+interval = "1h"
+hypothesis = "H-G0017"
+name = "g0017"
+parent = "cef1c03207966"
+generation = 5
+operator = "recombine"
+lessons = ["L189"]
+reason = "g0016 and funding_carry both made money on the design window with a daily correlation of -0.16 (L189). Entering only when both agree tests whether each confirms the other. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+n = [84.0, 168.0, 336.0]
+
+[fixed]
+b_look = 168.0
+hold_days = 7.0
+min_ret = 0.1
+mkt_n = 720.0
+shorts = 0.0
+stop = 1000.0
+
+[rule]
+short = "mirror"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "ret"
+n = "$n"
+op = ">"
+level = "$min_ret"
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_look"
+op = "<="
+level = -0.5
+
+[[rule.filter]]
+feature = "mkt_ret"
+n = "$mkt_n"
+op = ">"
+level = 0.0

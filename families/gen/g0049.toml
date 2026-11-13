@@ -1,0 +1,63 @@
+# g0049 — generation 13 — restrict
+# g0048's shorts lost -25.9 bps per trade while its longs made +112.7 (L793). The long
+# side alone is the hypothesis.
+# Rule: long when channel($n) > 1 and vol_ratio($n) >= $vol_mult and xs_ret($b_look) >= $b_cut and xs_ret($b_look) >= 0.5 and xs_funding($b_b_look) <= -0.5; long only
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c8309b88afbe5"
+interval = "1h"
+hypothesis = "H-G0049"
+name = "g0049"
+parent = "cbfc527c1f7a4"
+generation = 13
+operator = "restrict"
+lessons = ["L793"]
+reason = "g0048's shorts lost -25.9 bps per trade while its longs made +112.7 (L793). The long side alone is the hypothesis."
+
+[grid]
+n = [6.0, 12.0, 24.0]
+
+[fixed]
+b_b_look = 168.0
+b_cut = 0.6
+b_look = 672.0
+hold_days = 3.0
+stop = 600.0
+vol_mult = 2.5
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$n"
+op = ">="
+level = "$vol_mult"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = "$b_cut"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = 0.5
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_b_look"
+op = "<="
+level = -0.5

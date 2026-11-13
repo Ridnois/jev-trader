@@ -1,0 +1,43 @@
+# g0023 — generation 6 — recombine
+# g0020 and trend both made money on the design window with a daily correlation of +0.27
+# (L264). Entering only when both agree tests whether each confirms the other.
+# Rule: long when xs_ret($look) >= $cut and channel($b_n) > 1; short on the mirror; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c9a118ff1d35d"
+interval = "1h"
+hypothesis = "H-G0023"
+name = "g0023"
+parent = "cf549dac63825"
+generation = 6
+operator = "recombine"
+lessons = ["L264"]
+reason = "g0020 and trend both made money on the design window with a daily correlation of +0.27 (L264). Entering only when both agree tests whether each confirms the other."
+
+[grid]
+look = [84.0, 168.0, 336.0]
+
+[fixed]
+b_n = 384.0
+cut = 0.6
+hold = 24.0
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$look"
+op = ">="
+level = "$cut"
+
+[[rule.long]]
+feature = "channel"
+n = "$b_n"
+op = ">"
+level = 1.0

@@ -1,0 +1,42 @@
+# g0007 — generation 2 — shrink
+# On trend's grid, out_frac, stop made no difference (L58). The same rule as blocks with
+# those fixed at the pick searches fewer specs, so the reality check has fewer lucky draws
+# to forgive.
+# Rule: long when channel($n) > 1; short on the mirror; close a long when channel($n*$out_frac) < -1
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c4628412b4bd4"
+interval = "1h"
+hypothesis = "H-G0007"
+name = "g0007"
+parent = "trend"
+generation = 2
+operator = "shrink"
+lessons = ["L58"]
+reason = "On trend's grid, out_frac, stop made no difference (L58). The same rule as blocks with those fixed at the pick searches fewer specs, so the reality check has fewer lucky draws to forgive."
+
+[grid]
+n = [192.0, 384.0]
+shorts = [0.0, 1.0]
+
+[fixed]
+out_frac = 0.25
+stop = 800.0
+
+[rule]
+short = "mirror"
+filter = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.exit]]
+feature = "channel"
+n = "$n*$out_frac"
+op = "<"
+level = -1.0

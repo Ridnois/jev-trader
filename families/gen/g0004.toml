@@ -1,0 +1,37 @@
+# g0004 — generation 1 — restrict
+# meanrev's shorts lost -10.5 bps per trade while its longs made +14.9 (L19). The long
+# side alone is the hypothesis. The parent is hand-written and its block form is an
+# approximation, so this child is not a strict variant of it.
+# Rule: long when z($n) <= $z*-1; long only
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cb3fcf9cdfcab"
+interval = "15m"
+hypothesis = "H-G0004"
+name = "g0004"
+parent = "meanrev"
+generation = 1
+operator = "restrict"
+lessons = ["L19"]
+reason = "meanrev's shorts lost -10.5 bps per trade while its longs made +14.9 (L19). The long side alone is the hypothesis. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+n = [48.0, 96.0, 192.0]
+
+[fixed]
+hold = 96.0
+stop = 0.0
+z = 1.5
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "z"
+n = "$n"
+op = "<="
+level = "$z*-1"

@@ -1,0 +1,43 @@
+# g0018 — generation 5 — invert
+# g0015 lost -6.4 bps/day with 5 of 20 coins positive (L175). A rule that loses this
+# broadly may be wrong-way: its opposite is tested as a separate hypothesis, with the
+# search charged again.
+# Rule: long when xs_funding($look) >= $cut and ret($look) >= -0; short on the mirror
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cf02cf1542dc1"
+interval = "1h"
+hypothesis = "H-G0018"
+name = "g0018"
+parent = "c6c4fe788d2e4"
+generation = 5
+operator = "invert"
+lessons = ["L175"]
+reason = "g0015 lost -6.4 bps/day with 5 of 20 coins positive (L175). A rule that loses this broadly may be wrong-way: its opposite is tested as a separate hypothesis, with the search charged again."
+
+[grid]
+look = [12.0, 24.0, 48.0]
+
+[fixed]
+cut = 0.6
+hold = 24.0
+stop = 800.0
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$look"
+op = ">="
+level = "$cut"
+
+[[rule.long]]
+feature = "ret"
+n = "$look"
+op = ">="
+level = -0.0

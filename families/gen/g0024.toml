@@ -1,0 +1,40 @@
+# g0024 — generation 6 — explore
+# Budget was left after the lessons were used: a breakout on a volume surge, a pairing of
+# blocks not yet in the lineage.
+# Rule: long when channel($n) > 1 and vol_ratio($n) >= $vol_mult; short on the mirror
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c381325fadbc6"
+interval = "1h"
+hypothesis = "H-G0024"
+name = "g0024"
+generation = 6
+operator = "explore"
+reason = "Budget was left after the lessons were used: a breakout on a volume surge, a pairing of blocks not yet in the lineage."
+
+[grid]
+n = [48.0, 96.0]
+vol_mult = [1.5, 2.5]
+
+[fixed]
+hold_days = 3.0
+stop = 600.0
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$n"
+op = ">="
+level = "$vol_mult"

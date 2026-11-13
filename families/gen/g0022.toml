@@ -1,0 +1,45 @@
+# g0022 — generation 6 — recombine
+# g0020 and funding_carry both made money on the design window with a daily correlation of
+# -0.04 (L263). Entering only when both agree tests whether each confirms the other. The
+# parent is hand-written and its block form is an approximation, so this child is not a
+# strict variant of it.
+# Rule: long when xs_ret($look) >= $cut and xs_funding($b_look) <= -0.5; short on the mirror; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c34d6495a4120"
+interval = "1h"
+hypothesis = "H-G0022"
+name = "g0022"
+parent = "cf549dac63825"
+generation = 6
+operator = "recombine"
+lessons = ["L263"]
+reason = "g0020 and funding_carry both made money on the design window with a daily correlation of -0.04 (L263). Entering only when both agree tests whether each confirms the other. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+look = [84.0, 168.0, 336.0]
+
+[fixed]
+b_look = 168.0
+cut = 0.6
+hold = 24.0
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$look"
+op = ">="
+level = "$cut"
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_look"
+op = "<="
+level = -0.5

@@ -1,0 +1,56 @@
+# g0014 — generation 4 — recombine
+# g0010 and xs_reversal both made money on the design window with a daily correlation of
+# +0.18 (L130). Entering only when both agree tests whether each confirms the other. The
+# parent is hand-written and its block form is an approximation, so this child is not a
+# strict variant of it.
+# Rule: long when channel($n) > 1 and xs_funding($b_look) <= -0.5 and xs_ret($b_look) >= 0.5; short on the mirror; close a long when channel($n*$out_frac) < -1
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cca756dc8a28b"
+interval = "1h"
+hypothesis = "H-G0014"
+name = "g0014"
+parent = "cdeda7bae109d"
+generation = 4
+operator = "recombine"
+lessons = ["L130"]
+reason = "g0010 and xs_reversal both made money on the design window with a daily correlation of +0.18 (L130). Entering only when both agree tests whether each confirms the other. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+n = [96.0, 192.0, 384.0]
+
+[fixed]
+b_look = 168.0
+out_frac = 0.25
+shorts = 0.0
+stop = 800.0
+
+[rule]
+short = "mirror"
+filter = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_look"
+op = "<="
+level = -0.5
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = 0.5
+
+[[rule.exit]]
+feature = "channel"
+n = "$n*$out_frac"
+op = "<"
+level = -1.0

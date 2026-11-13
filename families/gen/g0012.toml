@@ -1,0 +1,38 @@
+# g0012 — generation 3 — shrink
+# On meanrev's grid, n, resid made no difference (L48). The same rule as blocks with those
+# fixed at the pick searches fewer specs, so the reality check has fewer lucky draws to
+# forgive. The parent is hand-written and its block form is an approximation, so this
+# child is not a strict variant of it.
+# Rule: long when z($n) <= $z*-1; short on the mirror
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c95feeac911fe"
+interval = "15m"
+hypothesis = "H-G0012"
+name = "g0012"
+parent = "meanrev"
+generation = 3
+operator = "shrink"
+lessons = ["L48"]
+reason = "On meanrev's grid, n, resid made no difference (L48). The same rule as blocks with those fixed at the pick searches fewer specs, so the reality check has fewer lucky draws to forgive. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+hold = [48.0, 96.0]
+stop = [0.0, 300.0]
+z = [1.5, 2.0]
+
+[fixed]
+n = 96.0
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "z"
+n = "$n"
+op = "<="
+level = "$z*-1"

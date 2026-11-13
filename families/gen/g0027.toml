@@ -1,0 +1,42 @@
+# g0027 — generation 7 — restrict
+# g0024's shorts lost -44.1 bps per trade while its longs made +60.3 (L344). The long side
+# alone is the hypothesis.
+# Rule: long when channel($n) > 1 and vol_ratio($n) >= $vol_mult; long only
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "ccd00a22cdd53"
+interval = "1h"
+hypothesis = "H-G0027"
+name = "g0027"
+parent = "c381325fadbc6"
+generation = 7
+operator = "restrict"
+lessons = ["L344"]
+reason = "g0024's shorts lost -44.1 bps per trade while its longs made +60.3 (L344). The long side alone is the hypothesis."
+
+[grid]
+n = [24.0, 48.0, 96.0]
+
+[fixed]
+hold_days = 3.0
+stop = 600.0
+vol_mult = 2.5
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$n"
+op = ">="
+level = "$vol_mult"

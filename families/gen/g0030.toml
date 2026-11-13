@@ -1,0 +1,50 @@
+# g0030 — generation 8 — recombine
+# g0025 and g0020 both made money on the design window with a daily correlation of +0.02
+# (L424). Entering only when both agree tests whether each confirms the other.
+# Rule: long when xs_ret($look) >= $cut and xs_funding($b_look) <= -0.5 and xs_ret($b_look) >= $b_cut; long only; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c35f4eddf644f"
+interval = "1h"
+hypothesis = "H-G0030"
+name = "g0030"
+parent = "c4a39d2abc465"
+generation = 8
+operator = "recombine"
+lessons = ["L424"]
+reason = "g0025 and g0020 both made money on the design window with a daily correlation of +0.02 (L424). Entering only when both agree tests whether each confirms the other."
+
+[grid]
+look = [336.0, 672.0, 1344.0]
+
+[fixed]
+b_cut = 0.6
+b_look = 168.0
+cut = 0.6
+hold = 24.0
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$look"
+op = ">="
+level = "$cut"
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_look"
+op = "<="
+level = -0.5
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = "$b_cut"

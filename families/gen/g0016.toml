@@ -1,0 +1,41 @@
+# g0016 — generation 4 — explore
+# Budget was left after the lessons were used: a trend entry only in a rising market, a
+# pairing of blocks not yet in the lineage.
+# Rule: long when ret($n) > $min_ret; short on the mirror; only when mkt_ret($mkt_n) > 0
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cef1c03207966"
+interval = "1h"
+hypothesis = "H-G0016"
+name = "g0016"
+generation = 4
+operator = "explore"
+reason = "Budget was left after the lessons were used: a trend entry only in a rising market, a pairing of blocks not yet in the lineage."
+
+[grid]
+min_ret = [0.1, 0.2]
+n = [168.0, 336.0]
+
+[fixed]
+hold_days = 7.0
+mkt_n = 720.0
+shorts = 0.0
+stop = 1000.0
+
+[rule]
+short = "mirror"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "ret"
+n = "$n"
+op = ">"
+level = "$min_ret"
+
+[[rule.filter]]
+feature = "mkt_ret"
+n = "$mkt_n"
+op = ">"
+level = 0.0

@@ -1,0 +1,36 @@
+# g0021 — generation 6 — restrict
+# g0020's shorts lost -18.8 bps per trade while its longs made +95.6 (L261). The long side
+# alone is the hypothesis.
+# Rule: long when xs_ret($look) >= $cut; long only; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c8bdcdb317d68"
+interval = "1h"
+hypothesis = "H-G0021"
+name = "g0021"
+parent = "cf549dac63825"
+generation = 6
+operator = "restrict"
+lessons = ["L261"]
+reason = "g0020's shorts lost -18.8 bps per trade while its longs made +95.6 (L261). The long side alone is the hypothesis."
+
+[grid]
+look = [84.0, 168.0, 336.0]
+
+[fixed]
+cut = 0.6
+hold = 24.0
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$look"
+op = ">="
+level = "$cut"

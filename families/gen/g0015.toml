@@ -1,0 +1,40 @@
+# g0015 — generation 4 — explore
+# Budget was left after the lessons were used: crowded funding faded, a pairing of blocks
+# not yet in the lineage.
+# Rule: long when xs_funding($look) <= $cut*-1 and ret($look) <= 0; short on the mirror
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c6c4fe788d2e4"
+interval = "1h"
+hypothesis = "H-G0015"
+name = "g0015"
+generation = 4
+operator = "explore"
+reason = "Budget was left after the lessons were used: crowded funding faded, a pairing of blocks not yet in the lineage."
+
+[grid]
+cut = [0.6, 0.8]
+look = [24.0, 72.0]
+
+[fixed]
+hold = 24.0
+stop = 800.0
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$look"
+op = "<="
+level = "$cut*-1"
+
+[[rule.long]]
+feature = "ret"
+n = "$look"
+op = "<="
+level = 0.0

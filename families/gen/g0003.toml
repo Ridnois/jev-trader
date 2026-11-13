@@ -1,0 +1,45 @@
+# g0003 — generation 1 — restrict
+# hvt's shorts lost -11.6 bps per trade while its longs made +21.0 (L11). The long side
+# alone is the hypothesis. The parent is hand-written and its block form is an
+# approximation, so this child is not a strict variant of it.
+# Rule: long when z($vol_look) >= $z and vol_ratio($vol_look) >= $vol_mult; long only
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cf814300a8476"
+interval = "15m"
+hypothesis = "H-G0003"
+name = "g0003"
+parent = "hvt"
+generation = 1
+operator = "restrict"
+lessons = ["L11"]
+reason = "hvt's shorts lost -11.6 bps per trade while its longs made +21.0 (L11). The long side alone is the hypothesis. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+vol_look = [96.0, 192.0, 384.0]
+
+[fixed]
+hold = 24.0
+max_positions = 0.0
+stop = 0.0
+vol_mult = 3.0
+z = 2.5
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "z"
+n = "$vol_look"
+op = ">="
+level = "$z"
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$vol_look"
+op = ">="
+level = "$vol_mult"
