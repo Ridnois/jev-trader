@@ -133,12 +133,15 @@ target/lab/jev-trader lab validate --family families/trend.toml   # PROMOTE_TO_P
 target/lab/jev-trader lab jev score --probe probes/fade_judge.toml
 target/lab/jev-trader --env-file .env.local trade run             # paper only
 target/lab/jev-trader trade monitor
+target/lab/jev-trader lab evolve --dry-run                        # what the loop would propose next
+target/lab/jev-trader lab evolve                                  # one cycle: learn, propose, judge, compare
 ```
 
 - `lab validate` searches a family's declared grid (`families/*.toml`) on a design window and returns one verdict: walk-forward out of sample, a reality check over the whole family, deflated Sharpe with the trial count read from `lab-data/trials.jsonl`, PBO, cost and delay stress, breadth, a time-shifted baseline, then a lockbox only a passing candidate opens. Thresholds are in `lab.toml`.
 - `lab calibrate` runs that gate on synthetic markets with nothing to find (it promoted none of 200) and with planted edges.
 - `lab jev replay | score` asks Jev typed questions about an anonymous market state at each historical candidate, caches the answers and scores them against what happened next.
 - `trade run` paper-trades the specs in `strategies/` with the simulator's own rules, records every Jev-scored headline as a catalyst candidate with markouts (no orders), and writes 1-second rows. `trade monitor` checks parity with the simulator and runs the sequential test against each strategy's prediction card.
+- `lab evolve` learns from every verdict and paper result, proposes up to four new families (composed from a closed block library, written to `families/gen/` with a hypothesis each), charges and judges them together, and compares them with what is already there. It never promotes. `lab learn`, `lab propose`, `lab compare` and `lab lineage` run the steps alone. See DESIGN-V3.md §7.
 - Verdicts so far (2026-11-11): all four families REJECT, including H-R01's rule, which loses over 2.3 years. See DESIGN-V3.md §4.
 
 ## Dashboard

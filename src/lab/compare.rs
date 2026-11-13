@@ -110,7 +110,11 @@ impl Books {
 /// The gate on one family, with the search charged and the lockbox logged: what
 /// `lab validate` does, and what `lab compare` does for each proposal.
 #[allow(clippy::too_many_arguments)]
-pub fn validate_family(lab: &LabConfig, fam: &Family, full: &Panel, venue: Option<&Panel>, aux: &Aux, force: Option<&Spec>, design_trials: Option<Vec<Trial>>, generation: Option<&[Vec<f64>]>, books: &mut Books) -> Result<Evaluation> {
+///
+/// `looks` counts earlier looks at this study's lockbox that are not openings: for a
+/// generated family, every generated family judged on the study before it. Each adds
+/// one to the divisor of the lockbox's α, as an opening does.
+pub fn validate_family(lab: &LabConfig, fam: &Family, full: &Panel, venue: Option<&Panel>, aux: &Aux, force: Option<&Spec>, design_trials: Option<Vec<Trial>>, generation: Option<&[Vec<f64>]>, looks: usize, books: &mut Books) -> Result<Evaluation> {
     let study = format!("{}-{}", full.venue, full.interval);
     let cfg = SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
     // Charge this grid first, so the count the gate uses includes it.
@@ -129,7 +133,7 @@ pub fn validate_family(lab: &LabConfig, fam: &Family, full: &Panel, venue: Optio
     // The pick isn't known before the run; count every earlier opening, then correct below.
     let all_prior = prior("");
     let vaux = Aux::default();
-    let inputs = |reads: usize, trials: Option<Vec<Trial>>| gate::Inputs { full, aux, venue: venue.map(|v| (v, &vaux)), fam, ledger_trials, lockbox_reads: reads, force, design_trials: trials, generation };
+    let inputs = |reads: usize, trials: Option<Vec<Trial>>| gate::Inputs { full, aux, venue: venue.map(|v| (v, &vaux)), fam, ledger_trials, lockbox_reads: reads + looks, force, design_trials: trials, generation };
     let mut ev = gate::evaluate(inputs(all_prior, Some(trials)), lab)?;
     if let (true, Some(p)) = (ev.lockbox_opened, ev.pick.clone()) {
         let own = prior(&p.id());
@@ -139,6 +143,9 @@ pub fn validate_family(lab: &LabConfig, fam: &Family, full: &Panel, venue: Optio
         } else {
             books.log_lock(LockboxRead { study: study.clone(), family: fam.family.clone(), spec: p.id(), at: chrono::Utc::now(), passed: ev.verdict == Verdict::PromoteToPaper });
         }
+    }
+    if looks > 0 {
+        ev.notes.push(format!("{looks} generated families were judged on this study before this one; each counts as a look at the lockbox, so its α is divided by {} plus the openings", looks + 1));
     }
     Ok(ev)
 }
@@ -159,7 +166,13 @@ pub type PanelSource<'a> = dyn FnMut(&Family) -> Result<(Panel, Option<Panel>)> 
 
 /// Simulates and charges every proposal, then judges each with the generation-wide
 /// reality check of its study.
-pub fn judge_generation(lab: &LabConfig, fams: &[Family], panels: &mut PanelSource, books: &mut Books) -> Result<Vec<Judged>> {
+///
+/// `judged_before` gives, per study, how many generated families were judged on it in
+/// earlier cycles. A generated family's walk-forward is not truly out of sample (it was
+/// shaped after the design window was seen), so the lockbox is its only clean test, and
+/// that test has to carry the loop's multiple testing: the k-th generated family on a
+/// study meets the lockbox at α / k (on top of the openings already counted).
+pub fn judge_generation(lab: &LabConfig, fams: &[Family], panels: &mut PanelSource, judged_before: &dyn Fn(&str) -> usize, books: &mut Books) -> Result<Vec<Judged>> {
     let cfg = SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
     // 1. Every grid simulated and charged before any verdict is read.
     let mut runs = Vec::with_capacity(fams.len());
@@ -178,8 +191,12 @@ pub fn judge_generation(lab: &LabConfig, fams: &[Family], panels: &mut PanelSour
     }
     // 3. The gate on each, as `lab validate` runs it.
     let mut out = Vec::with_capacity(fams.len());
+    let mut in_cycle: BTreeMap<String, usize> = BTreeMap::new();
     for (fam, (full, venue, study, trials, new)) in fams.iter().zip(runs) {
-        let ev = validate_family(lab, fam, &full, venue.as_ref(), &Aux::default(), None, Some(trials), union.get(&study).map(Vec::as_slice), books)?;
+        let k = in_cycle.entry(study.clone()).or_default();
+        let looks = judged_before(&study) + *k;
+        *k += 1;
+        let ev = validate_family(lab, fam, &full, venue.as_ref(), &Aux::default(), None, Some(trials), union.get(&study).map(Vec::as_slice), looks, books)?;
         out.push(Judged { label: fam.label().to_string(), family: fam.family.clone(), study, new_trials: new, eval: ev });
     }
     Ok(out)
@@ -294,7 +311,7 @@ mod tests {
         let fams: Vec<Family> = std::iter::once(fade.clone()).chain(noise).collect();
         let mut books = Books::memory();
         let mut src = |_: &Family| Ok((p.clone(), None));
-        let judged = judge_generation(&lab, &fams, &mut src, &mut books).unwrap();
+        let judged = judge_generation(&lab, &fams, &mut src, &|_| 0, &mut books).unwrap();
         assert_eq!(judged.len(), 4);
         assert_eq!(books.total("synthetic-1h"), 10, "every spec of every proposal is charged once");
         assert_eq!(judged.iter().map(|j| j.new_trials).sum::<usize>(), 10);
@@ -305,7 +322,8 @@ mod tests {
         let fade_mean = judged[0].eval.evidence.as_ref().map(|e| stat::mean(&e.daily)).unwrap();
         assert!(fade_mean > 0.0, "{fade_mean}");
         // A rerun charges nothing new.
-        let again = judge_generation(&lab, &fams[..1], &mut src, &mut books).unwrap();
+        let again = judge_generation(&lab, &fams[..1], &mut src, &|_| 4, &mut books).unwrap();
+        assert!(again[0].eval.notes.iter().any(|n| n.contains("4 generated families")), "{:?}", again[0].eval.notes);
         assert_eq!(again[0].new_trials, 0);
         // Comparison: the fade against itself with a different hold is near-duplicate; against noise, not.
         let design = p.head(super::super::design_bars(&p, &lab));

@@ -311,7 +311,9 @@ pub fn compare_files(lab: &LabConfig, generation: u32, report: &mut CycleReport)
     let before: BTreeMap<String, usize> = on_disk.iter().map(|f| format!("{}-{}", lab.research_venue, f.interval)).map(|s| (s.clone(), books.total(&s))).collect();
     let locks_before = books.lockbox_openings();
     let mut src = archive_panels(lab);
-    let mut judged = compare::judge_generation(lab, &on_disk, &mut src, &mut books)?;
+    let earlier = lineage::load(&lab.lineage_path());
+    let judged_before = |study: &str| earlier.iter().filter(|e| e.event == "tested" && e.study == study).count();
+    let mut judged = compare::judge_generation(lab, &on_disk, &mut src, &judged_before, &mut books)?;
     for j in &mut judged {
         j.eval.notes.push(WALK_NOTE.into());
         write_verdict(lab, &j.eval)?;
@@ -519,7 +521,7 @@ pub fn run_loop(lab: &LabConfig, seed_fam: &Family, p: &Panel, generations: u32,
     let mut res = LoopResult { promoted_by_gen: vec![0; generations as usize + 1], ..Default::default() };
     let mut families: HashMap<String, Family> = HashMap::new();
     families.insert(seed_fam.family.clone(), seed_fam.clone());
-    let ev = compare::validate_family(lab, seed_fam, p, None, &Aux::default(), None, None, None, &mut books)?;
+    let ev = compare::validate_family(lab, seed_fam, p, None, &Aux::default(), None, None, None, 0, &mut books)?;
     let mut verdicts: Vec<(String, serde_json::Value)> = vec![("memory".into(), serde_json::to_value(&ev)?)];
     res.promoted_by_gen[0] += (ev.verdict == Verdict::PromoteToPaper) as usize;
     *res.verdicts.entry(ev.verdict.word().into()).or_default() += 1;
@@ -541,10 +543,11 @@ pub fn run_loop(lab: &LabConfig, seed_fam: &Family, p: &Panel, generations: u32,
             families.insert(x.family.family.clone(), x.family.clone());
         }
         let mut src = |_: &Family| Ok((p.clone(), None));
-        for j in compare::judge_generation(lab, &fams, &mut src, &mut books)? {
+        let before = events.iter().filter(|e| e.event == "tested").count();
+        for j in compare::judge_generation(lab, &fams, &mut src, &|_| before, &mut books)? {
             res.promoted_by_gen[gen_no as usize] += (j.eval.verdict == Verdict::PromoteToPaper) as usize;
             *res.verdicts.entry(j.eval.verdict.word().into()).or_default() += 1;
-            events.push(Event { event: "tested".into(), family: j.family.clone(), name: j.label.clone(), generation: gen_no, verdict: Some(j.eval.verdict.word().into()), trials: j.new_trials, ..Event::default() });
+            events.push(Event { event: "tested".into(), family: j.family.clone(), name: j.label.clone(), generation: gen_no, verdict: Some(j.eval.verdict.word().into()), trials: j.new_trials, study: j.study.clone(), ..Event::default() });
             verdicts.push(("memory".into(), serde_json::to_value(&j.eval)?));
         }
     }
@@ -652,3 +655,4 @@ mod tests {
         assert!(md.contains("Dry run"));
     }
 }
+

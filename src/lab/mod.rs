@@ -587,7 +587,7 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             let venue = if venue_name == HL { None } else { lab.panel(HL, &fam.interval, &lab.universe.coins).ok() };
             let study = format!("{}-{}", full.venue, full.interval);
             let force = spec.as_deref().map(parse_spec).transpose()?;
-            let ev = compare::validate_family(lab, &fam, &full, venue.as_ref(), &aux, force.as_ref(), None, None, &mut compare::Books::files(lab))?;
+            let ev = compare::validate_family(lab, &fam, &full, venue.as_ref(), &aux, force.as_ref(), None, None, 0, &mut compare::Books::files(lab))?;
             let md = gate::markdown(&ev);
             let dir = lab.report_dir(&study);
             std::fs::create_dir_all(&dir)?;

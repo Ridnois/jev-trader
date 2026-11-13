@@ -26,6 +26,10 @@ lab validate   search + the gate → PROMOTE_TO_PAPER / REVISE / REJECT / INSUFF
 lab promote    hand the spec and its prediction card to the trader
 trade run      paper: same plan and rules as the simulator, live Hyperliquid book
 trade monitor  parity with the simulator, sequential test against the card, drawdown envelope
+
+lab evolve     on demand: learn from every verdict and paper result → propose a few new
+               families → charge and judge them together → compare with the incumbents
+               → one report. Nothing is promoted (§7)
 ```
 
 Jev sits in two places: `lab jev replay | score` (a typed market read replayed over history) and the catalyst recorder inside `trade run` (headlines, forward only).
@@ -36,7 +40,7 @@ Jev sits in two places: `lab jev replay | score` (a typed market read replayed o
 
 **Universe** (`panel.rs`). A fixed list of 20 perps listed on both venues. A coin is tradable on a day only if its median daily dollar volume over the 30 days *before* was at least $50M. The list itself was drawn up today, so it favours coins that survived; the volume filter removes only part of that bias.
 
-**Strategies as data** (`strategy.rs`, `families/*.toml`). A family is a rule plus the grid the search may try. Nothing outside the grid is tested, and both directions of an idea go in the grid when both were considered. Every family is checked for look-ahead: its signals up to a bar must not change when the future is cut off.
+**Strategies as data** (`strategy.rs`, `compose.rs`, `families/*.toml`). A family is a rule plus the grid the search may try. Nothing outside the grid is tested, and both directions of an idea go in the grid when both were considered. A rule is either hand-written (`trend`, `meanrev`, …) or **composed** from a closed library of eleven causal features (`ret`, `z`, `resid_z`, `channel`, `vol_ratio`, `rvol`, `funding`, `xs_ret`, `xs_funding`, `mkt_ret`, `mkt_rvol_pct`): entry conditions for the long side, mirrored for shorts, side-agnostic filters, exits. A composed family is named by a hash of its rule (`c4628412b4bd4` is `trend` written as blocks), so the same rule written twice is counted as one, whatever the file is called; a test requires that composed `trend` makes exactly the hand-written trades. Promoted composed strategies carry their rule, so the trader never depends on a family file. Every family file on disk, generated ones included, is checked for look-ahead: its signals up to a bar must not change when the future is cut off.
 
 **One simulator** (`sim.rs`, `rules.rs`). A signal at a bar's close fills at the next open. Order within a bar: all exits, then entries, then intrabar stops (a stop fills at its price, or at the open if price gapped through, plus extra stop slippage). Costs per side: 4.5 bps fee, half a 2 bps spread, 1 bps slippage. Funding prints are charged while a position is open. Size is volatility-targeted: a one-sigma day in the coin moves the account 0.4%, capped at 15% per position and 100% gross. Results are per UTC day on a fixed capital base, because days, not trades, are the independent unit.
 
@@ -112,14 +116,14 @@ Not tested yet: `direction` (H-J02), the full multi-year replay (about 16,000 en
 
 ## 6. The trader (`src/trade/`)
 
-`trade run` loads `strategies/*.json`, splits capital equally, and for each strategy recomputes the plan at every bar close on Hyperliquid's own candles, then acts on the live book. Stops are checked every second, funding accrues, positions survive a restart. The book (`book.rs`) is a pure state machine; a test replays panels through it bar by bar and requires the simulator's trades.
+`trade run` loads `strategies/*.json`, gives each new strategy a fixed paper capital (`[trade] capital_per_strategy`, so adding one never resizes the others), and for each strategy recomputes the plan at every bar close on Hyperliquid's own candles, then acts on the live book. Stops are checked every second, funding accrues, positions survive a restart. The book (`book.rs`) is a pure state machine; a test replays panels through it bar by bar and requires the simulator's trades.
 
 `trade monitor` answers three questions from files:
 1. **Parity**: do paper entries match the simulator's on the same days? Entries are matched by coin, side and the bar that *decided* them, over bars from that strategy's own first bar (a strategy added to a running engine has no paper history before it) up to the last bar the simulator can fill. An entry on a bar where the simulator already held that coin on that side is counted as a **late join**, not a disagreement: a breakout promoted into an open trend starts flat, so its book can only pick up positions the simulator opened days earlier. Everything else unmatched means the two engines disagree.
 2. **Sequential test**: KILL when "no edge" has become the better explanation of the paper days, GRADUATE when the card's edge has (5% false positives, 80% power).
 3. **Drawdown**: past the 99th percentile of the backtest's own bootstrap for the days elapsed is a KILL.
 
-It writes a verdict and applies nothing. v3 places no real orders; graduating on paper is the precondition, and arming stays a human decision.
+It writes a verdict (`monitor.md`, and typed in `monitor.json`, with paper fill costs against the cost model) and applies nothing. A KILL or GRADUATE is also written to the lineage (§7); a child strategy is shown next to its parent on the days both were up. v3 places no real orders; graduating on paper is the precondition, and arming stays a human decision.
 
 Also in the engine:
 - **Jev catalyst scalper, record mode** (`catalyst.rs`, `intel/`, ported from v2): 18 feeds and 4 exchange announcement APIs, local tagging, batched Jev scoring under an hourly call budget. Every scored headline about a coin is logged with the live mid and marked out at 5 min, 30 min, 2 h and 6 h net of the round trip, triggered or not. Historical news replay leaks hindsight, so this evidence can only be collected forward.
@@ -127,7 +131,30 @@ Also in the engine:
 - **Maker-exit record** (H-X01): for every time-stop exit, whether a resting order at the touch would have filled within 5 minutes.
 - **Live probes** (off by default): any probe can be asked at each bar close into the same cache a replay writes.
 
-## 7. Running it
+## 7. The evolve loop (`learn.rs`, `propose.rs`, `compare.rs`, `lineage.rs`, `evolve.rs`)
+
+`lab evolve` runs once and exits. It changes how strategies are **created**, not how they are judged: thresholds, cost model and universe are untouched, and promotion stays `lab promote`.
+
+1. **Learn** (`lab learn`). Reads every verdict, the trial ledger, `monitor.json` and the lineage, simulates nothing, and writes typed lessons to `lab-data/lessons/<date>.{json,md}`: failed checks, which grid dimensions move the result and which are flat, market states the pick earns or loses in (basket trend and volatility, t counted in 5-day blocks), a losing side, losing long holds, broad losses, one-coin profits, unstable walk-forward picks, correlation between families, paper calls, branches whose descendants all died. The gate now keeps the pick's design-window record (daily returns, basket, by coin, side, holding time, exit) for this; it never contains lockbox days. Lessons on fewer observations than `[evolve]` asks for are **anecdotes** and are not acted on. Paper results never tune a running strategy, and execution lessons (paper fills against `[costs]`) are addressed to the operator, because changing the cost model re-prices every trial on record.
+2. **Propose** (`lab propose`). Deterministic operators turn lessons into at most 4 families of at most 12 specs and 40 new trials per cycle: **condition** (a market-state filter), **restrict** (long only, shorter holds), **invert** (the opposite of a broad loser, as its own hypothesis), **recombine** (two unrelated profitable entries that must agree), **shrink** (a hand-written parent as blocks with flat dimensions fixed), **explore** (a feature pairing not yet tried). One proposal per parent comes first; nothing in the lineage is proposed again; reaching the trial budget stops the cycle and says so. Each proposal is a file in `families/gen/` with its reason and lessons, and a `hypotheses.toml` entry written before its first simulation. Hand-written parents other than `trend` have only approximate block forms, and their children say so.
+3. **Compare** (`lab compare`). Every spec of every proposal is simulated and charged before any verdict is read. Each family then goes through the same gate as `lab validate`, plus a **generation reality check** over the union of all the cycle's specs on its study: it must pass before the lockbox can open, so a family that only looks good because four were tried at once gets REVISE at best. Each pick is set against the incumbents (strategies on paper, every other verdict's pick) on common design-window days, with a block-bootstrap interval on the difference; a 0.9 correlation marks a duplicate.
+4. **Report**: `lab-data/reports/evolve/gNNN.{json,md}` states the trials charged and what they did to the luck bar (the Sharpe the best of N no-edge rules would show), each proposal with its reason and verdict, the comparison, and what might be promoted, usually nothing. `--dry-run` learns and proposes only: no simulation, no trial, no family file.
+
+`lab-data/lineage.jsonl` remembers every proposal, verdict, promotion and paper call; `lab lineage` prints the tree.
+
+**What searching costs.** A loop that reads results and proposes again is a wider search than a grid. Three consequences: a generated family's walk-forward folds are not truly out of sample (its structure was chosen after looking at the whole design window), so its report says the lockbox and paper days are its only clean evidence; the deflated-Sharpe bar rises with every cycle, which the report shows; lockbox openings tighten the next one per study, and for generated families so does every earlier generated family judged on the study (below).
+
+**Calibration** (`lab calibrate --evolve`): the whole loop, five generations deep, in memory on synthetic markets.
+
+| Synthetic markets (700 days × 8 coins, 5 generations, 4 × 12 specs per cycle) | Seed | Panels with any promotion | Seed alone |
+|---|---|---|---|
+| Nothing to find | `meanrev` (15m, 384 specs) | 0 of 100, and 0 of 100 on fresh seeds | 0 |
+| Nothing to find | `trend` (1h, 40 specs) | 0 of 100, and 0 of 100 on fresh seeds | 0 |
+| Planted edge, strong (0.08) | `meanrev` | 36 of 40 (90%) | 34 of 40 (85%) |
+
+The first run failed the requirement: with `trend` as the seed, 1 of 100 noise panels promoted a generation-3 family that recombined two in-sample winners, passed every design-window check, and then passed the lockbox at p = 0.055 (α 0.20). The design-window checks cannot protect a generated family (its parents were chosen on those days), so the lockbox is its only clean test, and it now carries the loop's multiple testing: every generated family judged on a study counts as a look at that study's lockbox, so the k-th meets α / k on top of the openings already counted. No threshold in `lab.toml` changed. That panel then gave REVISE, the same 100 panels gave 0, and so did 100 panels on seeds never used before (`lab-data/reports/calibration-evolve-*.md`). The price: the loop now adds 2 panels to the seed's 34 under a strong edge, where it added 4.
+
+## 8. Running it
 
 ```sh
 cargo build --profile lab -j 2                      # opt-level 2: bootstraps are slow unoptimized
@@ -148,9 +175,15 @@ $B lab promote --family families/trend.toml --candidate \
     --spec "trend:n=96,out_frac=0.25,shorts=1,stop=800" --as trend_fast  # another spec of the same family, beside the first
 $B --env-file .env.local trade run                  # paper; needs the Jev key only for the catalyst recorder
 $B trade monitor
+
+$B lab evolve --dry-run                             # lessons + would-be proposals; nothing charged
+$B lab evolve                                       # one cycle: proposals written, charged, judged, compared
+$B lab learn | lab propose [--dry-run] | lab compare # the same steps one at a time
+$B lab lineage
+$B lab calibrate --evolve --family families/meanrev.toml --panels 100 --days 700 --coins 8
 ```
 
-## 8. Limits
+## 9. Limits
 
 - The universe is today's survivors; delisted coins are absent.
 - Binance prices stand in for Hyperliquid before the venue check; funding in research is Binance's.
@@ -158,10 +191,12 @@ $B trade monitor
 - The gate is conservative. A real edge with Sharpe 1 to 2 will be rejected on 2.3 years of data and 200 to 400 trials. The way through is fewer, better-motivated trials, not looser thresholds.
 - Catalyst markouts pending when the engine stops are lost.
 - The dashboard (`web/`, Next.js, `scripts/v3-services.sh start`) is read-only: it shows the files, it cannot pause or stop the trader.
+- The evolve loop's proposer is deterministic and its block library is small on purpose. It finds variations of what is on file, not new ideas; an inventive proposer (an LLM, or the operator) can write the same `families/gen/*.toml` files and go through the same door, but would need its own calibration.
+- A loop cycle on real data spends trials that cannot be taken back. Each cycle of 40 raises the bar for every later family on that study.
 
-## 9. Next
+## 10. Next
 
 1. Let `trade run` collect catalyst markouts and the trend candidate's paper days; read `trade monitor` weekly.
-2. New families go in `families/` with a hypothesis first, and a small grid: the ledger makes every extra rule cost something.
+2. New families go in `families/` with a hypothesis first, and a small grid: the ledger makes every extra rule cost something. `lab evolve --dry-run` shows what the loop would try next; run a real cycle only when its proposals look worth their trials.
 3. If Jev is to be tried further: the `direction` probe on a few hundred bars (H-J02), then chart images at candidates.
 4. Decide H-R01's live paper run by its own rule (n ≥ 100); the lab's evidence says not to expect it to pass.
