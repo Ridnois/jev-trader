@@ -80,3 +80,17 @@ min_impact = 0.45             # |Jev impact| on -1..1 that counts as a catalyst
 min_new_info = 0.6
 max_lag_min = 20.0
 markouts_secs = [300, 1800, 7200, 21600]
+
+[evolve]                      # `lab evolve`: learn → propose → judge → compare (DESIGN-V3.md §7)
+proposals = 4                 # new families per cycle
+specs_per_proposal = 12
+trials_per_cycle = 40         # reaching it stops the cycle; raise only on purpose
+min_regime_days = 60          # below these, a lesson is an anecdote and is not acted on
+min_side_trades = 30
+min_paper_days = 20
+min_catalyst = 30
+families_dir = "families/gen"
+hypotheses = "hypotheses.toml"
+auto_trial_budget = 200       # `--auto`: most trials the loop may charge on one study, over all its cycles
+auto_stall = 3                # `--auto` stops after this many generations with nothing better than REJECT
+auto_max_generations = 20

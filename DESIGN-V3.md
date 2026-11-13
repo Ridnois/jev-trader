@@ -142,6 +142,8 @@ Also in the engine:
 
 `lab-data/lineage.jsonl` remembers every proposal, verdict, promotion and paper call; `lab lineage` prints the tree.
 
+**Automatic iteration** (`lab evolve --auto`). Runs cycle after cycle, each an ordinary `lab evolve` with its own lessons file, family files, verdicts and report, and stops by itself on the first of: a family passes the gate (promoting stays the operator's decision); nothing new to propose; the loop's trial budget for a study is spent (`auto_trial_budget`, 200 trials over all its cycles, counted from the lineage); `auto_stall` generations in a row (3) with nothing better than REJECT; `auto_max_generations` (20). A summary goes to `lab-data/reports/evolve/auto-<time>.md`. It is started by hand; it is not a background service.
+
 **What searching costs.** A loop that reads results and proposes again is a wider search than a grid. Three consequences: a generated family's walk-forward folds are not truly out of sample (its structure was chosen after looking at the whole design window), so its report says the lockbox and paper days are its only clean evidence; the deflated-Sharpe bar rises with every cycle, which the report shows; lockbox openings tighten the next one per study, and for generated families so does every earlier generated family judged on the study (below).
 
 **Calibration** (`lab calibrate --evolve`): the whole loop, five generations deep, in memory on synthetic markets.
@@ -153,6 +155,8 @@ Also in the engine:
 | Planted edge, strong (0.08) | `meanrev` | 36 of 40 (90%) | 34 of 40 (85%) |
 
 The first run failed the requirement: with `trend` as the seed, 1 of 100 noise panels promoted a generation-3 family that recombined two in-sample winners, passed every design-window check, and then passed the lockbox at p = 0.055 (α 0.20). The design-window checks cannot protect a generated family (its parents were chosen on those days), so the lockbox is its only clean test, and it now carries the loop's multiple testing: every generated family judged on a study counts as a look at that study's lockbox, so the k-th meets α / k on top of the openings already counted. No threshold in `lab.toml` changed. That panel then gave REVISE, the same 100 panels gave 0, and so did 100 panels on seeds never used before (`lab-data/reports/calibration-evolve-*.md`). The price: the loop now adds 2 panels to the seed's 34 under a strong edge, where it added 4.
+
+With the `--auto` stop rules and up to 20 generations per panel: 0 of 100 no-edge panels for `trend`, 0 of 100 for `meanrev`, 0 of 100 for `trend` on fresh seeds; 36 of 40 under the strong edge. No run reached the 20-generation cap: about 80–95% of no-edge loops stopped on the stall rule after 3–4 generations, the rest when nothing new was left to propose.
 
 ## 8. Running it
 
@@ -178,9 +182,10 @@ $B trade monitor
 
 $B lab evolve --dry-run                             # lessons + would-be proposals; nothing charged
 $B lab evolve                                       # one cycle: proposals written, charged, judged, compared
+$B lab evolve --auto                                # cycles until a stop rule (budget, stall, nothing new, a pass)
 $B lab learn | lab propose [--dry-run] | lab compare # the same steps one at a time
 $B lab lineage
-$B lab calibrate --evolve --family families/meanrev.toml --panels 100 --days 700 --coins 8
+$B lab calibrate --evolve --family families/meanrev.toml --panels 100 --days 700 --coins 8 --generations 20
 ```
 
 ## 9. Limits

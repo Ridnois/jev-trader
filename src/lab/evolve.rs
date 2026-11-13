@@ -126,7 +126,8 @@ pub fn learn_files(lab: &LabConfig) -> Result<(Lessons, PathBuf)> {
     let lessons = learn_from(&g, &Books::files(lab).rows(), lab);
     let dir = lab.lessons_dir();
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.json", chrono::Utc::now().format("%Y-%m-%d")));
+    // One file per generation: proposals cite lesson ids, so a file must never be rewritten.
+    let path = dir.join(format!("{}-g{:03}.json", chrono::Utc::now().format("%Y-%m-%d"), lineage::next_generation(&g.lineage)));
     crate::status::write_atomic(&path, &serde_json::to_vec_pretty(&lessons)?)?;
     crate::status::write_atomic(&path.with_extension("md"), learn::markdown(&lessons).as_bytes())?;
     Ok((lessons, path))
@@ -143,11 +144,11 @@ pub fn read_lessons(path: &Path) -> Result<Lessons> {
 }
 
 /// The proposer's view, from files.
-pub fn propose_from(g: &Gathered, lessons: &Lessons, books: &Books, lab: &LabConfig, cfg: &super::EvolveCfg) -> propose::Outcome {
+pub fn propose_from(g: &Gathered, lessons: &Lessons, books: &Books, lab: &LabConfig, cfg: &super::EvolveCfg, loop_budget: Option<usize>) -> propose::Outcome {
     let parents = parents_of(&g.verdicts, &g.families);
     let charged = books.charged();
     let generation = lineage::next_generation(&g.lineage);
-    propose::propose(&propose::Inputs { lessons, parents: &parents, lineage: &g.lineage, charged: &charged, research_venue: &lab.research_venue, generation, seed: lab.seed }, cfg)
+    propose::propose(&propose::Inputs { lessons, parents: &parents, lineage: &g.lineage, charged: &charged, research_venue: &lab.research_venue, generation, seed: lab.seed, loop_budget }, cfg)
 }
 
 /// Writes proposals: family files, hypothesis entries, `proposed` events.
@@ -363,6 +364,8 @@ pub struct EvolveOpts {
     pub dry_run: bool,
     pub max_trials: Option<usize>,
     pub from_lessons: Option<PathBuf>,
+    /// Auto mode's cap on the loop's trials per study (None for a single cycle).
+    pub loop_budget: Option<usize>,
 }
 
 /// `lab evolve`.
@@ -377,7 +380,7 @@ pub fn evolve(lab: &LabConfig, opts: &EvolveOpts) -> Result<CycleReport> {
     }
     let g = gather(lab);
     let books = Books::files(lab);
-    let out = propose_from(&g, &lessons, &books, lab, &cfg);
+    let out = propose_from(&g, &lessons, &books, lab, &cfg, opts.loop_budget);
     let generation = lineage::next_generation(&g.lineage);
     let mut report = CycleReport {
         generation,
@@ -501,12 +504,119 @@ pub fn markdown(r: &CycleReport) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// `lab evolve --auto`: generation after generation until a stop rule.
+
+/// Why an automatic run ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stop {
+    /// A family passed the gate: promoting it is the operator's decision.
+    Passed,
+    /// Nothing new to propose (lessons used up, lineage covers the rest, or the loop budget is spent).
+    NothingNew,
+    /// `auto_stall` generations in a row with nothing better than REJECT.
+    Stalled,
+    /// `auto_max_generations` reached.
+    MaxGenerations,
+}
+
+impl Stop {
+    pub fn words(&self) -> &'static str {
+        match self {
+            Stop::Passed => "a family passed the gate. Promoting it is your decision",
+            Stop::NothingNew => "nothing new to propose: the lessons are used up, the lineage covers the rest, or the loop's trial budget is spent",
+            Stop::Stalled => "several generations in a row produced nothing better than REJECT",
+            Stop::MaxGenerations => "the most generations one run may take",
+        }
+    }
+}
+
+/// True when a generation produced nothing better than REJECT.
+fn stalled(verdicts: &[Option<String>]) -> bool {
+    verdicts.iter().all(|v| matches!(v.as_deref(), None | Some("REJECT") | Some("INSUFFICIENT_EVIDENCE")))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutoReport {
+    pub started: chrono::DateTime<chrono::Utc>,
+    pub finished: chrono::DateTime<chrono::Utc>,
+    pub stop: Stop,
+    pub generations: Vec<CycleReport>,
+    /// Loop trials per study after the run, and the budget.
+    pub loop_trials: BTreeMap<String, usize>,
+    pub budget: usize,
+}
+
+/// Runs cycles until a stop rule. Each cycle is an ordinary `lab evolve`: its own
+/// lessons file, family files, verdicts, lineage rows and report.
+pub fn auto(lab: &LabConfig, max_trials: Option<usize>) -> Result<AutoReport> {
+    let cfg = &lab.evolve;
+    let started = chrono::Utc::now();
+    let mut gens = Vec::new();
+    let mut stall = 0u32;
+    let stop = loop {
+        if gens.len() as u32 >= cfg.auto_max_generations {
+            break Stop::MaxGenerations;
+        }
+        let r = evolve(lab, &EvolveOpts { dry_run: false, max_trials, from_lessons: None, loop_budget: Some(cfg.auto_trial_budget) })?;
+        let empty = r.proposals.is_empty();
+        let passed = !r.promotable.is_empty();
+        let verdicts: Vec<Option<String>> = r.proposals.iter().map(|p| p.verdict.clone()).collect();
+        eprintln!("generation {}: {} proposals · {}", r.generation, r.proposals.len(), r.proposals.iter().map(|p| format!("{} {}", p.name, p.verdict.as_deref().unwrap_or("-"))).collect::<Vec<_>>().join(", "));
+        if !empty {
+            gens.push(r);
+        }
+        if empty {
+            break Stop::NothingNew;
+        }
+        if passed {
+            break Stop::Passed;
+        }
+        stall = if stalled(&verdicts) { stall + 1 } else { 0 };
+        if stall >= cfg.auto_stall {
+            break Stop::Stalled;
+        }
+    };
+    let mut loop_trials: BTreeMap<String, usize> = BTreeMap::new();
+    for e in lineage::load(&lab.lineage_path()).iter().filter(|e| e.event == "tested") {
+        *loop_trials.entry(e.study.clone()).or_default() += e.trials;
+    }
+    let rep = AutoReport { started, finished: chrono::Utc::now(), stop, generations: gens, loop_trials, budget: cfg.auto_trial_budget };
+    let dir = lab.data_dir.join("reports").join("evolve");
+    std::fs::create_dir_all(&dir)?;
+    let stem = format!("auto-{}", started.format("%Y%m%d-%H%M%S"));
+    crate::status::write_atomic(&dir.join(format!("{stem}.json")), &serde_json::to_vec_pretty(&rep)?)?;
+    crate::status::write_atomic(&dir.join(format!("{stem}.md")), auto_markdown(&rep).as_bytes())?;
+    Ok(rep)
+}
+
+pub fn auto_markdown(r: &AutoReport) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "# Automatic run: {} generation(s)\n", r.generations.len());
+    let _ = writeln!(s, "*{} → {}*\n", r.started.format("%Y-%m-%d %H:%M UTC"), r.finished.format("%H:%M UTC"));
+    let _ = writeln!(s, "**Stopped:** {}.\n", r.stop.words());
+    let _ = writeln!(s, "| Generation | Proposals | Verdicts | Trials charged |\n|---|---|---|---|");
+    for g in &r.generations {
+        let trials: usize = g.proposals.iter().map(|p| p.new_trials).sum();
+        let _ = writeln!(s, "| {} | {} | {} | {trials} |", g.generation, g.proposals.len(), g.proposals.iter().map(|p| format!("{} {}", p.name, p.verdict.as_deref().unwrap_or("-"))).collect::<Vec<_>>().join(", "));
+    }
+    let _ = writeln!(s, "\n| Study | Loop trials so far | Budget |\n|---|---|---|");
+    for (study, n) in &r.loop_trials {
+        let _ = writeln!(s, "| {study} | {n} | {} |", r.budget);
+    }
+    let passed: Vec<&str> = r.generations.iter().flat_map(|g| g.promotable.iter().map(String::as_str)).collect();
+    let _ = writeln!(s, "\n{}", if passed.is_empty() { "Nothing to promote. Each generation's report is in `lab-data/reports/evolve/gNNN.md`.".to_string() } else { format!("Passed the gate and not a duplicate: {}. Read its report, then `lab promote --family families/gen/<name>.toml` if you want it on paper.", passed.join(", ")) });
+    s
+}
+
+// ---------------------------------------------------------------------------
 // The loop in memory, on synthetic markets.
 
 #[derive(Debug, Clone, Default)]
 pub struct LoopResult {
     /// Promotions by generation (0 = the seed family).
     pub promoted_by_gen: Vec<usize>,
+    pub stop: Option<Stop>,
     pub verdicts: BTreeMap<String, usize>,
     pub proposals: usize,
     pub trials: usize,
@@ -514,25 +624,28 @@ pub struct LoopResult {
     pub generations_run: usize,
 }
 
-/// The seed family judged, then `generations` rounds of learn → propose → judge, all
-/// in memory on one panel.
+/// The seed family judged, then rounds of learn → propose → judge under the same stop
+/// rules as `lab evolve --auto` (at most `generations`), all in memory on one panel.
 pub fn run_loop(lab: &LabConfig, seed_fam: &Family, p: &Panel, generations: u32, seed: u64) -> Result<LoopResult> {
     let mut books = Books::memory();
     let mut res = LoopResult { promoted_by_gen: vec![0; generations as usize + 1], ..Default::default() };
     let mut families: HashMap<String, Family> = HashMap::new();
     families.insert(seed_fam.family.clone(), seed_fam.clone());
     let ev = compare::validate_family(lab, seed_fam, p, None, &Aux::default(), None, None, None, 0, &mut books)?;
-    let mut verdicts: Vec<(String, serde_json::Value)> = vec![("memory".into(), serde_json::to_value(&ev)?)];
+    let mut seen: Vec<(String, serde_json::Value)> = vec![("memory".into(), serde_json::to_value(&ev)?)];
     res.promoted_by_gen[0] += (ev.verdict == Verdict::PromoteToPaper) as usize;
     *res.verdicts.entry(ev.verdict.word().into()).or_default() += 1;
     let mut events: Vec<Event> = Vec::new();
+    let mut stall = 0u32;
+    res.stop = Some(Stop::MaxGenerations);
     for gen_no in 1..=generations {
-        let g = Gathered { verdicts: verdicts.clone(), families: families.clone(), monitor: None, lineage: events.clone() };
+        let g = Gathered { verdicts: seen.clone(), families: families.clone(), monitor: None, lineage: events.clone() };
         let lessons = learn_from(&g, &books.rows(), lab);
         let parents = parents_of(&g.verdicts, &g.families);
         let charged = books.charged();
-        let out = propose::propose(&propose::Inputs { lessons: &lessons, parents: &parents, lineage: &events, charged: &charged, research_venue: &p.venue, generation: gen_no, seed }, &lab.evolve);
+        let out = propose::propose(&propose::Inputs { lessons: &lessons, parents: &parents, lineage: &events, charged: &charged, research_venue: &p.venue, generation: gen_no, seed, loop_budget: Some(lab.evolve.auto_trial_budget) }, &lab.evolve);
         if out.proposals.is_empty() {
+            res.stop = Some(Stop::NothingNew);
             break;
         }
         res.generations_run += 1;
@@ -544,11 +657,22 @@ pub fn run_loop(lab: &LabConfig, seed_fam: &Family, p: &Panel, generations: u32,
         }
         let mut src = |_: &Family| Ok((p.clone(), None));
         let before = events.iter().filter(|e| e.event == "tested").count();
+        let mut verdicts = Vec::new();
         for j in compare::judge_generation(lab, &fams, &mut src, &|_| before, &mut books)? {
+            verdicts.push(Some(j.eval.verdict.word().to_string()));
             res.promoted_by_gen[gen_no as usize] += (j.eval.verdict == Verdict::PromoteToPaper) as usize;
             *res.verdicts.entry(j.eval.verdict.word().into()).or_default() += 1;
             events.push(Event { event: "tested".into(), family: j.family.clone(), name: j.label.clone(), generation: gen_no, verdict: Some(j.eval.verdict.word().into()), trials: j.new_trials, study: j.study.clone(), ..Event::default() });
-            verdicts.push(("memory".into(), serde_json::to_value(&j.eval)?));
+            seen.push(("memory".into(), serde_json::to_value(&j.eval)?));
+        }
+        if res.promoted_by_gen[gen_no as usize] > 0 {
+            res.stop = Some(Stop::Passed);
+            break;
+        }
+        stall = if stalled(&verdicts) { stall + 1 } else { 0 };
+        if stall >= lab.evolve.auto_stall {
+            res.stop = Some(Stop::Stalled);
+            break;
         }
     }
     res.trials = books.total(&format!("{}-{}", p.venue, p.interval));
@@ -592,7 +716,7 @@ pub fn calibrate_loop(lab: &LabConfig, seed_fam: &Family, panels: usize, days: u
     let loop_only = rs.iter().filter(|(_, r)| r.promoted_by_gen[0] == 0 && r.promoted_by_gen[1..].iter().sum::<usize>() > 0).count();
     let mut s = String::new();
     let _ = writeln!(s, "# Evolve-loop calibration: seed `{}` ({}), {panels} synthetic panels ({days} days × {coins} coins), {generations} generations, edge {edge}\n", seed_fam.label(), seed_fam.interval);
-    let _ = writeln!(s, "Budget per cycle: {} proposals, {} specs each, {} trials.\n", lab.evolve.proposals, lab.evolve.specs_per_proposal, lab.evolve.trials_per_cycle);
+    let _ = writeln!(s, "Budget per cycle: {} proposals, {} specs each, {} trials. Stop rules as `lab evolve --auto`: {} loop trials per study, {} stalled generations, at most {generations} generations.\n", lab.evolve.proposals, lab.evolve.specs_per_proposal, lab.evolve.trials_per_cycle, lab.evolve.auto_trial_budget, lab.evolve.auto_stall);
     let _ = writeln!(s, "| | Panels | Share |\n|---|---|---|");
     let _ = writeln!(s, "| Any promotion (seed or loop) | {any} | {:.0}% |", any as f64 / n * 100.0);
     let _ = writeln!(s, "| Seed family promoted | {seed_only} | {:.0}% |", seed_only as f64 / n * 100.0);
@@ -609,6 +733,19 @@ pub fn calibrate_loop(lab: &LabConfig, seed_fam: &Family, panels: usize, days: u
     }
     let _ = writeln!(s, "\n| Verdict (all families judged) | Count |\n|---|---|");
     for (k, v) in &verdicts {
+        let _ = writeln!(s, "| {k} | {v} |");
+    }
+    let mut stops: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for (_, r) in &rs {
+        *stops.entry(match r.stop {
+            Some(Stop::Passed) => "a family passed",
+            Some(Stop::NothingNew) => "nothing new to propose / budget spent",
+            Some(Stop::Stalled) => "stalled",
+            Some(Stop::MaxGenerations) | None => "generation cap",
+        }).or_default() += 1;
+    }
+    let _ = writeln!(s, "\n| Why the loop stopped | Panels |\n|---|---|");
+    for (k, v) in &stops {
         let _ = writeln!(s, "| {k} | {v} |");
     }
     let props: usize = rs.iter().map(|(_, r)| r.proposals).sum();
@@ -656,3 +793,17 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod auto_tests {
+    use super::*;
+
+    #[test]
+    fn only_revise_or_better_breaks_a_stall() {
+        let v = |x: &[&str]| x.iter().map(|s| Some(s.to_string())).collect::<Vec<_>>();
+        assert!(stalled(&v(&["REJECT", "INSUFFICIENT_EVIDENCE"])));
+        assert!(!stalled(&v(&["REJECT", "REVISE"])));
+        assert!(!stalled(&v(&["PROMOTE_TO_PAPER"])));
+        assert!(stalled(&[]));
+    }
+}

@@ -188,11 +188,18 @@ pub struct EvolveCfg {
     pub families_dir: PathBuf,
     /// The hypothesis register proposals are added to.
     pub hypotheses: PathBuf,
+    /// `lab evolve --auto`: most trials the loop may charge on one study, over all its
+    /// cycles. Each one raises the bar for every later family on that study.
+    pub auto_trial_budget: usize,
+    /// `--auto` stops after this many generations in a row with nothing better than REJECT.
+    pub auto_stall: u32,
+    /// `--auto` never runs more generations than this in one go.
+    pub auto_max_generations: u32,
 }
 
 impl Default for EvolveCfg {
     fn default() -> Self {
-        Self { proposals: 4, specs_per_proposal: 12, trials_per_cycle: 40, min_regime_days: 60, min_side_trades: 30, min_paper_days: 20, min_catalyst: 30, families_dir: "families/gen".into(), hypotheses: "hypotheses.toml".into() }
+        Self { proposals: 4, specs_per_proposal: 12, trials_per_cycle: 40, min_regime_days: 60, min_side_trades: 30, min_paper_days: 20, min_catalyst: 30, families_dir: "families/gen".into(), hypotheses: "hypotheses.toml".into(), auto_trial_budget: 200, auto_stall: 3, auto_max_generations: 20 }
     }
 }
 
@@ -472,6 +479,11 @@ pub enum LabCmd {
         /// Use this lessons file instead of learning again.
         #[arg(long)]
         from_lessons: Option<PathBuf>,
+        /// Keep going, generation after generation, until a stop rule: the loop's trial
+        /// budget per study, `auto_stall` generations with nothing better than REJECT,
+        /// nothing new to propose, a family passing the gate, or `auto_max_generations`.
+        #[arg(long, conflicts_with_all = ["dry_run", "from_lessons"])]
+        auto: bool,
     },
     /// The tree of generated families and what became of them.
     Lineage,
@@ -698,7 +710,7 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
                 cfg.trials_per_cycle = m;
             }
             let g = evolve::gather(lab);
-            let out = evolve::propose_from(&g, &lessons, &compare::Books::files(lab), lab, &cfg);
+            let out = evolve::propose_from(&g, &lessons, &compare::Books::files(lab), lab, &cfg, None);
             for p in &out.proposals {
                 println!("{} · {} of {} · {} specs, {} new trials\n  {}\n  {}\n", p.family.label(), p.family.operator.as_deref().unwrap_or(""), p.family.parent.as_deref().unwrap_or("nothing"), p.specs, p.new_trials, p.family.rule.as_ref().map(|r| r.describe()).unwrap_or_default(), p.family.reason);
             }
@@ -729,8 +741,13 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             eprintln!("report: {}", path.display());
             Ok(())
         }
-        LabCmd::Evolve { dry_run, max_trials, from_lessons } => {
-            let r = evolve::evolve(lab, &evolve::EvolveOpts { dry_run, max_trials, from_lessons })?;
+        LabCmd::Evolve { dry_run, max_trials, from_lessons, auto } => {
+            if auto {
+                let r = evolve::auto(lab, max_trials)?;
+                println!("{}", evolve::auto_markdown(&r));
+                return Ok(());
+            }
+            let r = evolve::evolve(lab, &evolve::EvolveOpts { dry_run, max_trials, from_lessons, loop_budget: None })?;
             println!("{}", evolve::markdown(&r));
             Ok(())
         }

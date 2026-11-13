@@ -135,6 +135,7 @@ target/lab/jev-trader --env-file .env.local trade run             # paper only
 target/lab/jev-trader trade monitor
 target/lab/jev-trader lab evolve --dry-run                        # what the loop would propose next
 target/lab/jev-trader lab evolve                                  # one cycle: learn, propose, judge, compare
+target/lab/jev-trader lab evolve --auto                           # cycles until a stop rule; never promotes
 ```
 
 - `lab validate` searches a family's declared grid (`families/*.toml`) on a design window and returns one verdict: walk-forward out of sample, a reality check over the whole family, deflated Sharpe with the trial count read from `lab-data/trials.jsonl`, PBO, cost and delay stress, breadth, a time-shifted baseline, then a lockbox only a passing candidate opens. Thresholds are in `lab.toml`.

@@ -64,6 +64,9 @@ pub struct Inputs<'a> {
     pub research_venue: &'a str,
     pub generation: u32,
     pub seed: u64,
+    /// Auto mode: most trials the loop may charge on one study over all its cycles
+    /// (counted from the lineage's `tested` events). None = no such cap.
+    pub loop_budget: Option<usize>,
 }
 
 pub struct Outcome {
@@ -403,6 +406,13 @@ pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
             out.messages.push(format!("{} of {}: every spec is already in the ledger, nothing new to learn", d.operator, d.parent_label));
             continue;
         }
+        if let Some(budget) = inp.loop_budget {
+            let spent = inp.lineage.iter().filter(|e| e.event == "tested" && e.study == study).map(|e| e.trials).sum::<usize>() + out.proposals.iter().filter(|p| p.study == study).map(|p| p.new_trials).sum::<usize>();
+            if spent + new > budget {
+                out.messages.push(format!("loop budget: {study} has {spent} of its {budget} loop trials spent; {} of {} ({new} more) would pass it", d.operator, if d.parent_label.is_empty() { "explore" } else { &d.parent_label }));
+                continue;
+            }
+        }
         if trials + new > cfg.trials_per_cycle {
             out.messages.push(format!("trial budget: {} of {} would bring this cycle to {} trials, over the {} allowed. The cycle stops at {} proposals; raise `[evolve] trials_per_cycle` only on purpose.", d.operator, if d.parent_label.is_empty() { "explore" } else { &d.parent_label }, trials + new, cfg.trials_per_cycle, out.proposals.len()));
             break;
@@ -509,7 +519,7 @@ mod tests {
 
     fn run(lineage: &[Event], charged: &BTreeMap<String, HashSet<String>>, cfg: &EvolveCfg) -> Outcome {
         let (l, p) = (lessons(), parents());
-        propose(&Inputs { lessons: &l, parents: &p, lineage, charged, research_venue: "binance", generation: 1, seed: 7 }, cfg)
+        propose(&Inputs { lessons: &l, parents: &p, lineage, charged, research_venue: "binance", generation: 1, seed: 7, loop_budget: None }, cfg)
     }
 
     #[test]
@@ -565,10 +575,20 @@ mod tests {
     }
 
     #[test]
+    fn the_loop_budget_counts_what_the_lineage_already_spent() {
+        let cfg = EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() };
+        let (l, p) = (lessons(), parents());
+        let spent = vec![Event { event: "tested".into(), family: "cx".into(), study: "binance-1h".into(), trials: 195, ..Event::default() }];
+        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200) }, &cfg);
+        assert!(out.proposals.iter().map(|x| x.new_trials).sum::<usize>() <= 5, "{:?}", out.proposals.iter().map(|x| x.new_trials).collect::<Vec<_>>());
+        assert!(out.messages.iter().any(|m| m.starts_with("loop budget")), "{:?}", out.messages);
+    }
+
+    #[test]
     fn dying_branches_are_left_alone() {
         let (mut l, p) = (lessons(), parents());
         l.lessons.push(lesson("L09", "trend", 1.0, Finding::DyingBranch { tested: 3, rejected: 3 }));
-        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7 }, &EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() });
+        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None }, &EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() });
         assert!(out.proposals.iter().all(|p| p.family.parent.as_deref() != Some("trend")));
         let _ = learn::root_of;
     }
