@@ -191,6 +191,8 @@ pub struct EvolveCfg {
     /// `lab evolve --auto`: most trials the loop may charge on one study, over all its
     /// cycles. Each one raises the bar for every later family on that study.
     pub auto_trial_budget: usize,
+    /// Per-study overrides of `auto_trial_budget`, e.g. `binance-1h = 300`.
+    pub auto_trial_budgets: BTreeMap<String, usize>,
     /// `--auto` stops after this many generations in a row with nothing better than REJECT.
     pub auto_stall: u32,
     /// `--auto` never runs more generations than this in one go.
@@ -199,7 +201,14 @@ pub struct EvolveCfg {
 
 impl Default for EvolveCfg {
     fn default() -> Self {
-        Self { proposals: 4, specs_per_proposal: 12, trials_per_cycle: 40, min_regime_days: 60, min_side_trades: 30, min_paper_days: 20, min_catalyst: 30, families_dir: "families/gen".into(), hypotheses: "hypotheses.toml".into(), auto_trial_budget: 200, auto_stall: 3, auto_max_generations: 20 }
+        Self { proposals: 4, specs_per_proposal: 12, trials_per_cycle: 40, min_regime_days: 60, min_side_trades: 30, min_paper_days: 20, min_catalyst: 30, families_dir: "families/gen".into(), hypotheses: "hypotheses.toml".into(), auto_trial_budget: 200, auto_trial_budgets: BTreeMap::new(), auto_stall: 3, auto_max_generations: 20 }
+    }
+}
+
+impl EvolveCfg {
+    /// The loop's lifetime trial budget on one study: its override, else `default`.
+    pub fn budget_for(&self, study: &str, default: usize) -> usize {
+        self.auto_trial_budgets.get(study).copied().unwrap_or(default)
     }
 }
 

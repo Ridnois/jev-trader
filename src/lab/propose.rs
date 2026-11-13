@@ -185,6 +185,52 @@ fn widen_window(rule: &Rule, fixed: &BTreeMap<String, f64>, grid: &mut BTreeMap<
     }
 }
 
+/// A condition with every fixed parameter replaced by its value, so `$n` fixed at 96 and
+/// `$b_n` fixed at 96 read the same.
+fn cond_key(c: &Cond, fixed: &BTreeMap<String, f64>) -> String {
+    let p = |x: &Param| match x {
+        Param::Num(v) => format!("{v}"),
+        Param::Ref(s) => s
+            .split('*')
+            .map(|t| {
+                let t = t.trim();
+                fixed.get(t.trim_start_matches('$')).map(|v| format!("{v}")).unwrap_or_else(|| t.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("*"),
+    };
+    format!("{:?}|{}|{:?}|{}", c.feature, p(&c.n), c.op, p(&c.level))
+}
+
+/// Drops repeated conditions from each block of a rule (a recombine of a family with one of
+/// its own ingredients repeats them). Returns how many were dropped.
+fn dedupe(rule: &mut Rule, fixed: &BTreeMap<String, f64>) -> usize {
+    let mut dropped = 0;
+    for block in [&mut rule.long, &mut rule.filter, &mut rule.exit] {
+        let mut seen = HashSet::new();
+        let before = block.len();
+        block.retain(|c| seen.insert(cond_key(c, fixed)));
+        dropped += before - block.len();
+    }
+    dropped
+}
+
+/// The primary-parent chain of a generated family, nearest first (not including itself).
+fn ancestors(lineage: &[Event], family: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = family.to_string();
+    for _ in 0..64 {
+        match lineage.iter().find(|e| e.family == cur && e.event == "proposed").and_then(|e| e.parent.clone()) {
+            Some(p) => {
+                out.push(p.clone());
+                cur = p;
+            }
+            None => break,
+        }
+    }
+    out
+}
+
 fn has_filter(rule: &Rule, f: Feature) -> bool {
     rule.filter.iter().any(|c| c.feature == f)
 }
@@ -252,18 +298,28 @@ fn from_lesson(l: &Lesson, inp: &Inputs) -> Option<Draft> {
         }
         Finding::Redundancy { other, corr, .. } if corr.abs() <= 0.3 => {
             let b = inp.parents.get(other)?;
+            let me = parent.family.family.as_str();
+            if ancestors(inp.lineage, me).iter().any(|a| a == other) || ancestors(inp.lineage, other).iter().any(|a| a == me) {
+                return None;
+            }
             if b.family.interval != parent.family.interval || parent.mean_bps.is_none_or(|m| m <= 0.0) || b.mean_bps.is_none_or(|m| m <= 0.0) {
                 return None;
             }
             let (b_rule, b_params, b_exact) = base(b)?;
             let why = format!("{} and {} both made money on the design window with a daily correlation of {corr:+.2} ({}). Entering only when both agree tests whether each confirms the other.", parent.family.label(), b.family.label(), l.id);
             let mut d = draft(parent, "recombine", l, why, |rule, fixed, grid, _| {
+                let before = rule.long.len() + rule.filter.len();
                 rule.long.extend(renamed(&b_rule.long, "b_"));
                 rule.filter.extend(renamed(&b_rule.filter, "b_"));
                 for r in b_rule.refs() {
                     if let Some(v) = b_params.get(&r) {
                         fixed.insert(format!("b_{r}"), *v);
                     }
+                }
+                // Agreement with conditions the parent already has is no agreement at all.
+                dedupe(rule, fixed);
+                if rule.long.len() + rule.filter.len() == before {
+                    return false;
                 }
                 widen_window(rule, fixed, grid);
                 rule.validate().is_ok()
@@ -324,6 +380,8 @@ fn spec_ids(fam: &Family) -> Vec<String> {
 pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
     let mut out = Outcome { proposals: Vec::new(), messages: Vec::new() };
     let proposed_keys: HashSet<&str> = inp.lineage.iter().filter(|e| e.event == "proposed").map(|e| e.key.as_str()).collect();
+    // A rule's verdict file is named by its id, so the same rule on another grid would overwrite it.
+    let proposed_rules: HashSet<&str> = inp.lineage.iter().filter(|e| e.event == "proposed").map(|e| e.family.as_str()).collect();
     let dying: HashSet<&str> = inp.lessons.lessons.iter().filter(|l| matches!(l.data, Finding::DyingBranch { .. }) && !l.anecdote).map(|l| l.subject.as_str()).collect();
     let mut usable: Vec<&Lesson> = inp.lessons.lessons.iter().filter(|l| !l.anecdote && !l.operator_only).collect();
     usable.sort_by(|a, b| b.strength.total_cmp(&a.strength).then(a.id.cmp(&b.id)));
@@ -380,9 +438,11 @@ pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
         for k in d.grid.keys() {
             fixed.remove(k);
         }
-        let refs = d.rule.refs();
+        let mut rule = d.rule.clone();
+        dedupe(&mut rule, &fixed);
+        let refs = rule.refs();
         fixed.retain(|k, _| refs.contains(k) || POLICY.contains(&k.as_str()));
-        let mut fam = Family { family: String::new(), interval: d.interval.clone(), hypothesis: String::new(), probe: None, venue: None, grid: d.grid.clone(), fixed, rule: Some(d.rule.clone()), name: None, parent: d.parent.clone(), generation: Some(inp.generation), operator: Some(d.operator.into()), lessons: d.lessons.clone(), reason: String::new() };
+        let mut fam = Family { family: String::new(), interval: d.interval.clone(), hypothesis: String::new(), probe: None, venue: None, grid: d.grid.clone(), fixed, rule: Some(rule.clone()), name: None, parent: d.parent.clone(), generation: Some(inp.generation), operator: Some(d.operator.into()), lessons: d.lessons.clone(), reason: String::new() };
         if let Err(e) = fam.check() {
             out.messages.push(format!("{} from {}: not a valid family ({e:#}); skipped", d.operator, d.lessons.join(", ")));
             continue;
@@ -393,6 +453,12 @@ pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
             continue;
         }
         let key = format!("{}|{}|{}", fam.family, serde_json::to_string(&fam.grid).unwrap_or_default(), serde_json::to_string(&fam.fixed).unwrap_or_default());
+        if proposed_rules.contains(fam.family.as_str()) || out.proposals.iter().any(|p| p.family.family == fam.family) {
+            if !exploring {
+                out.messages.push(format!("{} of {} ({}): the same rule was already proposed; another grid on it would overwrite its verdict", d.operator, d.parent_label, d.lessons.join(", ")));
+            }
+            continue;
+        }
         if proposed_keys.contains(key.as_str()) || !seen.insert(key.clone()) {
             if !exploring {
                 out.messages.push(format!("{} of {} ({}): already proposed in an earlier generation", d.operator, d.parent_label, d.lessons.join(", ")));
@@ -406,7 +472,7 @@ pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
             out.messages.push(format!("{} of {}: every spec is already in the ledger, nothing new to learn", d.operator, d.parent_label));
             continue;
         }
-        if let Some(budget) = inp.loop_budget {
+        if let Some(budget) = inp.loop_budget.map(|b| cfg.budget_for(&study, b)) {
             let spent = inp.lineage.iter().filter(|e| e.event == "tested" && e.study == study).map(|e| e.trials).sum::<usize>() + out.proposals.iter().filter(|p| p.study == study).map(|p| p.new_trials).sum::<usize>();
             if spent + new > budget {
                 out.messages.push(format!("loop budget: {study} has {spent} of its {budget} loop trials spent; {} of {} ({new} more) would pass it", d.operator, if d.parent_label.is_empty() { "explore" } else { &d.parent_label }));
@@ -423,7 +489,7 @@ pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
         let hyp_id = format!("H-{}", name.to_uppercase());
         fam.name = Some(name.clone());
         fam.hypothesis = hyp_id.clone();
-        let rule_text = d.rule.describe();
+        let rule_text = rule.describe();
         fam.reason = format!("{} {}", d.why, if d.approximate { "The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it." } else { "" }).trim().to_string();
         let baseline = if d.parent_spec.is_empty() { "no edge: the gate's own null (reality check, deflated Sharpe, time-shifted copies)".to_string() } else { format!("the parent's pick `{}`", d.parent_spec) };
         let hypothesis = Hypothesis {
@@ -591,5 +657,38 @@ mod tests {
         let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None }, &EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() });
         assert!(out.proposals.iter().all(|p| p.family.parent.as_deref() != Some("trend")));
         let _ = learn::root_of;
+    }
+
+    #[test]
+    fn repeated_conditions_are_dropped() {
+        let c = |lvl: &str| Cond { feature: Feature::XsFunding, n: Param::Ref("$n".into()), op: Op::Le, level: Param::Ref(lvl.into()) };
+        let mut rule = compose::template("trend").unwrap().0;
+        rule.filter = vec![c("$lvl"), c("$b_lvl")];
+        let fixed: BTreeMap<String, f64> = [("lvl".to_string(), -0.5), ("b_lvl".to_string(), -0.5)].into();
+        assert_eq!(dedupe(&mut rule, &fixed), 1);
+        assert_eq!(rule.filter.len(), 1);
+        let other: BTreeMap<String, f64> = [("lvl".to_string(), -0.5), ("b_lvl".to_string(), -1.0)].into();
+        rule.filter = vec![c("$lvl"), c("$b_lvl")];
+        assert_eq!(dedupe(&mut rule, &other), 0, "different levels are different conditions");
+    }
+
+    #[test]
+    fn the_same_rule_is_never_proposed_twice_and_budgets_are_per_study() {
+        let cfg = EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() };
+        let (l, p) = (lessons(), parents());
+        let a = run(&[], &BTreeMap::new(), &cfg);
+        // Same rule ids, any grid: all skipped.
+        let lineage: Vec<Event> = a.proposals.iter().map(|p| Event { event: "proposed".into(), family: p.family.family.clone(), key: "other grid".into(), name: "g0001".into(), generation: 1, ..Event::default() }).collect();
+        let b = run(&lineage, &BTreeMap::new(), &cfg);
+        assert!(b.proposals.iter().all(|q| a.proposals.iter().all(|p| p.family.family != q.family.family)));
+        // A per-study override lifts the budget for that study only.
+        let spent = vec![Event { event: "tested".into(), family: "cx".into(), study: "binance-1h".into(), trials: 199, ..Event::default() }];
+        let tight = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200) }, &cfg);
+        let mut wide_cfg = cfg.clone();
+        wide_cfg.auto_trial_budgets.insert("binance-1h".into(), 300);
+        let wide = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200) }, &wide_cfg);
+        let on_1h = |o: &Outcome| o.proposals.iter().filter(|p| p.study == "binance-1h").map(|p| p.new_trials).sum::<usize>();
+        assert!(on_1h(&tight) <= 1);
+        assert!(on_1h(&wide) > on_1h(&tight));
     }
 }

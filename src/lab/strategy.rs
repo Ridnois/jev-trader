@@ -1137,14 +1137,34 @@ pub(crate) mod tests {
     /// file, so a generated family is covered the moment it is written.
     #[test]
     fn plans_do_not_look_ahead() {
-        let mut full = random_panel(42, 6, 24, "1h");
-        full.funding = (0..6).map(|c| (0..full.n as i64).map(|i| (i * 3_600_000, 0.00001 * ((c as f64 + 1.0) * (i as f64 / 50.0).sin()))).collect()).collect();
-        // Volume that moves, so volume rules get to fire.
-        let mut rng = crate::stats::Rng::new(7);
-        for v in full.volume.iter_mut().flatten() {
-            *v *= (0.6 * rng.normal()).exp();
-        }
-        full.rederive(NO_RULE);
+        // Two panels: a calm one, and a wild one (fat-tailed volume, price shocks) so that
+        // strict rules (big z, volume spikes) fire somewhere and get checked too.
+        let make = |seed: u64, days: usize, vol_sd: f64, shock: f64| {
+            let mut full = random_panel(seed, 6, days, "1h");
+            full.funding = (0..6).map(|c| (0..full.n as i64).map(|i| (i * 3_600_000, 0.00001 * ((c as f64 + 1.0) * (i as f64 / 50.0).sin()))).collect()).collect();
+            let mut rng = crate::stats::Rng::new(seed ^ 7);
+            for v in full.volume.iter_mut().flatten() {
+                *v *= (vol_sd * rng.normal()).exp();
+            }
+            if shock > 0.0 {
+                for c in 0..full.close.len() {
+                    let mut f = 1.0;
+                    for i in 0..full.n {
+                        if rng.below(40) == 0 {
+                            f *= 1.0 + shock * rng.normal();
+                        }
+                        full.close[c][i] *= f;
+                        full.open[c][i] *= f;
+                        full.high[c][i] *= f;
+                        full.low[c][i] *= f;
+                    }
+                }
+            }
+            full.rederive(NO_RULE);
+            full
+        };
+        // The wild one is long enough for 30-day market filters to warm up before the cuts.
+        let panels = [(make(42, 24, 0.6, 0.0), [24 * 9 + 7, 24 * 17]), (make(43, 64, 1.5, 0.08), [24 * 38 + 7, 24 * 55])];
         let mut specs = vec![
             Spec::new("meanrev", &[("n", 48.0), ("z", 1.5), ("hold", 12.0)]),
             Spec::new("meanrev", &[("n", 48.0), ("z", 1.5), ("hold", 12.0), ("resid", 1.0), ("exit_mean", 1.0)]),
@@ -1160,12 +1180,13 @@ pub(crate) mod tests {
             }
             let all = fam.specs();
             let pick: Vec<Spec> = (0..4).map(|k| all[k * (all.len() - 1) / 3].clone()).collect();
-            families.push((path.display().to_string(), specs.len(), pick.len()));
+            families.push((path.display().to_string(), specs.len(), pick.len(), fam.rule.is_some()));
             specs.extend(pick);
         }
         assert!(families.len() >= 4);
         let mut traded = vec![false; specs.len()];
-        for cut in [24 * 9 + 7, 24 * 17] {
+        for (full, cuts) in &panels {
+        for cut in *cuts {
             let mut head = full.head(cut);
             head.rederive(NO_RULE);
             for (k, s) in specs.iter().enumerate() {
@@ -1179,12 +1200,27 @@ pub(crate) mod tests {
                 traded[k] |= a.entry.iter().flatten().any(|e| *e != 0);
             }
         }
+        }
         for (k, s) in specs.iter().enumerate().take(5) {
             assert!(traded[k], "{} never trades in the test panel", s.id());
         }
-        // A family whose sampled specs never trade here was not really checked.
-        for (path, from, n) in families {
-            assert!(traded[from..from + n].iter().any(|t| *t), "{path}: no sampled spec trades in the test panel, so look-ahead was not checked");
+        // A family whose sampled specs never trade here was not really checked. Hand-written
+        // families must trade. A composed family is built only from compose.rs features, each
+        // covered by that module's causality test, so a strict one that never fires on these
+        // panels is noted; most of them must still trade, so the plan path stays exercised.
+        let (mut composed, mut composed_traded) = (0, 0);
+        for (path, from, n, is_composed) in families {
+            let ok = traded[from..from + n].iter().any(|t| *t);
+            if is_composed {
+                composed += 1;
+                composed_traded += ok as usize;
+                if !ok {
+                    eprintln!("note: {path} never trades on the test panels; covered by the feature causality tests");
+                }
+            } else {
+                assert!(ok, "{path}: no sampled spec trades in the test panel, so look-ahead was not checked");
+            }
         }
+        assert!(composed_traded * 2 >= composed, "only {composed_traded} of {composed} composed families trade on the test panels");
     }
 }

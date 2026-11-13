@@ -94,3 +94,6 @@ hypotheses = "hypotheses.toml"
 auto_trial_budget = 200       # `--auto`: most trials the loop may charge on one study, over all its cycles
 auto_stall = 3                # `--auto` stops after this many generations with nothing better than REJECT
 auto_max_generations = 20
+
+[evolve.auto_trial_budgets]   # per-study overrides of auto_trial_budget
+binance-1h = 300              # raised 2026-11-13 at the user's request, after 198 of 200 were spent

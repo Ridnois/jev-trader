@@ -545,6 +545,8 @@ pub struct AutoReport {
     /// Loop trials per study after the run, and the budget.
     pub loop_trials: BTreeMap<String, usize>,
     pub budget: usize,
+    /// Each study's own budget (`auto_trial_budgets` overrides, else `budget`).
+    pub budgets: BTreeMap<String, usize>,
 }
 
 /// Runs cycles until a stop rule. Each cycle is an ordinary `lab evolve`: its own
@@ -581,7 +583,8 @@ pub fn auto(lab: &LabConfig, max_trials: Option<usize>) -> Result<AutoReport> {
     for e in lineage::load(&lab.lineage_path()).iter().filter(|e| e.event == "tested") {
         *loop_trials.entry(e.study.clone()).or_default() += e.trials;
     }
-    let rep = AutoReport { started, finished: chrono::Utc::now(), stop, generations: gens, loop_trials, budget: cfg.auto_trial_budget };
+    let budgets = loop_trials.keys().map(|k| (k.clone(), cfg.budget_for(k, cfg.auto_trial_budget))).collect();
+    let rep = AutoReport { started, finished: chrono::Utc::now(), stop, generations: gens, loop_trials, budget: cfg.auto_trial_budget, budgets };
     let dir = lab.data_dir.join("reports").join("evolve");
     std::fs::create_dir_all(&dir)?;
     let stem = format!("auto-{}", started.format("%Y%m%d-%H%M%S"));
@@ -602,7 +605,7 @@ pub fn auto_markdown(r: &AutoReport) -> String {
     }
     let _ = writeln!(s, "\n| Study | Loop trials so far | Budget |\n|---|---|---|");
     for (study, n) in &r.loop_trials {
-        let _ = writeln!(s, "| {study} | {n} | {} |", r.budget);
+        let _ = writeln!(s, "| {study} | {n} | {} |", r.budgets.get(study).copied().unwrap_or(r.budget));
     }
     let passed: Vec<&str> = r.generations.iter().flat_map(|g| g.promotable.iter().map(String::as_str)).collect();
     let _ = writeln!(s, "\n{}", if passed.is_empty() { "Nothing to promote. Each generation's report is in `lab-data/reports/evolve/gNNN.md`.".to_string() } else { format!("Passed the gate and not a duplicate: {}. Read its report, then `lab promote --family families/gen/<name>.toml` if you want it on paper.", passed.join(", ")) });
