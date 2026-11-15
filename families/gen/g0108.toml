@@ -1,0 +1,43 @@
+# g0108 — generation 31 — invert
+# g0107 lost -7.5 bps/day with 3 of 20 coins positive (L816). A rule that loses this
+# broadly may be wrong-way: its opposite is tested as a separate hypothesis, with the
+# search charged again.
+# Rule: long when resid_z($n) >= $z; short on the mirror; only when mkt_rvol_pct($vol_n) < 0.5
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c780db21cdb2c"
+interval = "15m"
+hypothesis = "H-G0108"
+name = "g0108"
+parent = "cb8c70426ed5e"
+generation = 31
+operator = "invert"
+lessons = ["L816"]
+reason = "g0107 lost -7.5 bps/day with 3 of 20 coins positive (L816). A rule that loses this broadly may be wrong-way: its opposite is tested as a separate hypothesis, with the search charged again."
+
+[grid]
+n = [96.0, 192.0, 384.0]
+
+[fixed]
+hold = 24.0
+stop = 500.0
+vol_n = 96.0
+z = 2.5
+
+[rule]
+short = "mirror"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "resid_z"
+n = "$n"
+op = ">="
+level = "$z"
+
+[[rule.filter]]
+feature = "mkt_rvol_pct"
+n = "$vol_n"
+op = "<"
+level = 0.5

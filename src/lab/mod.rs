@@ -155,6 +155,14 @@ pub struct LabConfig {
     pub capital: f64,
     /// Newest share of days no search may see.
     pub lockbox_frac: f64,
+    /// The lockbox never starts before this day (YYYY-MM-DD), whatever `lockbox_frac`
+    /// says: earlier days were seen by searches. Fetching older history makes the 20%
+    /// longer, and without this floor it would pull seen days back into the lockbox.
+    pub lockbox_not_before: Option<String>,
+    /// Start of the current era of the ledger. Trials, lockbox openings and loop spend
+    /// from before it were archived (lab-data/archive/) and no longer raise the bar:
+    /// lineage events before it still teach the loop, but count as neither looks nor budget.
+    pub era_start: Option<chrono::DateTime<chrono::Utc>>,
     pub threads: usize,
     pub seed: u64,
     pub universe: Universe,
@@ -193,15 +201,22 @@ pub struct EvolveCfg {
     pub auto_trial_budget: usize,
     /// Per-study overrides of `auto_trial_budget`, e.g. `binance-1h = 300`.
     pub auto_trial_budgets: BTreeMap<String, usize>,
+    /// When set, `--auto` caps each study at this many new trials per run instead of the
+    /// lifetime budget above. The hourly tick runs one `--auto`, so this is trials per hour:
+    /// the loop always has some room, and the bar still rises with every trial charged.
+    pub auto_trials_per_run: Option<usize>,
     /// `--auto` stops after this many generations in a row with nothing better than REJECT.
     pub auto_stall: u32,
     /// `--auto` never runs more generations than this in one go.
     pub auto_max_generations: u32,
+    /// `repair` acts only on families that failed at most this many gate checks: further
+    /// away, the problem is the idea, not one fixable weakness.
+    pub repair_max_failed: usize,
 }
 
 impl Default for EvolveCfg {
     fn default() -> Self {
-        Self { proposals: 4, specs_per_proposal: 12, trials_per_cycle: 40, min_regime_days: 60, min_side_trades: 30, min_paper_days: 20, min_catalyst: 30, families_dir: "families/gen".into(), hypotheses: "hypotheses.toml".into(), auto_trial_budget: 200, auto_trial_budgets: BTreeMap::new(), auto_stall: 3, auto_max_generations: 20 }
+        Self { proposals: 4, specs_per_proposal: 12, trials_per_cycle: 40, min_regime_days: 60, min_side_trades: 30, min_paper_days: 20, min_catalyst: 30, families_dir: "families/gen".into(), hypotheses: "hypotheses.toml".into(), auto_trial_budget: 200, auto_trial_budgets: BTreeMap::new(), auto_trials_per_run: None, auto_stall: 3, auto_max_generations: 20, repair_max_failed: 3 }
     }
 }
 
@@ -320,6 +335,8 @@ impl Default for LabConfig {
             start: "2024-01-01".into(),
             capital: 10_000.0,
             lockbox_frac: 0.20,
+            lockbox_not_before: None,
+            era_start: None,
             threads: 4,
             seed: 20261111,
             universe: Universe::default(),
@@ -334,6 +351,11 @@ impl Default for LabConfig {
 }
 
 impl LabConfig {
+    /// Whether a lineage event belongs to the current era (events with no time predate eras).
+    pub fn in_era(&self, at: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+        self.era_start.is_none_or(|t| at.is_some_and(|a| a >= t))
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -342,6 +364,9 @@ impl LabConfig {
         let cfg: LabConfig = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         if !(0.05..=0.5).contains(&cfg.lockbox_frac) {
             bail!("lockbox_frac must be between 0.05 and 0.5");
+        }
+        if let Some(d) = &cfg.lockbox_not_before {
+            day_ms(d).context("lockbox_not_before")?;
         }
         Ok(cfg)
     }
@@ -477,6 +502,11 @@ pub enum LabCmd {
         #[arg(long)]
         generation: Option<u32>,
     },
+    /// Judge every family with a verdict on the research venue again, on the archive as it is
+    /// now (after a longer history was fetched). Specs already on the ledger cost nothing;
+    /// generations are judged in their order with the lockbox looks they had. Writes the new
+    /// verdicts and `reports/rejudge-<date>.md`; nothing is proposed or promoted.
+    Rejudge,
     /// learn → propose → compare → report, once. Nothing is promoted.
     Evolve {
         /// Learn and propose only: simulate nothing, charge nothing, write no family file.
@@ -719,7 +749,7 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
                 cfg.trials_per_cycle = m;
             }
             let g = evolve::gather(lab);
-            let out = evolve::propose_from(&g, &lessons, &compare::Books::files(lab), lab, &cfg, None);
+            let out = evolve::propose_from(&g, &lessons, &compare::Books::files(lab), lab, &cfg, None, None);
             for p in &out.proposals {
                 println!("{} · {} of {} · {} specs, {} new trials\n  {}\n  {}\n", p.family.label(), p.family.operator.as_deref().unwrap_or(""), p.family.parent.as_deref().unwrap_or("nothing"), p.specs, p.new_trials, p.family.rule.as_ref().map(|r| r.describe()).unwrap_or_default(), p.family.reason);
             }
@@ -750,13 +780,19 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
             eprintln!("report: {}", path.display());
             Ok(())
         }
+        LabCmd::Rejudge => {
+            let (md, path) = evolve::rejudge(lab)?;
+            println!("{md}");
+            eprintln!("report: {}", path.display());
+            Ok(())
+        }
         LabCmd::Evolve { dry_run, max_trials, from_lessons, auto } => {
             if auto {
                 let r = evolve::auto(lab, max_trials)?;
                 println!("{}", evolve::auto_markdown(&r));
                 return Ok(());
             }
-            let r = evolve::evolve(lab, &evolve::EvolveOpts { dry_run, max_trials, from_lessons, loop_budget: None })?;
+            let r = evolve::evolve(lab, &evolve::EvolveOpts { dry_run, max_trials, from_lessons, loop_budget: None, budget_since: None })?;
             println!("{}", evolve::markdown(&r));
             Ok(())
         }
@@ -792,7 +828,7 @@ pub async fn run(cmd: LabCmd, lab: &LabConfig, http: &reqwest::Client, hl_api: &
 }
 
 /// Cached Jev answers for a family that reads a probe; empty for the others.
-fn family_aux(lab: &LabConfig, fam: &Family, p: &Panel) -> Result<Aux> {
+pub(crate) fn family_aux(lab: &LabConfig, fam: &Family, p: &Panel) -> Result<Aux> {
     match &fam.probe {
         Some(path) => {
             let pr = probe::Probe::load(path)?;
@@ -843,8 +879,18 @@ async fn jev(cmd: JevCmd, lab: &LabConfig, jev_cfg: &crate::config::JevConfig) -
     }
 }
 
+/// Days of `full` that searches may see: all but the newest `lockbox_frac`, and on the research
+/// venue never short of `lockbox_not_before` (days before it were already seen, so they can not
+/// be in the lockbox). Synthetic and test panels have their own calendar and ignore the floor.
+pub(crate) fn design_days(full: &Panel, lab: &LabConfig) -> usize {
+    let total = full.n_days();
+    let by_frac = ((total as f64) * (1.0 - lab.lockbox_frac)).floor() as usize;
+    let floor = lab.lockbox_not_before.as_deref().filter(|_| full.venue == lab.research_venue).and_then(|d| day_ms(d).ok()).map(|ms| (ms.div_euclid(panel::DAY_MS) - full.t0.div_euclid(panel::DAY_MS)).max(0) as usize);
+    by_frac.max(floor.unwrap_or(0)).min(total)
+}
+
 pub(crate) fn design_bars(full: &Panel, lab: &LabConfig) -> usize {
-    ((full.n_days() as f64) * (1.0 - lab.lockbox_frac)).floor() as usize * full.bars_per_day()
+    design_days(full, lab) * full.bars_per_day()
 }
 
 async fn fetch(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, venue: &str) -> Result<()> {
@@ -1015,6 +1061,28 @@ fn promote(lab: &LabConfig, family: &Path, candidate: bool, spec_id: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_longer_history_never_pulls_seen_days_into_the_lockbox() {
+        // 1000 days from 1970-01-01: 20% by fraction would start the lockbox on day 800.
+        let mut p = panel::testing::random_panel(1, 3, 1000, "1h");
+        let mut lab = LabConfig::default();
+        lab.lockbox_not_before = Some("1972-06-19".into());
+        assert_eq!(design_days(&p, &lab), 800, "a panel from another venue (synthetic, test) ignores the floor");
+        lab.lockbox_not_before = None;
+        p.venue = lab.research_venue.clone();
+        assert_eq!(design_days(&p, &lab), 800);
+        // Days up to 900 were seen: the lockbox starts there, not at 800.
+        lab.lockbox_not_before = Some("1972-06-19".into()); // day 900
+        assert_eq!(design_days(&p, &lab), 900);
+        assert_eq!(design_bars(&p, &lab), 900 * 24);
+        // An old floor does not hold the design window back once the fraction passes it.
+        lab.lockbox_not_before = Some("1970-04-11".into()); // day 100
+        assert_eq!(design_days(&p, &lab), 800);
+        // A floor past the end leaves no lockbox (the gate then does not open it).
+        lab.lockbox_not_before = Some("1999-01-01".into());
+        assert_eq!(design_days(&p, &lab), 1000);
+    }
 
     #[test]
     fn spec_ids_round_trip() {

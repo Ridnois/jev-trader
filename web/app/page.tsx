@@ -4,12 +4,13 @@ import Link from "next/link";
 import { useEffect, useSyncExternalStore } from "react";
 import { ArrowRight } from "lucide-react";
 import { useLive } from "@/components/live";
-import { DataTable, Delta, Empty, Figures, Panel, Side, Tag, Td, Th } from "@/components/bits";
+import { Empty, Figures, Panel, Side, Tag } from "@/components/bits";
 import { StationRail, type RailItem } from "@/components/pipeline";
 import { Sparkline, TestGauge } from "@/components/charts";
 import { Gloss } from "@/components/gloss";
-import { ago, duration, price, signed, strategyLabel, usd } from "@/lib/format";
-import { notice, stations, totals } from "@/lib/v3/stations";
+import { ago, duration, price, signed, signedUsd, strategyLabel, usd } from "@/lib/format";
+import { notice, openBook, stations, totals } from "@/lib/v3/stations";
+import { PositionsPanel } from "@/components/positions";
 
 const VISIT_KEY = "jev-v3-last-visit";
 const SESSION_KEY = "jev-v3-visit-since";
@@ -92,6 +93,7 @@ export default function Now() {
   const n = notice(live);
   const pipe = stations(live);
   const t = totals(live);
+  const book = openBook(live);
   const headlines = live.candidates.slice(0, 4);
   const markets = live.quotes.slice(0, 6);
   const days = live.strategies.reduce((a, s) => a + s.fullDays, 0);
@@ -110,7 +112,9 @@ export default function Now() {
       note:
         lab.promoted === 0 && lab.closest
           ? `Closest ${lab.closest.name}: ${lab.closest.failed === 1 ? `${lab.closest.check} ${lab.closest.value}, needs ${lab.closest.need}` : `${lab.closest.failed} checks short`}`
-          : lab.lastJudged
+          : lab.families === 0 && lab.era
+            ? `Ledger restarted ${new Date(lab.era).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}; ${lab.prior} earlier verdicts kept as a record`
+            : lab.lastJudged
             ? `Judged ${new Date(lab.lastJudged).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}`
             : "Never judged",
       ratio: lab.families ? { value: lab.promoted, max: lab.families, met: lab.promoted > 0 } : undefined,
@@ -216,9 +220,14 @@ export default function Now() {
               </>
             ),
           },
-          { label: "Open positions", value: t.positions.length, sub: t.positions.length ? `${usd(t.atRisk, 0)} at risk before stops` : "Nothing exposed" },
-          t.positions.length > 0
-            ? { label: "At risk", value: usd(t.atRisk, 0), sub: "Notional before stops, paper money" }
+          { label: "Open positions", value: book.rows.length, sub: book.rows.length ? `${usd(book.gross, 0)} notional, paper` : "Nothing exposed" },
+          book.rows.length > 0
+            ? {
+                label: "Open P&L",
+                value: book.pnl === null ? "–" : signedUsd(book.pnl),
+                tone: book.pnl === null || Math.abs(book.pnl) < 0.005 ? undefined : book.pnl > 0 ? "pos" : "neg",
+                sub: `At mid · ${usd(book.atRisk, 0)} lost if every stop fills`,
+              }
             : { label: "Headlines scored", value: live.candidateCount.toLocaleString("en-US"), sub: "Read by Jev; none traded" },
         ]}
       />
@@ -294,56 +303,7 @@ export default function Now() {
         </Panel>
       </section>
 
-      {(t.positions.length > 0 || live.trades.length > 0) && (
-        <Panel
-          flush
-          title="Open positions and closed trades"
-          description={t.positions.length ? `${t.positions.length} open, ${usd(t.atRisk)} notional at risk before stops.` : undefined}
-        >
-          {t.positions.length > 0 && (
-            <DataTable minWidth={620}>
-              <thead>
-                <tr><Th>Coin</Th><Th>Side</Th><Th className="text-right">Size</Th><Th className="text-right">Entry</Th><Th className="text-right">Stop</Th><Th>Opened</Th><Th>Closes by</Th></tr>
-              </thead>
-              <tbody>
-                {t.positions.map((p) => (
-                  <tr key={p.strategy + p.coin}>
-                    <Td className="font-medium">{p.coin}</Td>
-                    <Td><Side side={p.side} /></Td>
-                    <Td className="text-right">{usd(p.notional)}</Td>
-                    <Td className="text-right">{price(p.entry_px)}</Td>
-                    <Td className="text-right">{p.stop_px ? price(p.stop_px) : "None"}</Td>
-                    <Td className="text-muted-foreground">{ago(p.opened_ms, live.now)}</Td>
-                    <Td className="text-muted-foreground">{new Date(p.deadline_ms).toISOString().slice(5, 16).replace("T", " ")} UTC</Td>
-                  </tr>
-                ))}
-              </tbody>
-            </DataTable>
-          )}
-          {live.trades.length > 0 && (
-            <div className="border-t">
-              <div className="px-5 pt-4 pb-2 text-sm font-medium">Closed round trips</div>
-              <DataTable minWidth={560}>
-                <thead>
-                  <tr><Th>Coin</Th><Th>Side</Th><Th className="text-right">Result</Th><Th className="text-right">After costs</Th><Th>Exit</Th><Th>Closed</Th></tr>
-                </thead>
-                <tbody>
-                  {live.trades.slice(0, 8).map((tr) => (
-                    <tr key={tr.coin + tr.closed_ms}>
-                      <Td className="font-medium">{tr.coin}</Td>
-                      <Td><Side side={tr.side} /></Td>
-                      <Td className="text-right"><Delta value={tr.pnl_bps} digits={1} unit=" bps" /></Td>
-                      <Td className="text-right">{usd(tr.pnl, 2)}</Td>
-                      <Td className="text-muted-foreground">{tr.reason}</Td>
-                      <Td className="text-muted-foreground">{new Date(tr.closed_ms).toISOString().slice(5, 16).replace("T", " ")} UTC</Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </DataTable>
-            </div>
-          )}
-        </Panel>
-      )}
+      <PositionsPanel tradeLimit={8} />
     </div>
   );
 }

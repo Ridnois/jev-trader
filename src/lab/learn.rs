@@ -34,6 +34,9 @@ pub enum Finding {
     Params { flat: Vec<String>, moving: Vec<ParamMove> },
     /// The pick earns in one market state and loses in the other.
     Regime { favoured: Regime, mean_in_bps: f64, mean_out_bps: f64, days_in: usize, days_out: usize, t: f64 },
+    /// The pick earns in both market states but clearly more in one. Not acted on alone:
+    /// a `repair` of a family that failed a check of consistency over time reads it.
+    Lean { favoured: Regime, mean_in_bps: f64, mean_out_bps: f64, days_in: usize, days_out: usize, t: f64 },
     /// One side carries the losses.
     Side { worse: String, long_bps: f64, short_bps: f64, long_trades: usize, short_trades: usize },
     /// The longest-held trades carry the losses.
@@ -256,6 +259,13 @@ fn from_verdict(b: &mut Builder, v: &Verdict, ledger: &[TrialRecord]) {
     let (up, high) = regimes(&ev.basket);
     for (mask, yes, no) in [(&up, Regime::MarketUp, Regime::MarketDown), (&high, Regime::VolHigh, Regime::VolLow)] {
         let Some((m_in, m_out, n_in, n_out, t)) = split(&ev.daily, mask, 5.0) else { continue };
+        // Earns in both, clearly more in one: a lean, for `repair` to read.
+        if m_in > 0.0 && m_out > 0.0 && t.abs() >= 1.0 {
+            let (fav, a, bb, na, nb) = if m_in > m_out { (yes, m_in, m_out, n_in, n_out) } else { (no, m_out, m_in, n_out, n_in) };
+            let anecdote = na.min(nb) < cfg.min_regime_days;
+            b.add("lean", family, label, study, format!("{label} earns in both states but more with {}: {:+.1} bps/day ({na} days) against {:+.1} ({nb} days), t = {:.1} counting 5-day blocks", fav.word(), a * 1e4, bb * 1e4, t.abs()), src, t.abs() / 3.0, na + nb, anecdote, Finding::Lean { favoured: fav, mean_in_bps: a * 1e4, mean_out_bps: bb * 1e4, days_in: na, days_out: nb, t: t.abs() });
+            continue;
+        }
         // Earns in one state, loses in the other.
         let (fav, a, bb, na, nb) = if m_in > 0.0 && m_out < 0.0 { (yes, m_in, m_out, n_in, n_out) } else if m_out > 0.0 && m_in < 0.0 { (no, m_out, m_in, n_out, n_in) } else { continue };
         let t = t.abs();
@@ -381,11 +391,16 @@ pub fn learn(inp: &Inputs, cfg: &EvolveCfg) -> Lessons {
     }
 
     // Branches that keep dying.
+    // Each family's latest verdict: a `retested` one (`lab rejudge`) replaces the first.
+    let mut latest: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    for e in inp.lineage.iter().filter(|e| e.event == "tested" || e.event == "retested") {
+        latest.insert(e.family.as_str(), e.verdict.as_deref());
+    }
     let mut by_root: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-    for e in inp.lineage.iter().filter(|e| e.event == "tested") {
-        let r = by_root.entry(root_of(inp.lineage, &e.family)).or_default();
+    for (family, verdict) in latest {
+        let r = by_root.entry(root_of(inp.lineage, family)).or_default();
         r.0 += 1;
-        r.1 += (e.verdict.as_deref() == Some("REJECT")) as usize;
+        r.1 += (verdict == Some("REJECT")) as usize;
     }
     for (root, (tested, rejected)) in by_root {
         if tested >= 3 && rejected == tested {
@@ -394,7 +409,7 @@ pub fn learn(inp: &Inputs, cfg: &EvolveCfg) -> Lessons {
     }
 
     // Stable order and ids.
-    let order = |k: &str| ["gate", "regime", "side", "hold", "broad_loss", "coins", "params", "instability", "redundancy", "paper", "dying_branch", "execution", "catalyst", "note"].iter().position(|x| *x == k).unwrap_or(99);
+    let order = |k: &str| ["gate", "regime", "lean", "side", "hold", "broad_loss", "coins", "params", "instability", "redundancy", "paper", "dying_branch", "execution", "catalyst", "note"].iter().position(|x| *x == k).unwrap_or(99);
     b.out.sort_by(|a, c| (a.study.as_str(), a.label.as_str(), order(&a.kind)).cmp(&(c.study.as_str(), c.label.as_str(), order(&c.kind))).then(a.finding.cmp(&c.finding)));
     for (i, l) in b.out.iter_mut().enumerate() {
         l.id = format!("L{:02}", i + 1);

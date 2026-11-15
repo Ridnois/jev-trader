@@ -1,0 +1,33 @@
+# Slow time-series trend: hold a coin long (or short) while its own 20-120 day return
+# points that way, decided once a day. Leaves when price falls below the middle of the
+# same lookback's range. Few decisions and long holds, so costs matter far less than
+# for the 1h breakouts (H-L02), which traded 1-16 day channels and lost to costs.
+# Equal size per position: volatility-scaled sizing is not in the closed library yet.
+interval = "1h"
+hypothesis = "H-L05"
+
+[grid]
+n = [480.0, 1440.0, 2880.0]   # 20, 60, 120 days of 1h bars
+shorts = [0.0, 1.0]
+
+[fixed]
+hold_days = 30.0              # re-armed while the entry signal still holds (extend)
+stop = 0.0
+
+[rule]
+short = "mirror"
+every = 24.0                  # entries once a day on the clock
+exit_opposite = false
+extend = true
+
+[[rule.long]]
+feature = "ret"
+n = "$n"
+op = ">"
+level = 0.0
+
+[[rule.exit]]
+feature = "channel"
+n = "$n"
+op = "<"
+level = 0.0

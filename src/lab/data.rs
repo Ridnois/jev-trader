@@ -94,6 +94,44 @@ impl Archive {
         }).collect()
     }
 
+    /// Older candles in front of what is stored: only those before the first stored bar.
+    pub fn prepend_candles(&self, venue: &str, interval: &str, coin: &str, candles: &[Candle]) -> Result<usize> {
+        let path = self.candle_path(venue, interval, coin);
+        let Some(first) = first_time(&path) else { return self.append_candles(venue, interval, coin, candles) };
+        let mut buf = String::new();
+        let (mut prev, mut n) = (i64::MIN, 0);
+        for c in candles.iter().filter(|c| c.open_time < first && valid(c)) {
+            if c.open_time > prev {
+                prev = c.open_time;
+                buf.push_str(&format!("{},{},{},{},{},{}\n", c.open_time, c.open, c.high, c.low, c.close, c.volume));
+                n += 1;
+            }
+        }
+        if n > 0 {
+            prepend_rows(&path, &buf)?;
+        }
+        Ok(n)
+    }
+
+    /// Older funding prints in front of what is stored.
+    pub fn prepend_funding(&self, venue: &str, coin: &str, rows: &[(i64, f64)]) -> Result<usize> {
+        let path = self.funding_path(venue, coin);
+        let Some(first) = first_time(&path) else { return self.append_funding(venue, coin, rows) };
+        let mut buf = String::new();
+        let (mut prev, mut n) = (i64::MIN, 0);
+        for (t, r) in rows.iter().filter(|(t, r)| *t < first && r.is_finite()) {
+            if *t > prev {
+                prev = *t;
+                buf.push_str(&format!("{t},{r}\n"));
+                n += 1;
+            }
+        }
+        if n > 0 {
+            prepend_rows(&path, &buf)?;
+        }
+        Ok(n)
+    }
+
     pub fn append_funding(&self, venue: &str, coin: &str, rows: &[(i64, f64)]) -> Result<usize> {
         let path = self.funding_path(venue, coin);
         let last = last_time(&path);
@@ -122,6 +160,25 @@ fn valid(c: &Candle) -> bool {
 }
 
 /// Time of the last row, read from the file's tail.
+/// Open time of the first row, if the file has one.
+fn first_time(path: &Path) -> Option<i64> {
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    BufReader::new(f).read_line(&mut line).ok()?;
+    line.split(',').next()?.trim().parse().ok()
+}
+
+/// Writes `rows` (already formatted, oldest first, all older than the file's first row) in
+/// front of the file's contents, through a temporary file, so a reader never sees half of it.
+fn prepend_rows(path: &Path, rows: &str) -> Result<()> {
+    let old = std::fs::read_to_string(path).unwrap_or_default();
+    let tmp = path.with_extension("csv.tmp");
+    std::fs::write(&tmp, [rows, old.as_str()].concat())?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 fn last_time(path: &Path) -> Option<i64> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
@@ -178,7 +235,8 @@ pub async fn binance_klines(http: &reqwest::Client, symbol: &str, interval: &str
     Ok(out)
 }
 
-pub async fn binance_funding(http: &reqwest::Client, symbol: &str, start_ms: i64) -> Result<Vec<(i64, f64)>> {
+/// Funding prints from `start_ms`, stopping once a page reaches `end_ms` (None: up to now).
+pub async fn binance_funding(http: &reqwest::Client, symbol: &str, start_ms: i64, end_ms: Option<i64>) -> Result<Vec<(i64, f64)>> {
     let mut out: Vec<(i64, f64)> = Vec::new();
     let mut from = start_ms;
     loop {
@@ -191,7 +249,7 @@ pub async fn binance_funding(http: &reqwest::Client, symbol: &str, start_ms: i64
             }
         }
         match out.last() {
-            Some((t, _)) if arr.len() == 1000 && *t + 1 > from => from = *t + 1,
+            Some((t, _)) if arr.len() == 1000 && *t + 1 > from && end_ms.is_none_or(|e| *t < e) => from = *t + 1,
             _ => break,
         }
         tokio::time::sleep(std::time::Duration::from_millis(700)).await; // this endpoint allows 500 calls / 5 min
@@ -313,6 +371,22 @@ pub async fn fetch(http: &reqwest::Client, ar: &Archive, plan: &FetchPlan<'_>) -
         let mut parts = Vec::new();
         for interval in plan.intervals {
             let ims = interval_ms(interval).with_context(|| format!("bad interval {interval}"))?;
+            // `start` moved earlier than the archive reaches: fetch the missing older bars and put them in front.
+            // A coin listed after `start` returns nothing older, which costs one call.
+            if plan.venue == BINANCE
+                && let Some(first) = first_time(&ar.candle_path(plan.venue, interval, coin))
+                && first > plan.start_ms
+            {
+                match binance_klines(http, symbol, interval, plan.start_ms, first).await {
+                    Ok(c) => {
+                        let n = ar.prepend_candles(plan.venue, interval, coin, &c)?;
+                        if n > 0 {
+                            parts.push(format!("{interval} older +{n}"));
+                        }
+                    }
+                    Err(e) => parts.push(format!("{interval} older FAILED ({e:#})")),
+                }
+            }
             let from = last_time(&ar.candle_path(plan.venue, interval, coin)).map(|t| t + ims).unwrap_or(plan.start_ms);
             let got = match plan.venue {
                 BINANCE => binance_klines(http, symbol, interval, from, now).await,
@@ -333,9 +407,23 @@ pub async fn fetch(http: &reqwest::Client, ar: &Archive, plan: &FetchPlan<'_>) -
         // reach of its coarsest interval.
         let reach = plan.intervals.iter().filter_map(|i| interval_ms(i)).max().unwrap_or(3_600_000);
         let fstart = if plan.venue == BINANCE { plan.start_ms } else { plan.start_ms.max(now - 4990 * reach) };
+        if plan.venue == BINANCE
+            && let Some(first) = first_time(&ar.funding_path(plan.venue, coin))
+            && first > plan.start_ms + 8 * 3_600_000
+        {
+            match binance_funding(http, symbol, plan.start_ms, Some(first)).await {
+                Ok(r) => {
+                    let n = ar.prepend_funding(plan.venue, coin, &r)?;
+                    if n > 0 {
+                        parts.push(format!("funding older +{n}"));
+                    }
+                }
+                Err(e) => parts.push(format!("funding older FAILED ({e:#})")),
+            }
+        }
         let ffrom = last_time(&ar.funding_path(plan.venue, coin)).map(|t| t + 1).unwrap_or(fstart);
         let fund = match plan.venue {
-            BINANCE => binance_funding(http, symbol, ffrom).await,
+            BINANCE => binance_funding(http, symbol, ffrom, None).await,
             _ => hl_funding(http, plan.hl_api, symbol, ffrom).await,
         };
         match fund {
@@ -375,6 +463,28 @@ mod tests {
         assert_eq!(ar.append_funding(HL, "ETH", &[(10, 0.0000125), (20, -0.00002), (20, 0.5)]).unwrap(), 2);
         assert_eq!(ar.append_funding(HL, "ETH", &[(20, 0.1), (30, 0.00001)]).unwrap(), 1);
         assert_eq!(ar.funding(HL, "ETH"), vec![(10, 0.0000125), (20, -0.00002), (30, 0.00001)]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn older_history_goes_in_front_without_overlap() {
+        let dir = std::env::temp_dir().join(format!("jev-lab-prepend-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ar = Archive::new(&dir);
+        let q = 900_000;
+        ar.append_candles(BINANCE, "15m", "BTC", &[c(10 * q, 110.0), c(11 * q, 111.0)]).unwrap();
+        // Older bars, one overlapping the first stored bar and one broken: only the strictly older valid ones land.
+        let mut bad = c(8 * q, 108.0);
+        bad.high = f64::NAN;
+        assert_eq!(ar.prepend_candles(BINANCE, "15m", "BTC", &[c(7 * q, 107.0), bad, c(9 * q, 109.0), c(10 * q, 999.0)]).unwrap(), 2);
+        let got = ar.candles(BINANCE, "15m", "BTC").unwrap();
+        assert_eq!(got.iter().map(|k| k.open_time / q).collect::<Vec<_>>(), vec![7, 9, 10, 11]);
+        assert_eq!(got[2].close, 110.0, "the stored bar wins over a refetched copy");
+        // Appending still works after a prepend.
+        assert_eq!(ar.append_candles(BINANCE, "15m", "BTC", &[c(12 * q, 112.0)]).unwrap(), 1);
+        ar.append_funding(BINANCE, "BTC", &[(100, 0.0001)]).unwrap();
+        assert_eq!(ar.prepend_funding(BINANCE, "BTC", &[(50, 0.0002), (100, 0.9), (150, 0.1)]).unwrap(), 1);
+        assert_eq!(ar.funding(BINANCE, "BTC"), vec![(50, 0.0002), (100, 0.0001)]);
         std::fs::remove_dir_all(dir).ok();
     }
 }

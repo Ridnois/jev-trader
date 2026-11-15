@@ -1,0 +1,64 @@
+# g0211 — generation 66 — restrict
+# g0129's shorts lost -128.2 bps per trade while its longs made +85.6 (L10179). The long
+# side alone is the hypothesis.
+# Rule: long when xs_ret($look) >= $cut and xs_funding($b_look) <= -0.5 and ret($b_n) > $b_min_ret and xs_ret($b_b_look) >= 0.5; long only; only when mkt_ret($b_mkt_n) > 0; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cf2f4d37bfe63"
+interval = "1h"
+hypothesis = "H-G0211"
+name = "g0211"
+parent = "c4cb6620e234c"
+generation = 66
+operator = "restrict"
+lessons = ["L10179"]
+reason = "g0129's shorts lost -128.2 bps per trade while its longs made +85.6 (L10179). The long side alone is the hypothesis."
+
+[grid]
+look = [336.0, 672.0, 1344.0]
+
+[fixed]
+b_b_look = 168.0
+b_look = 168.0
+b_min_ret = 0.1
+b_mkt_n = 720.0
+b_n = 336.0
+cut = 0.6
+hold = 24.0
+
+[rule]
+short = "none"
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$look"
+op = ">="
+level = "$cut"
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_look"
+op = "<="
+level = -0.5
+
+[[rule.long]]
+feature = "ret"
+n = "$b_n"
+op = ">"
+level = "$b_min_ret"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_b_look"
+op = ">="
+level = 0.5
+
+[[rule.filter]]
+feature = "mkt_ret"
+n = "$b_mkt_n"
+op = ">"
+level = 0.0

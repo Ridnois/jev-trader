@@ -1,0 +1,63 @@
+{
+  "status": "candidate",
+  "hypothesis": "H-G0019",
+  "card": {
+    "spec": {
+      "family": "cce6eeb6de62c",
+      "params": {
+        "b_look": 168.0,
+        "hold_days": 7.0,
+        "min_ret": 0.1,
+        "mkt_n": 720.0,
+        "n": 336.0,
+        "shorts": 0.0,
+        "stop": 1000.0
+      }
+    },
+    "interval": "1h",
+    "mu_daily": 0.0009518824724665881,
+    "sd_daily": 0.015538658637238448,
+    "alpha": 0.05,
+    "beta": 0.2,
+    "days_if_real": 1016.047466118746,
+    "days_if_none": 715.0164129984943,
+    "dd99": [
+      0.17664700674733158,
+      0.2368595160539525,
+      0.2863446008886089
+    ],
+    "issued": "2026-11-14T06:36:58.534639420Z",
+    "study": "binance-1h"
+  },
+  "rule": {
+    "long": [
+      {
+        "feature": "ret",
+        "n": "$n",
+        "op": ">",
+        "level": "$min_ret"
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_look",
+        "op": ">=",
+        "level": 0.5
+      }
+    ],
+    "short": "mirror",
+    "filter": [
+      {
+        "feature": "mkt_ret",
+        "n": "$mkt_n",
+        "op": ">",
+        "level": 0.0
+      }
+    ],
+    "exit": [],
+    "exit_opposite": false,
+    "every": null,
+    "extend": false
+  },
+  "label": "g0019",
+  "parent": "cef1c03207966"
+}

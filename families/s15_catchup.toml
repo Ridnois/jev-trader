@@ -1,0 +1,41 @@
+# s15_catchup — hand-written seed for binance-15m (H-S15-LAG), 2026-11-13.
+# Altcoins absorb Bitcoin- and market-wide moves with a delay (Kurihara & Matsumoto,
+# "Price Transmission from Bitcoin to Altcoins: High-Frequency Evidence"). When the
+# market has moved hard over the last hour and a coin sits far below its usual place
+# against the basket, buy the laggard; mirrored for shorts. Close when it has caught up.
+# Thresholds set from the mechanism and the 15 bps round trip, before any 15m result.
+# Rule: long when mkt_ret(4) >= $m and resid_z(96) <= -$z; shorts mirrored; exit when resid_z(96) >= 0
+
+name = "s15_catchup"
+interval = "15m"
+hypothesis = "H-S15-LAG"
+
+[grid]
+m = [0.01, 0.02]        # market move over the last hour: 1%, 2%
+z = [1.5, 2.0]          # how far the coin lags its basket, residual z over 1 day
+hold = [8, 16]          # time stop: 2h, 4h
+
+[fixed]
+stop = 0.0
+max_positions = 0.0
+
+[rule]
+short = "mirror"
+
+[[rule.long]]
+feature = "mkt_ret"
+n = 4.0
+op = ">="
+level = "$m"
+
+[[rule.long]]
+feature = "resid_z"
+n = 96.0
+op = "<="
+level = "$z*-1"
+
+[[rule.exit]]
+feature = "resid_z"
+n = 96.0
+op = ">="
+level = 0.0

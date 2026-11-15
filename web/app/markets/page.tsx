@@ -112,7 +112,7 @@ export default function Markets() {
                   <tr key={q.coin}>
                     <Td className="font-medium">{q.coin}</Td>
                     <Td className="text-right font-mono text-[13px]">{price(q.mid)}</Td>
-                    <Td className="text-right tabular-nums text-muted-foreground">{q.chg1h === null ? "–" : signed(q.chg1h, 2, "%")}</Td>
+                    <Td className="text-right tabular-nums text-muted-foreground" title={q.chg1h === null ? "No price recorded an hour ago: the recorder was not running then" : undefined}>{q.chg1h === null ? "–" : signed(q.chg1h, 2, "%")}</Td>
                     <Td className="text-right tabular-nums text-muted-foreground">{q.chgDay === null ? "–" : signed(q.chgDay, 2, "%")}</Td>
                     <Td className="py-1.5"><Sparkline values={q.spark} width={150} height={30} up={null} /></Td>
                     <Td><div className="flex justify-center"><RangeBar q={q} /></div></Td>

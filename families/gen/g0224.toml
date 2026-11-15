@@ -1,0 +1,83 @@
+# g0224 — generation 70 — recombine
+# g0150 and funding_carry both made money on the design window with a daily correlation of
+# +0.05 (L11986). Entering only when both agree tests whether each confirms the other. The
+# parent is hand-written and its block form is an approximation, so this child is not a
+# strict variant of it.
+# Rule: long when channel($n) > 1 and vol_ratio($n) >= $vol_mult and xs_ret($b_look) >= $b_cut and xs_ret($b_b_look) >= 0.5 and xs_funding($b_b_b_look) <= -0.5 and xs_ret($b_b_b_look) >= 0.5 and xs_funding($b_look) <= -0.5; long only; only when mkt_rvol_pct(24) < 0.9
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c460ecf29f7e8"
+interval = "1h"
+hypothesis = "H-G0224"
+name = "g0224"
+parent = "c30f60eee86f9"
+generation = 70
+operator = "recombine"
+lessons = ["L11986"]
+reason = "g0150 and funding_carry both made money on the design window with a daily correlation of +0.05 (L11986). Entering only when both agree tests whether each confirms the other. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+n = [6.0, 12.0, 24.0]
+
+[fixed]
+b_b_b_look = 336.0
+b_b_look = 672.0
+b_cut = 0.6
+b_look = 72.0
+hold_days = 3.0
+stop = 600.0
+vol_mult = 2.5
+
+[rule]
+short = "none"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$n"
+op = ">="
+level = "$vol_mult"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = "$b_cut"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_b_look"
+op = ">="
+level = 0.5
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_b_b_look"
+op = "<="
+level = -0.5
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_b_b_look"
+op = ">="
+level = 0.5
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_look"
+op = "<="
+level = -0.5
+
+[[rule.filter]]
+feature = "mkt_rvol_pct"
+n = 24.0
+op = "<"
+level = 0.9

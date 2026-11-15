@@ -1,0 +1,85 @@
+# g0121 — generation 36 — repair
+# g0119 failed only walk-forward, deflated Sharpe, best days removed (L5454); best days
+# removed says its profit leans on a few days. Outsized days cluster in market-wide
+# volatility spikes: skipping the most volatile tenth of days tests whether the edge is
+# there without them.
+# Rule: long when channel($n) > 1 and vol_ratio($n) >= $vol_mult and xs_ret($b_look) >= $b_cut and xs_ret($b_look) >= 0.5 and xs_funding($b_b_look) <= -0.5 and ret($b_n) > $b_min_ret; long only; only when mkt_ret($b_mkt_n) > 0 and mkt_rvol_pct(24) < 0.9
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c2bd22b69476c"
+interval = "1h"
+hypothesis = "H-G0121"
+name = "g0121"
+parent = "cb5ddc9ba972c"
+generation = 36
+operator = "repair"
+lessons = ["L5454"]
+reason = "g0119 failed only walk-forward, deflated Sharpe, best days removed (L5454); best days removed says its profit leans on a few days. Outsized days cluster in market-wide volatility spikes: skipping the most volatile tenth of days tests whether the edge is there without them."
+
+[grid]
+n = [6.0, 12.0, 24.0]
+
+[fixed]
+b_b_look = 168.0
+b_cut = 0.6
+b_look = 672.0
+b_min_ret = 0.1
+b_mkt_n = 720.0
+b_n = 168.0
+hold_days = 3.0
+stop = 600.0
+vol_mult = 2.5
+
+[rule]
+short = "none"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$n"
+op = ">="
+level = "$vol_mult"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = "$b_cut"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = 0.5
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_b_look"
+op = "<="
+level = -0.5
+
+[[rule.long]]
+feature = "ret"
+n = "$b_n"
+op = ">"
+level = "$b_min_ret"
+
+[[rule.filter]]
+feature = "mkt_ret"
+n = "$b_mkt_n"
+op = ">"
+level = 0.0
+
+[[rule.filter]]
+feature = "mkt_rvol_pct"
+n = 24.0
+op = "<"
+level = 0.9

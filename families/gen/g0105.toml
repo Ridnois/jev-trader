@@ -1,0 +1,64 @@
+# g0105 — generation 29 — recombine
+# g0103 and hvt both made money on the design window with a daily correlation of +0.18
+# (L505). Entering only when both agree tests whether each confirms the other. The parent
+# is hand-written and its block form is an approximation, so this child is not a strict
+# variant of it.
+# Rule: long when channel(96) > 1 and vol_ratio(96) >= $vm and z($b_vol_look) >= $b_z and vol_ratio($b_vol_look) >= $b_vol_mult; long only; only when mkt_rvol_pct(96) >= 0.7
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c018cb72456f5"
+interval = "15m"
+hypothesis = "H-G0105"
+name = "g0105"
+parent = "c19df3080cf04"
+generation = 29
+operator = "recombine"
+lessons = ["L505"]
+reason = "g0103 and hvt both made money on the design window with a daily correlation of +0.18 (L505). Entering only when both agree tests whether each confirms the other. The parent is hand-written and its block form is an approximation, so this child is not a strict variant of it."
+
+[grid]
+
+[fixed]
+b_vol_look = 192.0
+b_vol_mult = 3.0
+b_z = 2.5
+hold = 48.0
+max_positions = 0.0
+stop = 0.0
+vm = 3.0
+
+[rule]
+short = "none"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = 96.0
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = 96.0
+op = ">="
+level = "$vm"
+
+[[rule.long]]
+feature = "z"
+n = "$b_vol_look"
+op = ">="
+level = "$b_z"
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$b_vol_look"
+op = ">="
+level = "$b_vol_mult"
+
+[[rule.filter]]
+feature = "mkt_rvol_pct"
+n = 96.0
+op = ">="
+level = 0.7

@@ -1,0 +1,81 @@
+{
+  "status": "candidate",
+  "hypothesis": "H-G0261",
+  "card": {
+    "spec": {
+      "family": "cc938201452e3",
+      "params": {
+        "b_b_look": 336.0,
+        "b_b_n": 384.0,
+        "b_cut": 0.6,
+        "b_look": 672.0,
+        "hold_days": 3.0,
+        "n": 48.0,
+        "stop": 600.0,
+        "vol_mult": 2.5
+      }
+    },
+    "interval": "1h",
+    "mu_daily": 0.0003396119429748227,
+    "sd_daily": 0.004324911941911689,
+    "alpha": 0.05,
+    "beta": 0.2,
+    "days_if_real": 618.3612052474609,
+    "days_if_none": 435.1552714386596,
+    "dd99": [
+      0.04169543324052763,
+      0.05927358534438924,
+      0.0727936564356821
+    ],
+    "issued": "2026-11-15T01:10:03.569131022Z",
+    "study": "binance-1h"
+  },
+  "rule": {
+    "long": [
+      {
+        "feature": "channel",
+        "n": "$n",
+        "op": ">",
+        "level": 1.0
+      },
+      {
+        "feature": "vol_ratio",
+        "n": "$n",
+        "op": ">=",
+        "level": "$vol_mult"
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_look",
+        "op": ">=",
+        "level": 0.5
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_look",
+        "op": ">=",
+        "level": "$b_cut"
+      },
+      {
+        "feature": "channel",
+        "n": "$b_b_n",
+        "op": ">",
+        "level": 1.0
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_b_look",
+        "op": ">=",
+        "level": 0.5
+      }
+    ],
+    "short": "none",
+    "filter": [],
+    "exit": [],
+    "exit_opposite": false,
+    "every": null,
+    "extend": false
+  },
+  "label": "g0261",
+  "parent": "c2a64b25eabab"
+}

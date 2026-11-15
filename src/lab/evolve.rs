@@ -82,6 +82,15 @@ fn mean_bps(eval: &serde_json::Value) -> Option<f64> {
 
 /// Parents the proposer may derive from: families with a verdict, a pick, and no Jev
 /// probe (their replay cache is not the loop's to spend).
+/// The checks a verdict failed, or None when the gate stopped it before running them
+/// (no checks, or stopped at evidence with nothing else failed): such a family has no distance.
+pub(crate) fn failed_checks(v: &serde_json::Value) -> Option<Vec<String>> {
+    let checks = v["checks"].as_array()?;
+    let failed: Vec<String> = checks.iter().filter(|c| c["pass"] == false).filter_map(|c| c["name"].as_str().map(str::to_string)).collect();
+    let unjudged = checks.is_empty() || (v["verdict"] == "INSUFFICIENT_EVIDENCE" && failed.iter().all(|f| f == "evidence"));
+    (!unjudged).then_some(failed)
+}
+
 fn parents_of(verdicts: &[(String, serde_json::Value)], fams: &HashMap<String, Family>) -> BTreeMap<String, Parent> {
     let mut out = BTreeMap::new();
     for (_, v) in verdicts {
@@ -91,7 +100,7 @@ fn parents_of(verdicts: &[(String, serde_json::Value)], fams: &HashMap<String, F
             continue;
         }
         let pick: Option<Spec> = serde_json::from_value(v["pick"].clone()).ok();
-        out.insert(name.to_string(), Parent { family: fam.clone(), pick, mean_bps: mean_bps(v), study: v["study"].as_str().unwrap_or("").into() });
+        out.insert(name.to_string(), Parent { family: fam.clone(), pick, mean_bps: mean_bps(v), study: v["study"].as_str().unwrap_or("").into(), failed: failed_checks(v) });
     }
     out
 }
@@ -144,11 +153,11 @@ pub fn read_lessons(path: &Path) -> Result<Lessons> {
 }
 
 /// The proposer's view, from files.
-pub fn propose_from(g: &Gathered, lessons: &Lessons, books: &Books, lab: &LabConfig, cfg: &super::EvolveCfg, loop_budget: Option<usize>) -> propose::Outcome {
+pub fn propose_from(g: &Gathered, lessons: &Lessons, books: &Books, lab: &LabConfig, cfg: &super::EvolveCfg, loop_budget: Option<usize>, budget_since: Option<chrono::DateTime<chrono::Utc>>) -> propose::Outcome {
     let parents = parents_of(&g.verdicts, &g.families);
     let charged = books.charged();
     let generation = lineage::next_generation(&g.lineage);
-    propose::propose(&propose::Inputs { lessons, parents: &parents, lineage: &g.lineage, charged: &charged, research_venue: &lab.research_venue, generation, seed: lab.seed, loop_budget }, cfg)
+    propose::propose(&propose::Inputs { lessons, parents: &parents, lineage: &g.lineage, charged: &charged, research_venue: &lab.research_venue, generation, seed: lab.seed, loop_budget, budget_since, era: lab.era_start }, cfg)
 }
 
 /// Writes proposals: family files, hypothesis entries, `proposed` events.
@@ -313,7 +322,7 @@ pub fn compare_files(lab: &LabConfig, generation: u32, report: &mut CycleReport)
     let locks_before = books.lockbox_openings();
     let mut src = archive_panels(lab);
     let earlier = lineage::load(&lab.lineage_path());
-    let judged_before = |study: &str| earlier.iter().filter(|e| e.event == "tested" && e.study == study).count();
+    let judged_before = |study: &str| earlier.iter().filter(|e| e.event == "tested" && e.study == study && lab.in_era(e.at)).count();
     let mut judged = compare::judge_generation(lab, &on_disk, &mut src, &judged_before, &mut books)?;
     for j in &mut judged {
         j.eval.notes.push(WALK_NOTE.into());
@@ -360,12 +369,100 @@ pub fn compare_files(lab: &LabConfig, generation: u32, report: &mut CycleReport)
     Ok(judged)
 }
 
+/// `lab rejudge`: every family with a verdict on the research venue, judged again on the
+/// archive as it is now. Hand-written families as `lab validate` judges them; generated ones
+/// generation by generation, with the generation-wide reality check and the lockbox looks
+/// counted as when they were first judged. Specs already on the ledger are not charged again.
+/// Lineage gets a `retested` event per family (not `tested`: no budget, no extra look).
+pub fn rejudge(lab: &LabConfig) -> Result<(String, PathBuf)> {
+    let before: BTreeMap<(String, String), (String, Option<Vec<String>>)> = verdict_files(lab)
+        .into_iter()
+        .filter_map(|(_, v)| Some(((v["study"].as_str()?.to_string(), v["family"].as_str()?.to_string()), (v["verdict"].as_str()?.to_string(), failed_checks(&v)))))
+        .collect();
+    let has_verdict = |f: &Family| before.contains_key(&(format!("{}-{}", lab.research_venue, f.interval), f.family.clone()));
+    let all: Vec<Family> = families(lab).into_iter().map(|d| d.family).filter(|f| f.probe.is_none() && f.venue.as_deref().is_none_or(|v| v == lab.research_venue) && has_verdict(f)).collect();
+    let mut books = Books::files(lab);
+    let mut src = archive_panels(lab);
+    let mut judged: Vec<(Family, Evaluation)> = Vec::new();
+    let mut days = 0;
+    for fam in all.iter().filter(|f| f.rule.is_none()) {
+        let (full, venue) = src(fam)?;
+        let aux = super::family_aux(lab, fam, &full)?;
+        let ev = compare::validate_family(lab, fam, &full, venue.as_ref(), &aux, None, None, None, 0, &mut books)?;
+        days = days.max(ev.design_days);
+        eprintln!("{}: {}", fam.label(), ev.verdict.word());
+        write_verdict(lab, &ev)?;
+        judged.push((fam.clone(), ev));
+    }
+    let earlier = lineage::load(&lab.lineage_path());
+    let mut gens: Vec<u32> = all.iter().filter(|f| f.rule.is_some()).filter_map(|f| f.generation).collect();
+    gens.sort_unstable();
+    gens.dedup();
+    for g in gens {
+        let fams: Vec<Family> = all.iter().filter(|f| f.rule.is_some() && f.generation == Some(g)).cloned().collect();
+        // The looks this generation had when it was first judged: tested families of earlier generations.
+        let judged_before = |study: &str| earlier.iter().filter(|e| e.event == "tested" && e.study == study && e.generation < g && lab.in_era(e.at)).count();
+        for mut j in compare::judge_generation(lab, &fams, &mut src, &judged_before, &mut books)? {
+            j.eval.notes.push(WALK_NOTE.into());
+            days = days.max(j.eval.design_days);
+            write_verdict(lab, &j.eval)?;
+            let fam = fams.iter().find(|f| f.family == j.family).expect("judged family").clone();
+            lineage::append(&lab.lineage_path(), &Event {
+                at: Some(chrono::Utc::now()),
+                event: "retested".into(),
+                family: j.family.clone(),
+                name: j.label.clone(),
+                parent: fam.parent.clone(),
+                generation: g,
+                operator: fam.operator.clone().unwrap_or_default(),
+                lessons: fam.lessons.clone(),
+                trials: j.new_trials,
+                verdict: Some(j.eval.verdict.word().into()),
+                study: j.study.clone(),
+                key: String::new(),
+                note: j.eval.checks.iter().filter(|c| !c.pass).map(|c| c.name).collect::<Vec<_>>().join(", "),
+            });
+            eprintln!("generation {g} {}: {}", j.label, j.eval.verdict.word());
+            judged.push((fam, j.eval));
+        }
+    }
+    // Before and after, closest first.
+    let dist = |f: &Option<Vec<String>>| f.as_ref().map_or(usize::MAX, Vec::len);
+    let show = |f: &Option<Vec<String>>| f.as_ref().map_or("not judged".to_string(), |v| if v.is_empty() { "none".into() } else { v.join(", ") });
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    let (mut closer, mut further) = (0, 0);
+    for (fam, ev) in &judged {
+        let now_failed = failed_checks(&serde_json::to_value(ev)?);
+        let (was_v, was_f) = before.get(&(ev.study.clone(), ev.family.clone())).cloned().unwrap_or_default();
+        match dist(&now_failed).cmp(&dist(&was_f)) {
+            std::cmp::Ordering::Less => closer += 1,
+            std::cmp::Ordering::Greater => further += 1,
+            _ => {}
+        }
+        rows.push((dist(&now_failed), format!("| {} | {} | {was_v} | {} | {} | {} |", fam.label(), ev.study, show(&was_f), ev.verdict.word(), show(&now_failed))));
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut md = String::new();
+    let _ = writeln!(md, "# Re-judged on the current archive, {}\n", chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"));
+    let _ = writeln!(md, "{} families, design windows up to {days} days (hypothesis H-HISTORY). Specs already on the ledger were not charged again; {} lockbox opening(s) on file after this run.\n", judged.len(), books.lockbox_openings());
+    let _ = writeln!(md, "Closer to passing than before: {closer}. Further: {further}. The rest kept their distance.\n");
+    let _ = writeln!(md, "| Family | Study | Was | Failed before | Now | Failed now |\n|---|---|---|---|---|---|");
+    for (_, r) in rows {
+        let _ = writeln!(md, "{r}");
+    }
+    let path = lab.data_dir.join("reports").join(format!("rejudge-{}.md", chrono::Utc::now().format("%Y-%m-%d")));
+    crate::status::write_atomic(&path, md.as_bytes())?;
+    Ok((md, path))
+}
+
 pub struct EvolveOpts {
     pub dry_run: bool,
     pub max_trials: Option<usize>,
     pub from_lessons: Option<PathBuf>,
     /// Auto mode's cap on the loop's trials per study (None for a single cycle).
     pub loop_budget: Option<usize>,
+    /// With `loop_budget`: count only trials tested since this time (a cap per run).
+    pub budget_since: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `lab evolve`.
@@ -380,7 +477,7 @@ pub fn evolve(lab: &LabConfig, opts: &EvolveOpts) -> Result<CycleReport> {
     }
     let g = gather(lab);
     let books = Books::files(lab);
-    let out = propose_from(&g, &lessons, &books, lab, &cfg, opts.loop_budget);
+    let out = propose_from(&g, &lessons, &books, lab, &cfg, opts.loop_budget, opts.budget_since);
     let generation = lineage::next_generation(&g.lineage);
     let mut report = CycleReport {
         generation,
@@ -547,6 +644,11 @@ pub struct AutoReport {
     pub budget: usize,
     /// Each study's own budget (`auto_trial_budgets` overrides, else `budget`).
     pub budgets: BTreeMap<String, usize>,
+    /// The cap per run when the loop runs on one (`auto_trials_per_run`), and what this run charged.
+    #[serde(default)]
+    pub per_run: Option<usize>,
+    #[serde(default)]
+    pub run_trials: BTreeMap<String, usize>,
 }
 
 /// Runs cycles until a stop rule. Each cycle is an ordinary `lab evolve`: its own
@@ -560,7 +662,11 @@ pub fn auto(lab: &LabConfig, max_trials: Option<usize>) -> Result<AutoReport> {
         if gens.len() as u32 >= cfg.auto_max_generations {
             break Stop::MaxGenerations;
         }
-        let r = evolve(lab, &EvolveOpts { dry_run: false, max_trials, from_lessons: None, loop_budget: Some(cfg.auto_trial_budget) })?;
+        let (loop_budget, budget_since) = match cfg.auto_trials_per_run {
+            Some(n) => (Some(n), Some(started)),
+            None => (Some(cfg.auto_trial_budget), None),
+        };
+        let r = evolve(lab, &EvolveOpts { dry_run: false, max_trials, from_lessons: None, loop_budget, budget_since })?;
         let empty = r.proposals.is_empty();
         let passed = !r.promotable.is_empty();
         let verdicts: Vec<Option<String>> = r.proposals.iter().map(|p| p.verdict.clone()).collect();
@@ -580,11 +686,15 @@ pub fn auto(lab: &LabConfig, max_trials: Option<usize>) -> Result<AutoReport> {
         }
     };
     let mut loop_trials: BTreeMap<String, usize> = BTreeMap::new();
-    for e in lineage::load(&lab.lineage_path()).iter().filter(|e| e.event == "tested") {
+    for e in lineage::load(&lab.lineage_path()).iter().filter(|e| e.event == "tested" && lab.in_era(e.at)) {
         *loop_trials.entry(e.study.clone()).or_default() += e.trials;
     }
     let budgets = loop_trials.keys().map(|k| (k.clone(), cfg.budget_for(k, cfg.auto_trial_budget))).collect();
-    let rep = AutoReport { started, finished: chrono::Utc::now(), stop, generations: gens, loop_trials, budget: cfg.auto_trial_budget, budgets };
+    let mut run_trials: BTreeMap<String, usize> = BTreeMap::new();
+    for e in lineage::load(&lab.lineage_path()).iter().filter(|e| e.event == "tested" && e.at.is_some_and(|at| at >= started)) {
+        *run_trials.entry(e.study.clone()).or_default() += e.trials;
+    }
+    let rep = AutoReport { started, finished: chrono::Utc::now(), stop, generations: gens, loop_trials, budget: cfg.auto_trial_budget, budgets, per_run: cfg.auto_trials_per_run, run_trials };
     let dir = lab.data_dir.join("reports").join("evolve");
     std::fs::create_dir_all(&dir)?;
     let stem = format!("auto-{}", started.format("%Y%m%d-%H%M%S"));
@@ -603,9 +713,19 @@ pub fn auto_markdown(r: &AutoReport) -> String {
         let trials: usize = g.proposals.iter().map(|p| p.new_trials).sum();
         let _ = writeln!(s, "| {} | {} | {} | {trials} |", g.generation, g.proposals.len(), g.proposals.iter().map(|p| format!("{} {}", p.name, p.verdict.as_deref().unwrap_or("-"))).collect::<Vec<_>>().join(", "));
     }
-    let _ = writeln!(s, "\n| Study | Loop trials so far | Budget |\n|---|---|---|");
-    for (study, n) in &r.loop_trials {
-        let _ = writeln!(s, "| {study} | {n} | {} |", r.budgets.get(study).copied().unwrap_or(r.budget));
+    match r.per_run {
+        Some(cap) => {
+            let _ = writeln!(s, "\n| Study | Trials this run | Cap per run | Loop trials so far |\n|---|---|---|---|");
+            for (study, n) in &r.loop_trials {
+                let _ = writeln!(s, "| {study} | {} | {cap} | {n} |", r.run_trials.get(study).copied().unwrap_or(0));
+            }
+        }
+        None => {
+            let _ = writeln!(s, "\n| Study | Loop trials so far | Budget |\n|---|---|---|");
+            for (study, n) in &r.loop_trials {
+                let _ = writeln!(s, "| {study} | {n} | {} |", r.budgets.get(study).copied().unwrap_or(r.budget));
+            }
+        }
     }
     let passed: Vec<&str> = r.generations.iter().flat_map(|g| g.promotable.iter().map(String::as_str)).collect();
     let _ = writeln!(s, "\n{}", if passed.is_empty() { "Nothing to promote. Each generation's report is in `lab-data/reports/evolve/gNNN.md`.".to_string() } else { format!("Passed the gate and not a duplicate: {}. Read its report, then `lab promote --family families/gen/<name>.toml` if you want it on paper.", passed.join(", ")) });
@@ -646,7 +766,7 @@ pub fn run_loop(lab: &LabConfig, seed_fam: &Family, p: &Panel, generations: u32,
         let lessons = learn_from(&g, &books.rows(), lab);
         let parents = parents_of(&g.verdicts, &g.families);
         let charged = books.charged();
-        let out = propose::propose(&propose::Inputs { lessons: &lessons, parents: &parents, lineage: &events, charged: &charged, research_venue: &p.venue, generation: gen_no, seed, loop_budget: Some(lab.evolve.auto_trial_budget) }, &lab.evolve);
+        let out = propose::propose(&propose::Inputs { lessons: &lessons, parents: &parents, lineage: &events, charged: &charged, research_venue: &p.venue, generation: gen_no, seed, loop_budget: Some(lab.evolve.auto_trial_budget), budget_since: None, era: lab.era_start }, &lab.evolve);
         if out.proposals.is_empty() {
             res.stop = Some(Stop::NothingNew);
             break;

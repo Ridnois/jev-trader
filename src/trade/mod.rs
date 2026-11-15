@@ -300,10 +300,16 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
             }
             let tries = bar_tries.entry(interval.clone()).or_insert((closed_open, 0));
             if tries.0 != closed_open {
+                if tries.1 > 0 && bar_done.get(interval).is_none_or(|t| *t < tries.0) {
+                    warn!("{interval} bar {}: no candles all bar long; its exit signals are checked at this bar, its entries are dropped", tries.0);
+                }
                 *tries = (closed_open, 0);
             }
-            // Retry every 5 seconds until most coins have the bar; give up after a minute.
-            if tries.1 > 0 && (now_ms - (closed_open + ims + 4_000)) / 5_000 < tries.1 as i64 {
+            // Retry every 5 seconds for the first minute, then every 30 seconds until the
+            // next bar closes: an outage of minutes must not cost a whole bar.
+            let since = now_ms - (closed_open + ims + 4_000);
+            let due = if tries.1 < 12 { tries.1 as i64 * 5_000 } else { 60_000 + (tries.1 as i64 - 12) * 30_000 };
+            if since < due {
                 continue;
             }
             tries.1 += 1;
@@ -311,10 +317,16 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
             if have * 10 < coins.len() * 8 && tries.1 < 12 {
                 continue;
             }
-            bar_done.insert(interval.clone(), closed_open);
             if have == 0 {
-                warn!("{interval} bar {closed_open}: no candles arrived; skipped");
+                if tries.1 == 12 {
+                    warn!("{interval} bar {closed_open}: no candles yet; retrying every 30 s until the next bar closes");
+                }
                 continue;
+            }
+            bar_done.insert(interval.clone(), closed_open);
+            let undecided = strategies.iter().any(|s| &s.promoted.card.interval == interval && ledger.last_bar.get(&s.name).is_none_or(|t| *t < closed_open));
+            if since > 60_000 && undecided {
+                info!("{interval} bar {closed_open}: candles in after {:.0} min; deciding late", since as f64 / 60_000.0);
             }
             let panel = match lab.panel(HL, interval, &coins) {
                 Ok(p) => p,
@@ -343,9 +355,10 @@ async fn engine(lab: &LabConfig, http: &reqwest::Client, hl_api: &'static str, w
                         continue;
                     }
                 };
+                let last_ms = ledger.last_bar.get(&s.name).copied();
                 let book = ledger.books.get_mut(&s.name).expect("book");
                 let quote = |c: usize| quotes.get(&panel.coins[c]).copied();
-                for ev in book.on_bar(&panel, &plan, &cfg, &quote, now_ms) {
+                for ev in book.on_bar(&panel, &plan, &cfg, &quote, now_ms, last_ms) {
                     match ev {
                         Event::Opened(p) => info!("{} open {} {} ${:.0} @ {:.6}{}", s.name, if p.side > 0 { "long" } else { "short" }, p.coin, p.notional, p.entry_px, p.stop_px.map(|x| format!(" · stop {x:.6}")).unwrap_or_default()),
                         Event::Extended(c) => info!("{} keeps {c}", s.name),

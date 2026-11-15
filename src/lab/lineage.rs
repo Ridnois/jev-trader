@@ -91,7 +91,7 @@ pub fn tree(events: &[Event]) -> String {
     fn walk(s: &mut String, node: &str, depth: usize, children: &BTreeMap<String, Vec<&Event>>, last: &BTreeMap<&str, &Event>, charged: &BTreeMap<&str, usize>) {
         for c in children.get(node).into_iter().flatten() {
             let state = last.get(c.family.as_str()).map(|e| match (&e.event[..], &e.verdict) {
-                ("tested", Some(v)) => v.clone(),
+                ("tested" | "retested", Some(v)) => v.clone(),
                 (ev, _) => ev.to_uppercase(),
             }).unwrap_or_default();
             let _ = writeln!(s, "{}└ {} `{}` gen {} · {} · {} · {} trials", "  ".repeat(depth), c.name, c.family, c.generation, c.operator, state, charged.get(c.family.as_str()).copied().unwrap_or(0));

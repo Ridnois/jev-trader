@@ -253,7 +253,7 @@ pub fn evaluate(inp: Inputs, lab: &LabConfig) -> Result<Evaluation> {
     let cfg = SimCfg::new(lab.capital, lab.costs.clone(), lab.sizing.clone());
     let bpd = full.bars_per_day();
     let total_days = full.n_days();
-    let design_days = ((total_days as f64) * (1.0 - lab.lockbox_frac)).floor() as usize;
+    let design_days = super::design_days(full, lab);
     let design = full.head(design_days * bpd);
     let mut ev = Evaluation {
         study: study.clone(),

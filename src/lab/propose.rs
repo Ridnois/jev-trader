@@ -11,12 +11,16 @@
 //! | `invert`    | `broad_loss`       | the opposite side of the parent, as its own hypothesis      |
 //! | `recombine` | `redundancy` (low) | the parent's entry confirmed by an unrelated family's entry |
 //! | `shrink`    | `params` (flat)    | a hand-written parent as blocks, flat dimensions fixed      |
+//! | `repair`    | `gate` (near miss) | the parent with one block aimed at a check it failed        |
 //! | `explore`   | budget left over   | a feature pairing not yet in the lineage                    |
+//!
+//! Lessons are acted on closest parent first: the families that failed the fewest gate
+//! checks get the cycle's slots before stronger lessons about families further away.
 //!
 //! The proposal file format is the interface: a person (or another proposer) can write
 //! the same `families/gen/*.toml` files and they go through the same door.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -38,7 +42,23 @@ pub struct Parent {
     /// The pick's mean daily return on the design window, bps.
     pub mean_bps: Option<f64>,
     pub study: String,
+    /// Gate checks its verdict failed; None when the gate stopped it before the checks.
+    pub failed: Option<Vec<String>>,
 }
+
+impl Parent {
+    /// Distance to passing: checks failed. Unjudged families sort last.
+    pub fn distance(&self) -> usize {
+        self.failed.as_ref().map_or(usize::MAX, Vec::len)
+    }
+}
+
+/// Checks that say the edge is not steady over time.
+const TIME_CHECKS: [&str; 3] = ["quarters", "walk-forward", "timing baseline"];
+/// Checks that say the profit leans on a few days.
+const CONCENTRATION_CHECKS: [&str; 1] = ["best days removed"];
+/// Checks that say the edge does not survive slower or dearer execution.
+const EXECUTION_CHECKS: [&str; 2] = ["one bar late", "costs ×2"];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Proposal {
@@ -67,6 +87,11 @@ pub struct Inputs<'a> {
     /// Auto mode: most trials the loop may charge on one study over all its cycles
     /// (counted from the lineage's `tested` events). None = no such cap.
     pub loop_budget: Option<usize>,
+    /// With a budget: count only the loop's trials tested at or after this time (a cap per
+    /// run), and ignore the per-study lifetime overrides.
+    pub budget_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Start of the ledger's current era: loop spend before it is not counted.
+    pub era: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct Outcome {
@@ -235,27 +260,102 @@ fn has_filter(rule: &Rule, f: Feature) -> bool {
     rule.filter.iter().any(|c| c.feature == f)
 }
 
-fn from_lesson(l: &Lesson, inp: &Inputs) -> Option<Draft> {
+/// Adds a market-state filter for `fav`, its window and level on a small grid.
+fn regime_filter(rule: &mut Rule, grid: &mut BTreeMap<String, Vec<f64>>, bpd: f64, fav: Regime) -> bool {
+    let (feature, n_key, lvl_key, op, levels, windows): (Feature, &str, &str, Op, Vec<f64>, Vec<f64>) = match fav {
+        Regime::MarketUp => (Feature::MktRet, "mkt_n", "mkt_min", Op::Gt, vec![0.0, 0.03], vec![15.0 * bpd, 30.0 * bpd]),
+        Regime::MarketDown => (Feature::MktRet, "mkt_n", "mkt_max", Op::Lt, vec![0.0, -0.03], vec![15.0 * bpd, 30.0 * bpd]),
+        Regime::VolLow => (Feature::MktRvolPct, "vol_n", "vol_cap", Op::Lt, vec![0.5, 0.7], vec![bpd, 3.0 * bpd]),
+        Regime::VolHigh => (Feature::MktRvolPct, "vol_n", "vol_floor", Op::Gt, vec![0.3, 0.5], vec![bpd, 3.0 * bpd]),
+    };
+    if has_filter(rule, feature) {
+        return false;
+    }
+    rule.filter.push(Cond { feature, n: Param::Ref(format!("${n_key}")), op, level: Param::Ref(format!("${lvl_key}")) });
+    grid.insert(n_key.into(), windows);
+    grid.insert(lvl_key.into(), levels);
+    true
+}
+
+/// `repair`: a family close to passing, changed by one block aimed at a check it failed.
+/// Only structural changes: a composed family is named by its rule, so the same rule on
+/// other parameters would overwrite the parent's verdict. Checks that measure the search
+/// itself (deflated Sharpe, reality check, plateau, PBO) have no repair here: the bar they
+/// set counts every trial on the study, and only more history moves it.
+fn repairs(l: &Lesson, failed: &[String], inp: &Inputs, cfg: &EvolveCfg) -> Vec<Draft> {
+    let Some(parent) = inp.parents.get(&l.subject) else { return Vec::new() };
+    if failed.is_empty() || failed.len() > cfg.repair_max_failed || parent.pick.is_none() {
+        return Vec::new();
+    }
+    let hit = |set: &[&str]| failed.iter().filter(|f| set.contains(&f.as_str())).cloned().collect::<Vec<_>>();
+    let label = parent.family.label().to_string();
+    let mut out = Vec::new();
+
+    // Not steady over time: trade only in the market state it earns more in, read from its own evidence.
+    let time = hit(&TIME_CHECKS);
+    if !time.is_empty() {
+        let lean = inp.lessons.lessons.iter().filter(|x| x.subject == l.subject && !x.anecdote).filter_map(|x| match &x.data {
+            Finding::Regime { favoured, mean_in_bps, mean_out_bps, t, .. } | Finding::Lean { favoured, mean_in_bps, mean_out_bps, t, .. } => Some((x, *favoured, *mean_in_bps, *mean_out_bps, *t)),
+            _ => None,
+        }).max_by(|a, b| a.4.total_cmp(&b.4));
+        if let Some((lx, fav, a, b, _)) = lean {
+            let why = format!("{label} failed only {} ({}), {} of them about consistency over time ({}). It earned {a:+.1} bps/day with {} against {b:+.1} otherwise ({}): trading only in that state tests whether the gaps were the other state.", failed.join(", "), l.id, time.join(", "), time.len(), fav.word(), lx.id);
+            // The filter's window and level are the search; the parent's own parameters stay at its pick.
+            if let Some(mut d) = draft(parent, "repair", l, why, move |rule, _fixed, grid, bpd| regime_filter(rule, grid, bpd, fav)) {
+                d.lessons.push(lx.id.clone());
+                out.push(d);
+            }
+        }
+    }
+
+    // Profit leans on a few days: skip the most volatile tenth of days, where outsized days cluster.
+    let conc = hit(&CONCENTRATION_CHECKS);
+    if !conc.is_empty() {
+        let why = format!("{label} failed only {} ({}); {} says its profit leans on a few days. Outsized days cluster in market-wide volatility spikes: skipping the most volatile tenth of days tests whether the edge is there without them.", failed.join(", "), l.id, conc.join(", "));
+        if let Some(d) = draft(parent, "repair", l, why, |rule, fixed, grid, bpd| {
+            if has_filter(rule, Feature::MktRvolPct) {
+                return false;
+            }
+            rule.filter.push(Cond { feature: Feature::MktRvolPct, n: Param::Num(bpd), op: Op::Lt, level: Param::Num(0.9) });
+            widen_window(rule, fixed, grid);
+            true
+        }) {
+            out.push(d);
+        }
+    }
+
+    // Fragile to execution: hold through a repeated signal instead of closing and reopening, so it trades less.
+    let exec = hit(&EXECUTION_CHECKS);
+    if !exec.is_empty() {
+        let why = format!("{label} failed only {} ({}); {} says it does not survive slower or dearer fills. Extending a position on a repeated signal, instead of closing and reopening it, cuts round trips and the costs they carry.", failed.join(", "), l.id, exec.join(", "));
+        if let Some(d) = draft(parent, "repair", l, why, |rule, fixed, grid, _| {
+            if rule.extend || rule.every.is_some() {
+                return false;
+            }
+            rule.extend = true;
+            widen_window(rule, fixed, grid);
+            true
+        }) {
+            out.push(d);
+        }
+    }
+    out
+}
+
+fn from_lesson(l: &Lesson, inp: &Inputs, cfg: &EvolveCfg) -> Vec<Draft> {
+    match &l.data {
+        Finding::Gate { failed, .. } => repairs(l, failed, inp, cfg),
+        _ => from_lesson_one(l, inp).into_iter().collect(),
+    }
+}
+
+fn from_lesson_one(l: &Lesson, inp: &Inputs) -> Option<Draft> {
     let parent = inp.parents.get(&l.subject)?;
     match &l.data {
         Finding::Regime { favoured, mean_in_bps, mean_out_bps, .. } => {
             let why = format!("{} earned {mean_in_bps:+.1} bps/day with {} and {mean_out_bps:+.1} without ({}). Trading only in that state should keep the first and drop the second, if the state itself is what matters.", parent.family.label(), favoured.word(), l.id);
             let fav = *favoured;
-            draft(parent, "condition", l, why, move |rule, _fixed, grid, bpd| {
-                let (feature, n_key, lvl_key, op, levels, windows): (Feature, &str, &str, Op, Vec<f64>, Vec<f64>) = match fav {
-                    Regime::MarketUp => (Feature::MktRet, "mkt_n", "mkt_min", Op::Gt, vec![0.0, 0.03], vec![15.0 * bpd, 30.0 * bpd]),
-                    Regime::MarketDown => (Feature::MktRet, "mkt_n", "mkt_max", Op::Lt, vec![0.0, -0.03], vec![15.0 * bpd, 30.0 * bpd]),
-                    Regime::VolLow => (Feature::MktRvolPct, "vol_n", "vol_cap", Op::Lt, vec![0.5, 0.7], vec![bpd, 3.0 * bpd]),
-                    Regime::VolHigh => (Feature::MktRvolPct, "vol_n", "vol_floor", Op::Gt, vec![0.3, 0.5], vec![bpd, 3.0 * bpd]),
-                };
-                if has_filter(rule, feature) {
-                    return false;
-                }
-                rule.filter.push(Cond { feature, n: Param::Ref(format!("${n_key}")), op, level: Param::Ref(format!("${lvl_key}")) });
-                grid.insert(n_key.into(), windows);
-                grid.insert(lvl_key.into(), levels);
-                true
-            })
+            draft(parent, "condition", l, why, move |rule, _fixed, grid, bpd| regime_filter(rule, grid, bpd, fav))
         }
         Finding::Side { worse, short_bps, long_bps, .. } if worse == "short" => {
             let why = format!("{}'s shorts lost {short_bps:+.1} bps per trade while its longs made {long_bps:+.1} ({}). The long side alone is the hypothesis.", parent.family.label(), l.id);
@@ -382,17 +482,20 @@ pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
     let proposed_keys: HashSet<&str> = inp.lineage.iter().filter(|e| e.event == "proposed").map(|e| e.key.as_str()).collect();
     // A rule's verdict file is named by its id, so the same rule on another grid would overwrite it.
     let proposed_rules: HashSet<&str> = inp.lineage.iter().filter(|e| e.event == "proposed").map(|e| e.family.as_str()).collect();
+    // A rule written differently but trading the same bars is the same strategy: it would
+    // charge its grid again and could spend a second lockbox opening on one result.
+    let same_as: HashMap<String, String> = inp.parents.values().filter_map(|p| Some((p.family.rule.as_ref()?.same_id(), p.family.label().to_string()))).collect();
     let dying: HashSet<&str> = inp.lessons.lessons.iter().filter(|l| matches!(l.data, Finding::DyingBranch { .. }) && !l.anecdote).map(|l| l.subject.as_str()).collect();
     let mut usable: Vec<&Lesson> = inp.lessons.lessons.iter().filter(|l| !l.anecdote && !l.operator_only).collect();
-    usable.sort_by(|a, b| b.strength.total_cmp(&a.strength).then(a.id.cmp(&b.id)));
+    // Closest parent first (fewest gate checks failed), then the strongest lesson about it.
+    let dist = |l: &Lesson| inp.parents.get(&l.subject).map_or(usize::MAX, Parent::distance);
+    usable.sort_by(|a, b| dist(a).cmp(&dist(b)).then(b.strength.total_cmp(&a.strength)).then(a.id.cmp(&b.id)));
     let mut drafts: Vec<Draft> = Vec::new();
     for l in &usable {
         if dying.contains(root_of(inp.lineage, &l.subject).as_str()) {
             continue;
         }
-        if let Some(d) = from_lesson(l, inp) {
-            drafts.push(d);
-        }
+        drafts.extend(from_lesson(l, inp, cfg));
     }
     // One proposal per parent first, then the rest in the same order: a cycle should not
     // spend its budget on one family.
@@ -452,6 +555,13 @@ pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
             out.messages.push(format!("{} of {}: {specs} specs is over the {} a proposal may have; skipped", d.operator, d.parent_label, cfg.specs_per_proposal));
             continue;
         }
+        let same = rule.same_id();
+        if let Some(twin) = same_as.get(&same).cloned().or_else(|| out.proposals.iter().find(|p| p.family.rule.as_ref().is_some_and(|r| r.same_id() == same)).map(|p| p.family.label().to_string())) {
+            if !exploring {
+                out.messages.push(format!("{} of {} ({}): the same strategy as {twin}, written differently; skipped", d.operator, d.parent_label, d.lessons.join(", ")));
+            }
+            continue;
+        }
         let key = format!("{}|{}|{}", fam.family, serde_json::to_string(&fam.grid).unwrap_or_default(), serde_json::to_string(&fam.fixed).unwrap_or_default());
         if proposed_rules.contains(fam.family.as_str()) || out.proposals.iter().any(|p| p.family.family == fam.family) {
             if !exploring {
@@ -472,10 +582,12 @@ pub fn propose(inp: &Inputs, cfg: &EvolveCfg) -> Outcome {
             out.messages.push(format!("{} of {}: every spec is already in the ledger, nothing new to learn", d.operator, d.parent_label));
             continue;
         }
-        if let Some(budget) = inp.loop_budget.map(|b| cfg.budget_for(&study, b)) {
-            let spent = inp.lineage.iter().filter(|e| e.event == "tested" && e.study == study).map(|e| e.trials).sum::<usize>() + out.proposals.iter().filter(|p| p.study == study).map(|p| p.new_trials).sum::<usize>();
+        if let Some(budget) = inp.loop_budget.map(|b| if inp.budget_since.is_some() { b } else { cfg.budget_for(&study, b) }) {
+            let counts = |e: &&Event| e.event == "tested" && e.study == study && inp.budget_since.is_none_or(|t| e.at.is_some_and(|at| at >= t)) && inp.era.is_none_or(|t| e.at.is_some_and(|at| at >= t));
+            let spent = inp.lineage.iter().filter(counts).map(|e| e.trials).sum::<usize>() + out.proposals.iter().filter(|p| p.study == study).map(|p| p.new_trials).sum::<usize>();
             if spent + new > budget {
-                out.messages.push(format!("loop budget: {study} has {spent} of its {budget} loop trials spent; {} of {} ({new} more) would pass it", d.operator, if d.parent_label.is_empty() { "explore" } else { &d.parent_label }));
+                let span = if inp.budget_since.is_some() { "this run's" } else { "its" };
+                out.messages.push(format!("loop budget: {study} has {spent} of {span} {budget} loop trials spent; {} of {} ({new} more) would pass it", d.operator, if d.parent_label.is_empty() { "explore" } else { &d.parent_label }));
                 continue;
             }
         }
@@ -563,8 +675,8 @@ mod tests {
         let trend = Family::parse("family = \"trend\"\ninterval = \"1h\"\n[grid]\nn = [24, 96, 384]\nout_frac = [0.25, 0.5]\nshorts = [0, 1]\nstop = [0, 800]\n").unwrap();
         let mr = Family::parse("family = \"meanrev\"\ninterval = \"1h\"\n[grid]\nn = [48, 96]\nz = [1.5, 2.0]\nhold = [12, 24]\n").unwrap();
         let mut out = BTreeMap::new();
-        out.insert("trend".into(), Parent { family: trend, pick: Some(Spec::new("trend", &[("n", 96.0), ("out_frac", 0.25), ("shorts", 1.0), ("stop", 800.0)])), mean_bps: Some(10.0), study: "binance-1h".into() });
-        out.insert("meanrev".into(), Parent { family: mr, pick: Some(Spec::new("meanrev", &[("n", 96.0), ("z", 2.0), ("hold", 24.0)])), mean_bps: Some(5.0), study: "binance-1h".into() });
+        out.insert("trend".into(), Parent { family: trend, pick: Some(Spec::new("trend", &[("n", 96.0), ("out_frac", 0.25), ("shorts", 1.0), ("stop", 800.0)])), mean_bps: Some(10.0), study: "binance-1h".into(), failed: None });
+        out.insert("meanrev".into(), Parent { family: mr, pick: Some(Spec::new("meanrev", &[("n", 96.0), ("z", 2.0), ("hold", 24.0)])), mean_bps: Some(5.0), study: "binance-1h".into(), failed: None });
         out
     }
 
@@ -585,7 +697,7 @@ mod tests {
 
     fn run(lineage: &[Event], charged: &BTreeMap<String, HashSet<String>>, cfg: &EvolveCfg) -> Outcome {
         let (l, p) = (lessons(), parents());
-        propose(&Inputs { lessons: &l, parents: &p, lineage, charged, research_venue: "binance", generation: 1, seed: 7, loop_budget: None }, cfg)
+        propose(&Inputs { lessons: &l, parents: &p, lineage, charged, research_venue: "binance", generation: 1, seed: 7, loop_budget: None, budget_since: None, era: None }, cfg)
     }
 
     #[test]
@@ -645,18 +757,89 @@ mod tests {
         let cfg = EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() };
         let (l, p) = (lessons(), parents());
         let spent = vec![Event { event: "tested".into(), family: "cx".into(), study: "binance-1h".into(), trials: 195, ..Event::default() }];
-        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200) }, &cfg);
+        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200), budget_since: None, era: None }, &cfg);
         assert!(out.proposals.iter().map(|x| x.new_trials).sum::<usize>() <= 5, "{:?}", out.proposals.iter().map(|x| x.new_trials).collect::<Vec<_>>());
         assert!(out.messages.iter().any(|m| m.starts_with("loop budget")), "{:?}", out.messages);
+    }
+
+    #[test]
+    fn a_cap_per_run_ignores_what_earlier_runs_spent() {
+        let cfg = EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() };
+        let (l, p) = (lessons(), parents());
+        let start = chrono::Utc::now();
+        let old = Event { event: "tested".into(), family: "cx".into(), study: "binance-1h".into(), trials: 5000, at: Some(start - chrono::Duration::hours(1)), ..Event::default() };
+        let run = |lineage: &[Event]| propose(&Inputs { lessons: &l, parents: &p, lineage, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(20), budget_since: Some(start), era: None }, &cfg);
+        let fresh = run(std::slice::from_ref(&old));
+        let charged = fresh.proposals.iter().filter(|x| x.study == "binance-1h").map(|x| x.new_trials).sum::<usize>();
+        assert!(charged > 0 && charged <= 20, "a spent lifetime must not block a new run, and the run stays under its cap: {charged}");
+        let this_run = Event { trials: 18, at: Some(start + chrono::Duration::minutes(2)), ..old.clone() };
+        let later = run(&[old, this_run]);
+        assert!(later.proposals.iter().filter(|x| x.study == "binance-1h").map(|x| x.new_trials).sum::<usize>() <= 2);
     }
 
     #[test]
     fn dying_branches_are_left_alone() {
         let (mut l, p) = (lessons(), parents());
         l.lessons.push(lesson("L09", "trend", 1.0, Finding::DyingBranch { tested: 3, rejected: 3 }));
-        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None }, &EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() });
+        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None, budget_since: None, era: None }, &EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() });
         assert!(out.proposals.iter().all(|p| p.family.parent.as_deref() != Some("trend")));
         let _ = learn::root_of;
+    }
+
+    fn with_failed(p: &mut BTreeMap<String, Parent>, name: &str, failed: &[&str]) {
+        p.get_mut(name).unwrap().failed = Some(failed.iter().map(|x| x.to_string()).collect());
+    }
+
+    #[test]
+    fn the_closest_parent_gets_the_first_slot() {
+        let cfg = EvolveCfg { trials_per_cycle: 100, ..EvolveCfg::default() };
+        let l = lessons();
+        let mut p = parents();
+        // trend's lessons are stronger, but meanrev is one check from passing.
+        with_failed(&mut p, "trend", &["walk-forward", "reality check", "deflated Sharpe", "quarters", "coins"]);
+        with_failed(&mut p, "meanrev", &["plateau"]);
+        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None, budget_since: None, era: None }, &cfg);
+        assert_eq!(out.proposals[0].family.parent.as_deref(), Some("meanrev"), "{:?}", out.messages);
+        // Unjudged parents go last.
+        let mut q = parents();
+        with_failed(&mut q, "trend", &["plateau"]);
+        let out = propose(&Inputs { lessons: &l, parents: &q, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None, budget_since: None, era: None }, &cfg);
+        assert_eq!(out.proposals[0].family.parent.as_deref(), Some("trend"));
+    }
+
+    #[test]
+    fn repair_aims_one_block_at_each_failed_check() {
+        let cfg = EvolveCfg { trials_per_cycle: 200, proposals: 8, ..EvolveCfg::default() };
+        let failed = ["quarters", "best days removed", "costs ×2"];
+        let mut p = parents();
+        with_failed(&mut p, "trend", &failed);
+        let gate = |id: &str, f: &[&str]| lesson(id, "trend", 1.0, Finding::Gate { verdict: "REVISE".into(), failed: f.iter().map(|x| x.to_string()).collect(), fatal: Vec::new() });
+        let lean = lesson("L11", "trend", 0.5, Finding::Lean { favoured: Regime::VolLow, mean_in_bps: 15.0, mean_out_bps: 4.0, days_in: 300, days_out: 300, t: 1.6 });
+        let l = Lessons { generated: None, sources: Vec::new(), notes: Vec::new(), lessons: vec![gate("L10", &failed), lean.clone()] };
+        let out = propose(&Inputs { lessons: &l, parents: &p, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None, budget_since: None, era: None }, &cfg);
+        let reps: Vec<&Proposal> = out.proposals.iter().filter(|x| x.family.operator.as_deref() == Some("repair")).collect();
+        let base_rule = base(&p["trend"]).unwrap().0;
+        assert_eq!(reps.len(), if base_rule.extend { 2 } else { 3 }, "{:?}", out.messages);
+        // Time: a calm-market filter from the lean, citing both lessons.
+        let time = reps[0];
+        assert!(time.family.rule.as_ref().unwrap().filter.iter().any(|c| c.feature == Feature::MktRvolPct && c.op == Op::Lt));
+        assert_eq!(time.family.lessons, vec!["L10".to_string(), "L11".to_string()]);
+        // Concentration: the most volatile tenth of days skipped.
+        assert!(reps[1].family.rule.as_ref().unwrap().filter.iter().any(|c| c.level == Param::Num(0.9)));
+        // Every repair is a new rule, so it can never overwrite the parent's verdict.
+        assert!(reps.iter().all(|r| r.family.family != "trend" && r.family.parent.as_deref() == Some("trend")));
+
+        // Too far from passing, or only search-cost checks: no repair.
+        let mut far = parents();
+        with_failed(&mut far, "trend", &["quarters", "coins", "plateau", "walk-forward"]);
+        let l2 = Lessons { generated: None, sources: Vec::new(), notes: Vec::new(), lessons: vec![gate("L10", &["quarters", "coins", "plateau", "walk-forward"]), lean.clone()] };
+        let out = propose(&Inputs { lessons: &l2, parents: &far, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None, budget_since: None, era: None }, &cfg);
+        assert!(out.proposals.iter().all(|x| x.family.operator.as_deref() != Some("repair")));
+        let mut cost = parents();
+        with_failed(&mut cost, "trend", &["deflated Sharpe", "reality check"]);
+        let l3 = Lessons { generated: None, sources: Vec::new(), notes: Vec::new(), lessons: vec![gate("L10", &["deflated Sharpe", "reality check"]), lean] };
+        let out = propose(&Inputs { lessons: &l3, parents: &cost, lineage: &[], charged: &BTreeMap::new(), research_venue: "binance", generation: 1, seed: 7, loop_budget: None, budget_since: None, era: None }, &cfg);
+        assert!(out.proposals.iter().all(|x| x.family.operator.as_deref() != Some("repair")));
     }
 
     #[test]
@@ -683,10 +866,10 @@ mod tests {
         assert!(b.proposals.iter().all(|q| a.proposals.iter().all(|p| p.family.family != q.family.family)));
         // A per-study override lifts the budget for that study only.
         let spent = vec![Event { event: "tested".into(), family: "cx".into(), study: "binance-1h".into(), trials: 199, ..Event::default() }];
-        let tight = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200) }, &cfg);
+        let tight = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200), budget_since: None, era: None }, &cfg);
         let mut wide_cfg = cfg.clone();
         wide_cfg.auto_trial_budgets.insert("binance-1h".into(), 300);
-        let wide = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200) }, &wide_cfg);
+        let wide = propose(&Inputs { lessons: &l, parents: &p, lineage: &spent, charged: &BTreeMap::new(), research_venue: "binance", generation: 2, seed: 7, loop_budget: Some(200), budget_since: None, era: None }, &wide_cfg);
         let on_1h = |o: &Outcome| o.proposals.iter().filter(|p| p.study == "binance-1h").map(|p| p.new_trials).sum::<usize>();
         assert!(on_1h(&tight) <= 1);
         assert!(on_1h(&wide) > on_1h(&tight));

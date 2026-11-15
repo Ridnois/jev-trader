@@ -9,6 +9,60 @@ Two crypto trading bots for **Hyperliquid perps**, written in Rust and powered b
 
 Both run on **paper by default**: simulated fills on real Hyperliquid prices, charged Hyperliquid's real fees and funding. Real orders need `[exchange] mode = "live"` **and** `--live` (see *Live trading*).
 
+## Start here (for agents)
+
+Several agents may work in this repo at the same time. Read this section before you touch anything, then read the notes your task needs.
+
+### Where things are
+
+There are two checkouts of one repo:
+
+| Checkout | Branch | State |
+|---|---|---|
+| `~/Documents/bussiness/trading` | `main` | v1 news bot and scalper. **Stopped since 2026-11-11.** Holds `.env.local` (the Jev key). |
+| `~/Documents/bussiness/trading-v3` (git worktree) | `v3` | All active work: the lab, the evolve loop, the paper trader, the web dashboard. |
+
+### What to read, by task
+
+| Task | Read first |
+|---|---|
+| Anything in v3 | [DESIGN-V3.md](DESIGN-V3.md): the pipeline, the gate, the verdicts so far |
+| Evolve loop, generated families (`families/gen/`) | [PLAN-EVOLVE.md](PLAN-EVOLVE.md), then `lab.toml` and `hypotheses.toml` |
+| Web dashboard (`web/`) | [web/README.md](web/README.md), [web/DESIGN.md](web/DESIGN.md), [PRODUCT.md](PRODUCT.md), `web/AGENTS.md` |
+| v1 bots, P/B strategy, the testnet question | [NEXT-STEPS.md](NEXT-STEPS.md), [STRATEGY-PB.md](STRATEGY-PB.md) |
+| Background only | [CRYPTO-REDESIGN.md](CRYPTO-REDESIGN.md), [OPTIMIZATION-PLAN.md](OPTIMIZATION-PLAN.md), [DESIGN.md](DESIGN.md) (the v1 dashboard) |
+
+### What is running right now
+
+These processes share files with you. Don't restart, duplicate or race them.
+
+| Process | How to check | Writes |
+|---|---|---|
+| Paper trader (`trade run`) | `cat data-v3/trade.pid`, `target/lab/jev-trader trade monitor` | `data-v3/` |
+| Web dashboard on :8787 | `scripts/v3-services.sh status` | `data-v3/web.log` |
+| Hourly evolve tick, cron at :17 | `crontab -l`, `tail data-v3/evolve.log` | `lab-data/` (trials, lineage, reports), `families/gen/`, `hypotheses.toml` |
+
+### Rules for working beside other agents
+
+1. **Check the tree before you edit.** Run `git status` first. Uncommitted changes may belong to another agent: don't revert, reformat or commit them as yours. Commit only the files you changed, by path (`git add <file>`, never `git add -A`).
+2. **No bare `git stash`.** The stash stack is shared by both checkouts and by every agent. Use a WIP commit instead.
+3. **Trials are spent for good.** Every `lab validate` and every non-dry-run `lab evolve` writes to `lab-data/trials.jsonl` and counts against the gate. Ask the user before running one. `lab evolve --dry-run` is free. Never run `lab evolve` by hand between :15 and the end of an hourly tick: check that `data-v3/evolve.lock` is not held (`flock -n data-v3/evolve.lock true`).
+4. **Nothing goes live.** Don't set `max_capital_usd`, `mode = "live"` or `--live`, and don't promote a strategy (`lab promote`) unless the user asks.
+5. **Strategy changes start as hypotheses.** Write the hypothesis in `hypotheses.toml` first. A new strategy idea goes through `lab validate` and counts as a trial.
+6. **Spare the machine.** Build with `cargo build --profile lab -j 2` (binary `target/lab/jev-trader`) and test with `cargo test --profile lab -j 2`. Two agents compiling at once will run out of RAM: if a `cargo` process is already running (`pgrep -a cargo`), wait for it.
+7. **Stop processes by PID.** Find it with `ps -C jev-trader -o pid,args` or the `.pid` files. Never `pkill -f`.
+8. **Shared rate limit.** Hyperliquid allows 1200 weight per minute per IP, shared with the trader. Pace bulk downloads.
+9. **The repo is public.** Before a push, scan the staged diff for keys. Push only when the user asks. From the worktree, pass `--env-file ../trading/.env.local` for the Jev key; never copy it.
+10. **Dashboard edits need a rebuild.** :8787 serves a production build: `JEV_WEB_REBUILD=1 scripts/v3-services.sh start web` after `stop web`, and let only one agent do it at a time.
+
+### Leaving work for the next agent
+
+When you stop, add a dated entry (UTC) at the top of the *Handoff log* below: what you changed, what is uncommitted, what you left running, and what comes next. Keep entries to a few lines and link to the note that holds the detail. Delete entries once the work they describe is committed and documented elsewhere.
+
+#### Handoff log
+
+- **2026-11-14:** Start-here section added. The working tree holds uncommitted changes across `src/lab/`, `src/trade/` and `web/`, plus generated families `families/gen/g0068`+ from the hourly loop; their owner hasn't committed them yet.
+
 ## News bot
 
 Each tick it:

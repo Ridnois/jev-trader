@@ -1,0 +1,57 @@
+# g0078 — generation 20 — recombine
+# g0038 and g0023 both made money on the design window with a daily correlation of +0.12
+# (L914). Entering only when both agree tests whether each confirms the other.
+# Rule: long when channel($n) > 1 and vol_ratio($n) >= $vol_mult and xs_ret($b_look) >= $b_cut and channel($b_b_n) > 1; long only
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cb81ec22b0f60"
+interval = "1h"
+hypothesis = "H-G0078"
+name = "g0078"
+parent = "c4985153e362d"
+generation = 20
+operator = "recombine"
+lessons = ["L914"]
+reason = "g0038 and g0023 both made money on the design window with a daily correlation of +0.12 (L914). Entering only when both agree tests whether each confirms the other."
+
+[grid]
+n = [12.0, 24.0, 48.0]
+
+[fixed]
+b_b_n = 384.0
+b_cut = 0.6
+b_look = 336.0
+hold_days = 3.0
+stop = 600.0
+vol_mult = 2.5
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$n"
+op = ">="
+level = "$vol_mult"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = "$b_cut"
+
+[[rule.long]]
+feature = "channel"
+n = "$b_b_n"
+op = ">"
+level = 1.0

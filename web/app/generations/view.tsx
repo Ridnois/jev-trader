@@ -3,7 +3,7 @@ import { ChevronRight } from "lucide-react";
 import { DataTable, Empty, PageHead, Panel, Tag, Td, Th, Verdict } from "@/components/bits";
 import { Gloss, GlossList } from "@/components/gloss";
 import { clock, dateShort, familyName, plural, signed } from "@/lib/format";
-import type { CycleReport, GenNode, Generations, Pairing, ProposalRow } from "@/lib/v3/types";
+import type { Check, CycleReport, GenNode, Generations, Pairing, ProposalRow } from "@/lib/v3/types";
 import { cn } from "@/lib/utils";
 
 const EVOLVE = "jev-trader lab evolve";
@@ -87,8 +87,9 @@ function unscored(n: GenNode): boolean {
   return n.state === "INSUFFICIENT_EVIDENCE" && checks(n.failed).length === 0;
 }
 
+/** Scored in the ledger's current era: earlier verdicts faced the old bar and are not ranked with these. */
 function scoredNodes(gens: Generations): GenNode[] {
-  return judgedNodes(gens).filter((n) => !unscored(n));
+  return judgedNodes(gens).filter((n) => !unscored(n) && !n.prior);
 }
 
 /** The gate's own check order (`src/lab/gate.rs`), so ties read in the order a family meets them. */
@@ -109,7 +110,8 @@ function checkTally(nodes: GenNode[]) {
   for (const node of nodes) {
     const n = checks(node.failed).length;
     if (n === 0) continue;
-    if (!closest || n < closest.n) closest = { node, n };
+    // Ties go to the earlier generation, then the name: the Lab page's order, so both name the same family.
+    if (!closest || n < closest.n || (n === closest.n && (node.generation - closest.node.generation || node.name.localeCompare(closest.node.name)) < 0)) closest = { node, n };
   }
   return { rows, closest };
 }
@@ -237,9 +239,16 @@ function Stops({ gens }: { gens: Generations }) {
   );
 }
 
+const eraDate = (iso: string) => new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC";
+
+/** Loop trials, said against the ledger's era when it restarted. */
+function trialsLine(gens: Generations): string {
+  return gens.era ? `${plural(gens.trials, "trial")} since the ledger restarted ${eraDate(gens.era)}` : `${plural(gens.trials, "trial")}`;
+}
+
 /** The luck bar on a study: the earliest cycle's "before" and the newest cycle's "after". */
-function luckSpan(reports: CycleReport[], study: string): { before: number; after: number } | null {
-  const real = reports.filter((r) => !r.dry_run && r.studies.some((s) => s.study === study));
+function luckSpan(reports: CycleReport[], study: string, era: string | null): { before: number; after: number } | null {
+  const real = reports.filter((r) => !r.dry_run && r.studies.some((s) => s.study === study) && (!era || (r.at !== null && Date.parse(r.at) >= Date.parse(era))));
   if (real.length === 0) return null;
   const before = real[real.length - 1].studies.find((s) => s.study === study);
   const after = real[0].studies.find((s) => s.study === study);
@@ -547,14 +556,15 @@ function runway(gens: Generations) {
     const budget = gens.cfg.auto_trial_budgets[s.study] ?? gens.cfg.auto_trial_budget;
     const spends: number[] = [];
     let prev = 0;
-    for (const r of gens.runs) {
+    // Runs before the ledger's era counted the old trials; pace comes from this era's runs only.
+    for (const r of gens.runs.filter((r) => !gens.era || (r.started !== null && Date.parse(r.started) >= Date.parse(gens.era)))) {
       const n = r.loop_trials.find((x) => x.study === s.study)?.n ?? prev;
       if (n > prev) spends.push(n - prev);
       prev = Math.max(prev, n);
     }
     const pace = spends.length ? spends.reduce((a, b) => a + b, 0) / spends.length : 0;
     const left = Math.max(0, budget - s.loop);
-    return { study: s.study, used: s.loop, left, budget, runsLeft: pace > 0 ? Math.floor(left / pace) : null, luck: luckSpan(gens.reports, s.study) };
+    return { study: s.study, used: s.loop, left, budget, runsLeft: pace > 0 ? Math.floor(left / pace) : null, luck: luckSpan(gens.reports, s.study, gens.era) };
   });
 }
 
@@ -616,9 +626,20 @@ function HowItRuns({ gens }: { gens: Generations }) {
   ];
   const way = runway(gens);
   return (
-    <section aria-labelledby="how-title" className="flex flex-col gap-3">
-      <h3 id="how-title" className="text-[15px] font-medium tracking-tight">How the loop runs</h3>
-      <div className="overflow-hidden rounded-lg border bg-panel">
+    <details className="group overflow-hidden rounded-lg border bg-panel">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3">
+        <ChevronRight aria-hidden className="size-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+        <span className="text-sm font-medium">How the loop runs</span>
+        <span className="text-[13px] text-muted-foreground">
+          {[
+            schedule.minute !== null ? `Hourly at :${String(schedule.minute).padStart(2, "0")}` : schedule.cron ? "Scheduled" : "Not scheduled",
+            `${plural(runs.length, "run")} so far`,
+            lastRun ? `last stopped because ${stopWords(lastRun.stop, gens)}` : null,
+            `${plural(gens.trials, "trial")} this era`,
+          ].filter(Boolean).join(" · ")}
+        </span>
+      </summary>
+      <div className="border-t">
         <ol className="grid gap-px bg-border sm:grid-cols-2 lg:grid-cols-4">
           {cells.map((c) => (
             <li key={c.name} className="flex min-w-0 flex-col bg-panel p-4">
@@ -635,7 +656,11 @@ function HowItRuns({ gens }: { gens: Generations }) {
             </p>
             <p className="mt-1 max-w-[72ch] text-[13px] leading-5 text-pretty text-muted-foreground">
               Every <Gloss id="trial">trial</Gloss> raises the <Gloss id="luck-bar">luck bar</Gloss> every family on that study must
-              clear, so the loop gets a fixed number for its whole life. When it is spent, the hourly runs stop at once.
+              clear.{" "}
+              {gens.cfg.auto_trials_per_run
+                ? `Each hourly run may charge up to ${gens.cfg.auto_trials_per_run} new trials per study.`
+                : "The loop gets a fixed number for its whole life; when it is spent, the hourly runs stop at once."}
+              {gens.era && ` Counts start ${eraDate(gens.era)}, when the ledger restarted; earlier trials are archived and no longer raise the bar.`}
             </p>
             <ul className="mt-3 grid gap-x-10 gap-y-3 sm:grid-cols-2">
               {way.map((w) => (
@@ -643,14 +668,18 @@ function HowItRuns({ gens }: { gens: Generations }) {
                   <div className="flex items-baseline justify-between gap-3 text-[13px]">
                     <span className="font-mono text-xs">{w.study}</span>
                     <span className="tabular-nums">
-                      {w.used} of {w.budget} used
+                      {gens.cfg.auto_trials_per_run ? `${plural(w.used, "trial")}${gens.era ? " this era" : ""}` : `${w.used} of ${w.budget} used`}
                     </span>
                   </div>
-                  <div aria-hidden className="mt-1.5 h-[3px] w-full bg-foreground/15">
-                    <div className="h-full bg-foreground" style={{ width: `${Math.min(100, (w.used / Math.max(1, w.budget)) * 100)}%` }} />
-                  </div>
+                  {!gens.cfg.auto_trials_per_run && (
+                    <div aria-hidden className="mt-1.5 h-[3px] w-full bg-foreground/15">
+                      <div className="h-full bg-foreground" style={{ width: `${Math.min(100, (w.used / Math.max(1, w.budget)) * 100)}%` }} />
+                    </div>
+                  )}
                   <p className="mt-1.5 text-[12px] leading-4 text-faint">
-                    {w.left === 0
+                    {gens.cfg.auto_trials_per_run
+                      ? `Up to ${gens.cfg.auto_trials_per_run} per run`
+                      : w.left === 0
                       ? "Spent: runs no longer search this study."
                       : w.runsLeft === null
                         ? `${w.left} left`
@@ -672,82 +701,167 @@ function HowItRuns({ gens }: { gens: Generations }) {
           intro="Every underlined word opens the same record."
         />
       </div>
-    </section>
+    </details>
   );
 }
 
 // ---- progress: distance to the goal, generation by generation ----
 
-type Point = { node: GenNode; n: number };
+type Col = { generation: number; points: { node: GenNode; n: number }[]; record: number | null };
 
-function byGeneration(gens: Generations): { generation: number; points: Point[]; best: number | null; unscored: GenNode[] }[] {
-  const nodes = judgedNodes(gens);
-  const max = nodes.reduce((m, n) => Math.max(m, n.generation), 0);
-  const out = [];
-  for (let g = 1; g <= max; g++) {
-    const here = nodes.filter((n) => n.generation === g);
-    const points = here.filter((n) => !unscored(n)).map((node) => ({ node, n: checks(node.failed).length })).sort((a, b) => a.n - b.n);
-    out.push({ generation: g, points, best: points.length ? points[0].n : null, unscored: here.filter(unscored) });
+/** This era's scored families by generation, with the closest any family had come by then (it can only fall). */
+function columns(nodes: GenNode[]): Col[] {
+  if (nodes.length === 0) return [];
+  const lo = Math.min(...nodes.map((n) => n.generation));
+  const hi = Math.max(...nodes.map((n) => n.generation));
+  const out: Col[] = [];
+  let record: number | null = null;
+  for (let g = lo; g <= hi; g++) {
+    const points = nodes.filter((n) => n.generation === g).map((node) => ({ node, n: checks(node.failed).length })).sort((a, b) => a.n - b.n);
+    if (points.length && (record === null || points[0].n < record)) record = points[0].n;
+    out.push({ generation: g, points, record });
   }
   return out;
 }
 
-/** One sentence on the trend: is the newest generation closer than everything before it? */
-function trendLine(cols: { generation: number; best: number | null }[]): string {
-  const real = cols.filter((c) => c.best !== null) as { generation: number; best: number }[];
-  if (real.length === 0) return "No generation has been judged yet.";
-  const record = real.reduce((a, b) => (b.best < a.best ? b : a));
-  const last = real[real.length - 1];
-  if (record.best === 0) return `Generation ${record.generation} reached the goal.`;
-  if (real.length === 1) return `Its best family failed ${plural(record.best, "check")}.`;
-  if (last.generation === record.generation && real.slice(0, -1).every((c) => c.best > last.best))
-    return `Generation ${last.generation} came closer than any before it: ${plural(last.best, "check")} failed.`;
-  const since = real.filter((c) => c.generation > record.generation).length;
-  return `Closest so far was generation ${record.generation}, at ${plural(record.best, "check")} failed. ${
-    since === 0 ? "" : `The ${plural(since, "generation")} since have not beaten it.`
-  }`.trim();
+/** One sentence: where the record was set, and whether anything since has matched or beaten it. */
+function trendLine(cols: Col[]): string {
+  const last = cols[cols.length - 1];
+  if (!last || last.record === null) return "";
+  const best = last.record;
+  const setAt = cols.find((c) => c.record === best)!;
+  const who = setAt.points[0].node.name;
+  if (best === 0) return `${who} reached the goal in generation ${setAt.generation}.`;
+  const after = cols.filter((c) => c.generation > setAt.generation && c.points.length);
+  const matched = after.filter((c) => c.points[0].n === best).length;
+  const since = after.length === 0 ? "" : matched === 0 ? ` None of the ${plural(after.length, "generation")} since has come as close.` : ` In the ${plural(after.length, "generation")} since, ${matched} matched it and none beat it.`;
+  return `Closest so far: ${who}, ${plural(best, "check")} short, in generation ${setAt.generation}.${since}`;
+}
+
+/** Why a check gets harder over time, when it does. */
+const CHECK_MOVES: Record<string, string> = {
+  "deflated Sharpe": "its bar rises with every trial on the ledger",
+  lockbox: "its threshold tightens with every opening",
+  "generation reality check": "it counts every rule the generation tried",
+};
+
+/** The measured part of a check value, without the working in brackets. */
+function measured(c: Check): string {
+  const p = c.value.match(/p = [\d.]+/);
+  if (c.name === "lockbox" && p) return p[0];
+  return c.value.replace(/\s*\(.*$/, "").split(/;| · | over | on |, (?=Sharpe)/)[0].trim();
+}
+
+function needed(c: Check): string {
+  const p = c.need.match(/p < [\d.]+/);
+  return c.name === "lockbox" && p ? p[0] : c.need;
+}
+
+function NearMisses({ gens }: { gens: Generations }) {
+  const rows = gens.near;
+  if (rows.length === 0) return null;
+  const one = rows.filter((r) => r.failed.length === 1);
+  const missed = new Map<string, number>();
+  for (const r of one) missed.set(r.failed[0].name, (missed.get(r.failed[0].name) ?? 0) + 1);
+  const named = [...missed].sort((a, b) => b[1] - a[1]);
+  const moving = named.filter(([name]) => CHECK_MOVES[name]);
+  return (
+    <div className="-mx-5 mt-6 -mb-5 border-t">
+      <div className="px-5 pt-4 pb-3">
+        <h4 className="text-sm font-medium">How short is short</h4>
+        <p className="mt-1 max-w-[72ch] text-[13px] leading-5 text-pretty text-muted-foreground">
+          {one.length > 0 ? (
+            <>
+              The {plural(one.length, "family", "families")} one check short missed{" "}
+              <span className="text-foreground">{named.map(([name, n]) => `${name} (${n})`).join(", ")}</span>.{" "}
+              {moving.length > 0 && <>That bar moves: {moving.map(([name]) => `for ${name}, ${CHECK_MOVES[name]}`).join("; ")}. </>}
+            </>
+          ) : (
+            "No family this era is one check short. "
+          )}
+          Each row is what the gate measured against what it needed.
+        </p>
+      </div>
+      <DataTable minWidth={720} label="Families one or two checks short: each missed check, its measured value and what it needed">
+        <thead>
+          <tr>
+            <Th>Family</Th>
+            <Th>Missed</Th>
+            <Th className="text-right">Measured</Th>
+            <Th className="text-right">Needed</Th>
+            <Th className="text-right"><Gloss id="trial">Trials</Gloss> on ledger</Th>
+            <Th className="text-right">Judged</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.family} className="align-top">
+              <Td className="whitespace-nowrap">
+                <span className="font-mono font-medium">{r.name}</span>
+                <span className="ml-2 text-xs text-faint">{r.generation ? `generation ${r.generation}` : "hand-written"}</span>
+              </Td>
+              <Td className="whitespace-nowrap">
+                {r.failed.map((c) => (
+                  <div key={c.name}>{GLOSS_CHECK[c.name] ? <Gloss id={GLOSS_CHECK[c.name]}>{c.name}</Gloss> : c.name}</div>
+                ))}
+              </Td>
+              <Td className="text-right font-mono text-[12px] whitespace-nowrap">
+                {r.failed.map((c) => (
+                  <div key={c.name} title={c.value}>{measured(c)}</div>
+                ))}
+              </Td>
+              <Td className="text-right font-mono text-[12px] whitespace-nowrap text-muted-foreground">
+                {r.failed.map((c) => (
+                  <div key={c.name} title={c.need}>{needed(c)}</div>
+                ))}
+              </Td>
+              <Td className="text-right tabular-nums">{r.trials_ledger}</Td>
+              <Td className="text-right whitespace-nowrap text-muted-foreground">{when(r.judged)}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </DataTable>
+    </div>
+  );
 }
 
 function Progress({ gens }: { gens: Generations }) {
-  const cols = byGeneration(gens);
-  if (cols.length === 0 || cols.every((c) => c.points.length === 0)) return null;
-  const worst = Math.max(...cols.flatMap((c) => c.points.map((p) => p.n)));
+  const judged = judgedNodes(gens);
+  const now = judged.filter((n) => !n.prior);
+  const scored = now.filter((n) => !unscored(n));
+  const cols = columns(scored);
+  if (cols.length === 0) return null;
+  const prior = judged.length - now.length;
+  const thin = now.length - scored.length;
+  const worst = Math.max(...scored.map((n) => checks(n.failed).length));
   const top = Math.max(4, Math.ceil(worst / 2) * 2);
   const ticks = Array.from({ length: top / 2 + 1 }, (_, i) => i * 2);
   const y = (n: number) => (n / top) * 100;
-  const owner = runOf(gens);
-  // Run bands: consecutive generations of the same run share one label.
-  const bands: { from: number; to: number; run: number }[] = [];
-  for (const c of cols) {
-    const r = owner.get(c.generation) ?? -1;
-    const b = bands[bands.length - 1];
-    if (b && b.run === r) b.to = c.generation;
-    else bands.push({ from: c.generation, to: c.generation, run: r });
-  }
-  const bestPath = cols
-    .map((c, i) => (c.best === null ? null : `${((i + 0.5) / cols.length) * 100},${y(c.best)}`))
-    .filter(Boolean)
-    .join(" ");
-  const grid = { gridTemplateColumns: `repeat(${cols.length}, minmax(0, 1fr))` };
-  // Label only the generations that set a new closest, so the names never collide.
-  const records = new Set<number>();
-  let record = Infinity;
-  for (const c of cols) if (c.best !== null && c.best < record) { record = c.best; records.add(c.generation); }
-  const anyUnscored = cols.some((c) => c.unscored.length > 0);
+  const x = (i: number) => ((i + 0.5) / cols.length) * 100;
+  // The record as a step line: flat until a family comes closer, then down.
+  const steps: string[] = [];
+  cols.forEach((c, i) => {
+    if (c.record === null) return;
+    const prev = steps.length ? cols[i - 1]?.record : null;
+    if (prev !== null && prev !== undefined && prev !== c.record) steps.push(`${x(i)},${y(prev)}`);
+    steps.push(`${x(i)},${y(c.record)}`);
+  });
+  const lastRecord = cols[cols.length - 1].record;
+  if (lastRecord !== null) steps.push(`100,${y(lastRecord)}`);
+  const setters = new Set(cols.filter((c, i) => c.points.length && c.points[0].n === c.record && (i === 0 || cols[i - 1].record !== c.record)).map((c) => c.generation));
+  const xTicks = cols.filter((c, i) => i === 0 || i === cols.length - 1 || c.generation % 10 === 0);
   return (
     <Panel
       title={<h3 className="text-[15px] font-medium tracking-tight">Distance to the goal</h3>}
       description={
         <>
-          Each dot is one family, placed by its <Gloss id="checks-failed">checks failed</Gloss>: how many of the gate&apos;s checks
-          it did not pass. The goal is the top line, 0 failed. The line joins the closest family of each
-          generation. {trendLine(cols)}
+          Each dot is a family, placed by its <Gloss id="checks-failed">checks failed</Gloss>; the goal is 0, at the top. The line is the
+          closest any family has come so far. {trendLine(cols)}
         </>
       }
     >
       <div className="flex gap-3">
-        {/* y axis */}
-        <div aria-hidden className="relative mt-7 h-[220px] w-6 shrink-0 font-mono text-[11px] text-faint tabular-nums">
+        <div aria-hidden className="relative h-[200px] w-6 shrink-0 font-mono text-[11px] text-faint tabular-nums">
           {ticks.map((t) => (
             <span key={t} className="absolute right-0 -translate-y-1/2" style={{ top: `${y(t)}%` }}>
               {t}
@@ -755,108 +869,73 @@ function Progress({ gens }: { gens: Generations }) {
           ))}
         </div>
         <div className="min-w-0 flex-1">
-          {/* run labels */}
-          <div className="grid h-7 text-[11px] leading-4 text-muted-foreground" style={grid}>
-            {bands.map((b) => {
-              const run = gens.runs[b.run];
-              return (
-                <div
-                  key={`${b.from}-${b.run}`}
-                  className="mx-px truncate border-t border-foreground/25 pt-1"
-                  style={{ gridColumn: `${b.from} / ${b.to + 1}` }}
-                  title={run ? `Run of ${when(run.started)}, stopped because ${stopWords(run.stop, gens)}` : "Run by hand"}
-                >
-                  {run ? (b.to - b.from >= 2 ? `Run ${b.run + 1} · ${when(run.started)}` : `Run ${b.run + 1}`) : "By hand"}
-                </div>
-              );
-            })}
-          </div>
-          {/* plot */}
           <div
             role="img"
-            aria-label={`Checks failed by generation. Closest family per generation: ${cols.map((c) => `generation ${c.generation}, ${c.best ?? "none"}`).join("; ")}.`}
-            className="relative h-[220px]"
+            aria-label={`Checks failed by generation, ${scored.length} families. ${trendLine(cols)}`}
+            className="relative h-[200px]"
           >
             {ticks.map((t) => (
               <div
                 key={t}
                 aria-hidden
-                className={cn("absolute inset-x-0 border-t", t === 0 ? "border-dashed border-pos/60" : "border-border/70")}
+                className={cn("absolute inset-x-0 border-t", t === 0 ? "border-dashed border-pos/60" : "border-border/60")}
                 style={{ top: `${y(t)}%` }}
               />
             ))}
-            <span aria-hidden className="absolute right-0 -top-0.5 -translate-y-full text-[11px] text-pos">
-              Goal: passes the gate
-            </span>
-            <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none" className="absolute inset-0 size-full overflow-visible">
-              <polyline points={bestPath} fill="none" stroke="var(--foreground)" strokeOpacity={0.55} strokeWidth={1.25} vectorEffect="non-scaling-stroke" />
+            <span aria-hidden className="absolute right-0 -top-1 -translate-y-full text-[11px] text-pos">Goal: passes the gate</span>
+            {cols.map((c, i) =>
+              c.points.map((p, k) => {
+                const same = c.points.filter((q) => q.n === p.n);
+                const dx = (same.indexOf(p) - (same.length - 1) / 2) * 3;
+                const setter = k === 0 && setters.has(c.generation);
+                return (
+                  <span
+                    key={p.node.family}
+                    title={`${p.node.name}, generation ${c.generation}: ${plural(p.n, "check")} failed${p.node.failed ? ` (${p.node.failed})` : ""}`}
+                    className={cn(
+                      "absolute -translate-x-1/2 -translate-y-1/2 rounded-full",
+                      p.n === 0 ? "size-2 bg-pos" : setter ? "size-2 bg-foreground" : "size-1.5 bg-foreground/30",
+                    )}
+                    style={{ top: `${y(p.n)}%`, left: `calc(${x(i)}% + ${dx}px)` }}
+                  />
+                );
+              }),
+            )}
+            <svg aria-hidden viewBox="0 0 100 100" preserveAspectRatio="none" className="pointer-events-none absolute inset-0 size-full overflow-visible">
+              <polyline points={steps.join(" ")} fill="none" stroke="var(--foreground)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
             </svg>
-            <div className="absolute inset-0 grid" style={grid}>
-              {cols.map((c) => (
-                <div key={c.generation} className="relative">
-                  {c.points.map((p, i) => {
-                    const same = c.points.filter((q) => q.n === p.n);
-                    const k = same.indexOf(p);
-                    const dx = (k - (same.length - 1) / 2) * Math.min(22, 80 / same.length);
-                    const best = i === 0;
-                    return (
-                      <span
-                        key={p.node.family}
-                        title={`${p.node.name}: ${plural(p.n, "check")} failed · ${p.node.state === "REJECT" ? "rejected" : p.node.state.toLowerCase().replace(/_/g, " ")}`}
-                        className={cn(
-                          "absolute size-2 -translate-x-1/2 -translate-y-1/2 rounded-full",
-                          p.n === 0 ? "bg-pos" : best ? "bg-foreground" : "bg-foreground/35",
-                        )}
-                        style={{ top: `${y(p.n)}%`, left: `${50 + dx}%` }}
-                      />
-                    );
-                  })}
-                  {c.best !== null && records.has(c.generation) && (
-                    <span
-                      aria-hidden
-                      className="absolute left-1/2 -translate-x-1/2 font-mono text-[11px] text-foreground tabular-nums"
-                      style={{ top: `calc(${y(c.best)}% - 20px)` }}
-                    >
-                      {c.points.find((p) => p.n === c.best)?.node.name}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
+            {cols.map((c, i) =>
+              setters.has(c.generation) ? (
+                <span
+                  key={c.generation}
+                  aria-hidden
+                  className={cn("absolute -translate-y-1/2 font-mono text-[11px] text-foreground tabular-nums", i > 0 && "-translate-x-full")}
+                  style={{ top: `calc(${y(c.points[0].n)}% + 9px)`, left: i > 0 ? `calc(${x(i)}% - 6px)` : `calc(${x(i)}% + 6px)` }}
+                >
+                  {c.points[0].node.name}
+                </span>
+              ) : null,
+            )}
           </div>
-          {/* x axis */}
-          <div aria-hidden className="mt-2 grid font-mono text-[11px] text-faint tabular-nums" style={grid}>
-            {cols.map((c) => (
-              <span key={c.generation} className="text-center">
+          <div aria-hidden className="relative mt-2 h-4 font-mono text-[11px] text-faint tabular-nums">
+            {xTicks.map((c) => (
+              <span key={c.generation} className="absolute -translate-x-1/2" style={{ left: `${x(cols.indexOf(c))}%` }}>
                 {c.generation}
               </span>
             ))}
           </div>
-          {anyUnscored && (
-            <div className="mt-2 grid border-t border-border/70 pt-2" style={grid} aria-hidden>
-              {cols.map((c) => (
-                <div key={c.generation} className="flex flex-wrap justify-center gap-1">
-                  {c.unscored.map((n) => (
-                    <span key={n.family} title={`${n.name}: not enough evidence, so the checks never ran`} className="size-2 rounded-full border border-foreground/60" />
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
           <p className="mt-1 text-center text-[11px] text-faint">Generation</p>
         </div>
       </div>
-      <div className="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-[12px] text-muted-foreground">
-        <span className="flex items-center gap-1.5"><span aria-hidden className="size-2 rounded-full bg-foreground" />Closest of its generation</span>
-        <span className="flex items-center gap-1.5"><span aria-hidden className="size-2 rounded-full bg-foreground/35" />Other families</span>
-        {anyUnscored && (
-          <span className="flex items-center gap-1.5">
-            <span aria-hidden className="size-2 rounded-full border border-foreground/60" />
-            Too few trades to judge, so no distance (row under the axis)
-          </span>
-        )}
-        <span className="text-faint">Checks are not equal: a count is a distance, not a score.</span>
-      </div>
+      <p className="mt-4 max-w-[90ch] text-[12px] leading-4 text-faint">
+        Drawn: the {plural(scored.length, "family", "families")} the loop bred and the gate scored
+        {gens.era ? ` since the ledger restarted ${eraDate(gens.era)}` : ""}. Not drawn: {plural(thin, "family", "families")} with too
+        few trades to reach the checks{prior > 0 && `, ${prior} judged against the old ledger's higher bar`}, and the{" "}
+        {plural(gens.handWritten, "hand-written family", "hand-written families")}, which are on the{" "}
+        <Link href="/lab" className="text-muted-foreground underline decoration-border underline-offset-4 hover:decoration-foreground">Lab</Link>. Checks
+        are not equal: a count is a distance, not a score.
+      </p>
+      <NearMisses gens={gens} />
     </Panel>
   );
 }
@@ -893,6 +972,7 @@ export function GenerationsView({ gens }: { gens: Generations }) {
   const judged = Object.values(gens.verdicts).reduce((a, b) => a + b, 0);
   const passed = gens.verdicts.PROMOTE_TO_PAPER ?? 0;
   const closest = checkTally(scoredNodes(gens)).closest;
+  const judgedNow = judgedNodes(gens).filter((n) => !n.prior).length;
   const owner = runOf(gens);
   const real = gens.reports.filter((r) => !r.dry_run);
   const dry = gens.reports.filter((r) => r.dry_run);
@@ -922,22 +1002,27 @@ export function GenerationsView({ gens }: { gens: Generations }) {
           kind={passed > 0 ? "good" : "calm"}
           label="Generations"
           meta={meta}
-          line={judged > 0 ? `${passed} of ${plural(judged, "family", "families")} passed` : "0 families judged"}
+          line={
+            gens.era
+              ? `${passed} of ${plural(judgedNow, "generated family", "generated families")} passed this era`
+              : judged > 0 ? `${passed} of ${plural(judged, "family", "families")} passed` : "0 families judged"
+          }
           detail={
             judged === 0
               ? "Only dry runs so far: nothing simulated, nothing charged."
               : passed > 0
                 ? `${passed} passed the gate. That opens the paper run, it is not evidence of an edge, and promoting is your decision.`
                 : closest
-                  ? `Closest: ${closest.node.name}, ${plural(closest.n, "check")} short, from generation ${closest.node.generation}. ${plural(gens.generations, "generation")} and ${plural(gens.trials, "trial")} so far.`
-                  : `${plural(gens.generations, "generation")} and ${plural(gens.trials, "trial")} so far.`
+                  ? `Closest: ${closest.node.name}, ${plural(closest.n, "check")} short, from generation ${closest.node.generation}. ${plural(gens.generations, "generation")} so far; ${trialsLine(gens)}.`
+                  : gens.era && judgedNow === 0
+                    ? `No family judged since the ledger restarted ${eraDate(gens.era)}. The ${plural(judged - judgedNow, "earlier verdict")} faced the old ledger's bar and stay as a record, drawn hollow below. ${plural(gens.generations, "generation")} so far.`
+                    : `${plural(gens.generations, "generation")} so far; ${trialsLine(gens)}.`
           }
           href="/lab"
           link="The gate they face"
         />,
       )}
 
-      <HowItRuns gens={gens} />
       <Progress gens={gens} />
       <Stops gens={gens} />
 
@@ -956,7 +1041,10 @@ export function GenerationsView({ gens }: { gens: Generations }) {
         ))}
       </section>
 
-      <Lineage gens={gens} />
+      <div className="flex flex-col gap-3">
+        <HowItRuns gens={gens} />
+        <Lineage gens={gens} />
+      </div>
     </div>
   );
 }

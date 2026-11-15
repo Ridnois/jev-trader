@@ -1,0 +1,50 @@
+# g0090 — generation 23 — recombine
+# g0023 and g0002 both made money on the design window with a daily correlation of +0.02
+# (L802). Entering only when both agree tests whether each confirms the other.
+# Rule: long when xs_ret($look) >= $cut and channel($b_n) > 1 and xs_ret($b_look) >= 0.5; short on the mirror; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cc91cdeed9c97"
+interval = "1h"
+hypothesis = "H-G0090"
+name = "g0090"
+parent = "c9a118ff1d35d"
+generation = 23
+operator = "recombine"
+lessons = ["L802"]
+reason = "g0023 and g0002 both made money on the design window with a daily correlation of +0.02 (L802). Entering only when both agree tests whether each confirms the other."
+
+[grid]
+look = [168.0, 336.0, 672.0]
+
+[fixed]
+b_look = 336.0
+b_n = 384.0
+cut = 0.6
+hold = 24.0
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$look"
+op = ">="
+level = "$cut"
+
+[[rule.long]]
+feature = "channel"
+n = "$b_n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = 0.5

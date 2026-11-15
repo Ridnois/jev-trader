@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { familyName, strategyTag } from "@/lib/format";
+import { entryClauses, ruleSentence, type ComposedRule } from "@/lib/v3/rule";
 import type {
-  AutoRun, Calibration, Candidate, Card, CycleReport, DayRow, EngineStatus, EvolveCfg, EvolveSchedule, LoopCalibration, FamilyReport, GenNode, GenRoot, Generations,
-  HorizonSummary, Hypothesis, Lab, LabSummary, LineageEvent, Live, NewsEvent, Pairing, ProbeReport, ProposalRow, Quote, StrategyView,
-  StudyCost, Trade,
+  AutoRun, Calibration, RuleFamily, RuleRow, Rules, Candidate, Card, CycleReport, DayRow, EngineStatus, EvolveCfg, EvolveSchedule, LoopCalibration, FamilyReport, GenNode, GenRoot, Generations,
+  HorizonSummary, Hypothesis, Lab, LabSummary, LineageEvent, Live, NearMiss, NewsEvent, Pairing, ProbeReport, ProposalRow, Quote, StrategyView,
+  OnPaper, StudyCost, Trade, WalkCell, WalkFamily,
 } from "./types";
 
 /** The v3 worktree: the folder that holds data-v3/, lab-data/, strategies/ and lab.toml. */
@@ -52,6 +54,20 @@ function pidAlive(pid: number): boolean {
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/** Start of the ledger's current era (`era_start` in lab.toml), in ms; trials and loop spend before it no longer count. */
+function eraStart(): number | null {
+  const m = (readText(path.join(ROOT, "lab.toml")) ?? "").match(/^era_start\s*=\s*"([^"]+)"/m);
+  const t = m ? Date.parse(m[1]) : NaN;
+  return Number.isFinite(t) ? t : null;
+}
+
+/** Whether a lineage row's time falls in the current era. */
+function inEra(at: unknown, era: number | null): boolean {
+  if (era === null) return true;
+  const t = typeof at === "string" ? Date.parse(at) : NaN;
+  return Number.isFinite(t) && t >= era;
 }
 
 function tomlNumber(text: string, key: string, fallback: number): number {
@@ -132,7 +148,9 @@ function readTape(coin: string): Quote | null {
   }
   if (!tape.mid) return null;
   const lastMin = Math.floor(tape.lastSec / 60);
-  const hourAgo = tape.minutes.get(lastMin - 60);
+  // The mid an hour ago: that minute, or the nearest sampled minute up to 5 earlier (the recorder can skip minutes).
+  let hourAgo: number | undefined;
+  for (let k = lastMin - 60; k >= lastMin - 65 && hourAgo === undefined; k--) hourAgo = tape.minutes.get(k);
   return {
     coin,
     mid: tape.mid,
@@ -181,9 +199,14 @@ function strategies(status: EngineStatus | null): StrategyView[] {
     const line = block.match(/^- Parity: (.+)$/m);
     if (name && line) parity.set(name, line[1].trim());
   }
+  // Generation of each generated family, from the lineage; hand-written families are generation 0.
+  const generation = new Map<string, number>();
+  for (const r of readJsonl<Record<string, unknown>>(path.join(LAB, "lineage.jsonl"))) {
+    if (r && typeof r === "object" && r.event === "proposed" && typeof r.family === "string") generation.set(r.family, num(r.generation));
+  }
   const out: StrategyView[] = [];
   for (const f of files) {
-    const p = readJson<{ status: string; hypothesis: string; card: Card }>(path.join(dir, f));
+    const p = readJson<{ status: string; hypothesis: string; card: Card; rule?: ComposedRule; label?: string }>(path.join(dir, f));
     if (!p?.card) continue;
     const name = f.replace(/\.json$/, "");
     const { mu_daily: mu, sd_daily: sd, alpha, beta } = p.card;
@@ -223,6 +246,7 @@ function strategies(status: EngineStatus | null): StrategyView[] {
     out.push({
       labVerdict: report?.verdict ?? null, labStoppedAt: stopped?.name ?? null,
       name, status: p.status, hypothesis: p.hypothesis, card: p.card,
+      family: p.label ?? familyName(p.card.spec.family), tag: strategyTag(p.label ?? p.card.spec.family, generation.get(p.card.spec.family) ?? 0, p.label ? null : p.card), rule: ruleSentence(p.rule, p.card), entry: entryClauses(p.rule, p.card),
       book: status?.books.find((b) => b.strategy === name) ?? null,
       days, llr, kill, graduate, fullDays, partialDays: days.length - fullDays, drawdown: dd, drawdownLimit: limit, call, callWhy,
       parity: parity.get(name) ?? null,
@@ -239,7 +263,8 @@ export function getLive(): Live {
   const now = Date.now();
   if (cached && now - cached.at < 900) return cached.live;
   const lab = getLab();
-  const judgedAll = [...lab.families, ...lab.generated];
+  // Verdicts from before the ledger's era faced another bar: they are kept as a record, not ranked.
+  const judgedAll = [...lab.families, ...lab.generated].filter((f) => !f.prior);
   // Fewest failed checks; a family stopped for want of evidence before any check ran has no distance.
   const fails = (f: FamilyReport) => f.checks.filter((c) => !c.pass);
   const near = judgedAll
@@ -248,7 +273,9 @@ export function getLive(): Live {
   const nearCheck = near ? fails(near)[0] : undefined;
   const labSummary: LabSummary = {
     families: judgedAll.length,
-    generated: lab.generated.length,
+    generated: lab.generated.filter((f) => !f.prior).length,
+    prior: [...lab.families, ...lab.generated].filter((f) => f.prior).length,
+    era: lab.era,
     closest: near && nearCheck ? { name: near.name ?? near.family, generation: near.generation ?? null, failed: fails(near).length, check: nearCheck.name, value: nearCheck.value.replace(/\s*\(.*$/, ""), need: nearCheck.need } : null,
     promoted: judgedAll.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length,
     lastJudged: judgedAll.map((f) => f.judged).filter(Boolean).sort().at(-1) ?? null,
@@ -371,19 +398,52 @@ const COMPOSED = /^c[0-9a-f]{12}$/;
 
 let labCached: { at: number; lab: Lab } | null = null;
 
+/** Every file in `strategies/`: the name the trader runs it under and the family its spec comes from. */
+export function onPaper(): OnPaper[] {
+  const dir = path.join(ROOT, "strategies");
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort();
+  } catch {
+    return [];
+  }
+  const out: OnPaper[] = [];
+  for (const f of files) {
+    const p = readJson<{ status?: string; card?: { spec?: { family?: string } } }>(path.join(dir, f));
+    const family = p?.card?.spec?.family;
+    if (family) out.push({ family, name: f.replace(/\.json$/, ""), status: p?.status ?? "" });
+  }
+  return out;
+}
+
 export function getLab(): Lab {
   const now = Date.now();
   if (labCached && now - labCached.at < 5000) return labCached.lab;
   const reports = path.join(LAB, "reports");
   const families: FamilyReport[] = [];
   const generated: FamilyReport[] = [];
+  const labToml = readText(path.join(ROOT, "lab.toml")) ?? "";
+  const walkStart = tomlNumber(labToml, "train_days", 180) + tomlNumber(labToml, "purge_days", 5);
   // Generated families are named and numbered in the lineage; read it directly (getGenerations reads this function).
   const born = new Map<string, { name: string; generation: number }>();
   let loopTrials = 0;
+  const era = eraStart();
   for (const r of readJsonl<Record<string, unknown>>(path.join(LAB, "lineage.jsonl"))) {
     if (!r || typeof r !== "object") continue;
     if (r.event === "proposed" && typeof r.family === "string") born.set(r.family, { name: str(r.name, r.family), generation: num(r.generation) });
-    loopTrials += num(r.trials);
+    if (inEra(r.at, era)) loopTrials += num(r.trials);
+  }
+  // Hand-written rule families (families/*.toml with a [rule]) are named by their file's `name`, matched on hypothesis.
+  const handNamed = new Map<string, string>();
+  try {
+    for (const f of fs.readdirSync(path.join(ROOT, "families")).filter((x) => x.endsWith(".toml"))) {
+      const t = readText(path.join(ROOT, "families", f)) ?? "";
+      const name = t.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
+      const hyp = t.match(/^hypothesis\s*=\s*"([^"]+)"/m)?.[1];
+      if (name && hyp && /^\[rule\]/m.test(t)) handNamed.set(hyp, name);
+    }
+  } catch {
+    /* no families dir */
   }
   const probes: ProbeReport[] = [];
   let studies: string[] = [];
@@ -406,13 +466,24 @@ export function getLab(): Lab {
       if (Array.isArray(d.checks)) {
         let cum = 0;
         const oosCum = ((d.walk?.oos ?? []) as number[]).map((r) => (cum += r * 100));
-        const gen = COMPOSED.test(String(d.family ?? "")) ? born.get(d.family) ?? { name: d.family, generation: 0 } : null;
+        const hand = COMPOSED.test(String(d.family ?? "")) && !born.has(d.family) ? handNamed.get(String(d.hypothesis ?? "")) : undefined;
+        const gen = COMPOSED.test(String(d.family ?? "")) && !hand ? born.get(d.family) ?? { name: d.family, generation: 0 } : null;
+        // Walk-forward days count from the panel's first day. The out-of-sample line starts at the first possible
+        // test fold (train + purge days), even when that fold picked nothing: such folds are flat, and only folds
+        // with a pick are listed, so the first listed fold is not the start.
+        const panelStart = String(d.panel ?? "").match(/(\d{4}-\d{2}-\d{2})\s*→/)?.[1];
+        const testStart = walkStart;
+        const plus = (days: number) => new Date(Date.parse(`${panelStart}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+        const oosStart = panelStart && typeof testStart === "number" ? plus(testStart) : null;
+        const lockboxStart = panelStart && typeof d.design_days === "number" ? plus(d.design_days) : null;
+        const panelEnd = String(d.panel ?? "").match(/→\s*(\d{4}-\d{2}-\d{2})/)?.[1] ?? null;
         (gen ? generated : families).push({
-          ...(gen ? { name: gen.name, generation: gen.generation } : {}),
+          ...(gen ? { name: gen.name, generation: gen.generation } : hand ? { name: hand } : {}),
           study: d.study, family: d.family, hypothesis: d.hypothesis, panel: d.panel, specs: d.specs,
           trials_ledger: d.trials_ledger, trials_effective: d.trials_effective, design_days: d.design_days,
           lockbox_days: d.lockbox_days, lockbox_opened: d.lockbox_opened, leaders: d.leaders ?? [], checks: d.checks,
-          oosCum, folds: d.walk?.folds ?? [], verdict: d.verdict, notes: d.notes ?? [], judged,
+          oosCum, oosStart, lockboxStart, panelEnd, folds: d.walk?.folds ?? [], verdict: d.verdict, notes: d.notes ?? [], judged,
+          prior: era !== null && !!judged && Date.parse(judged) < era,
         });
       } else if (Array.isArray(d.questions)) {
         probes.push({ probe: d.probe, venue: d.venue, models: d.models, calls: d.calls, tokens_per_call: d.tokens_per_call, median_ms: d.median_ms, questions: d.questions, choices: d.choices ?? [], scored: judged });
@@ -431,7 +502,7 @@ export function getLab(): Lab {
     byStudy.set(m[1], (byStudy.get(m[1]) ?? 0) + 1);
   }
   generated.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
-  const lab: Lab = { families, generated, loopTrials, loopCalibrations: loopCalibrations(), probes, hypotheses: hypotheses(), calibrations: calibrations(), trials, trialsByStudy: [...byStudy].map(([study, n]) => ({ study, n })) };
+  const lab: Lab = { families, generated, loopTrials, loopCalibrations: loopCalibrations(), probes, hypotheses: hypotheses(), calibrations: calibrations(), trials, trialsByStudy: [...byStudy].map(([study, n]) => ({ study, n })), onPaper: onPaper(), era: era === null ? null : new Date(era).toISOString() };
   labCached = { at: now, lab };
   return lab;
 }
@@ -521,6 +592,7 @@ function evolveCfg(): EvolveCfg {
     trials_per_cycle: tomlNumber(t, "trials_per_cycle", 40),
     auto_trial_budget: tomlNumber(t, "auto_trial_budget", 200),
     auto_trial_budgets: tomlTable(t, "evolve.auto_trial_budgets"),
+    auto_trials_per_run: /^auto_trials_per_run\s*=/m.test(t) ? tomlNumber(t, "auto_trials_per_run", 0) : null,
     auto_stall: tomlNumber(t, "auto_stall", 3),
     auto_max_generations: tomlNumber(t, "auto_max_generations", 20),
   };
@@ -602,18 +674,34 @@ export function getGenerations(): Generations {
   const last = new Map<string, LineageEvent>();
   const failed = new Map<string, string>();
   const tested = new Map<string, string>();
+  const testedAt = new Map<string, string | null>();
   const charged = new Map<string, number>();
   const loopByStudy = new Map<string, number>();
+  const era = eraStart();
+  const studiesSeen = new Set<string>();
+  let eraTrials = 0;
   for (const e of events) {
     last.set(e.family, e);
-    if (e.event === "tested") {
+    // `retested`: judged again on a longer archive (`lab rejudge`); its verdict replaces the first.
+    if (e.event === "tested" || e.event === "retested") {
       failed.set(e.family, e.note);
       if (e.verdict) tested.set(e.family, e.verdict);
+      testedAt.set(e.family, e.at);
     }
     charged.set(e.family, (charged.get(e.family) ?? 0) + e.trials);
-    if (e.trials > 0) loopByStudy.set(e.study, (loopByStudy.get(e.study) ?? 0) + e.trials);
+    if (e.study) studiesSeen.add(e.study);
+    // Spend counts against the budget and the luck bar only in the ledger's current era.
+    if (e.trials > 0 && inEra(e.at, era)) {
+      loopByStudy.set(e.study, (loopByStudy.get(e.study) ?? 0) + e.trials);
+      eraTrials += e.trials;
+    }
   }
-  const proposed = events.filter((e) => e.event === "proposed");
+  // One proposal per rule id. The loop has proposed the same rule twice under two names (g0034 and g0043);
+  // kept twice, the rule and every descendant appear twice in the tree and in every count. The last name
+  // wins, as in getLab, so both pages call it the same thing.
+  const lastProposal = new Map<string, LineageEvent>();
+  for (const e of events) if (e.event === "proposed") lastProposal.set(e.family, e);
+  const proposed = [...lastProposal.values()];
   const names: Record<string, string> = {};
   for (const p of proposed) if (p.name) names[p.family] = p.name;
   const known = new Set(proposed.map((p) => p.family));
@@ -625,7 +713,7 @@ export function getGenerations(): Generations {
   const state = (family: string): string => {
     const e = last.get(family);
     if (!e || e.event === "proposed") return "proposed";
-    if (e.event === "tested") return e.verdict ?? "proposed";
+    if (e.event === "tested" || e.event === "retested") return e.verdict ?? "proposed";
     return e.event.toUpperCase();
   };
   const build = (parent: string, depth: number, seen: Set<string>): GenNode[] =>
@@ -634,21 +722,32 @@ export function getGenerations(): Generations {
       return {
         family: p.family, name: p.name || p.family, generation: p.generation, operator: p.operator, study: p.study, lessons: p.lessons,
         state: s, failed: failed.get(p.family) ?? "", trials: charged.get(p.family) ?? 0,
+        prior: testedAt.has(p.family) && !inEra(testedAt.get(p.family), era),
         children: depth < 32 ? build(p.family, depth + 1, new Set([...seen, p.family])) : [],
       };
     });
   const roots: GenRoot[] = [...kids.keys()].filter((k) => !known.has(k)).sort().map((family) => ({ family, children: build(family, 1, new Set()) }));
   const verdicts: Record<string, number> = {};
   for (const v of tested.values()) verdicts[v] = (verdicts[v] ?? 0) + 1;
-  const ledger = new Map(getLab().trialsByStudy.map((s) => [s.study, s.n]));
-  const studies = new Set([...loopByStudy.keys()]);
+  const lab = getLab();
+  const ledger = new Map(lab.trialsByStudy.map((s) => [s.study, s.n]));
+  const studies = new Set([...studiesSeen, ...loopByStudy.keys()]);
   const runs = autoRuns();
+  const near: NearMiss[] = [...lab.families, ...lab.generated]
+    .filter((f) => !f.prior)
+    .map((f) => ({ f, failed: f.checks.filter((c) => !c.pass) }))
+    .filter(({ failed }) => failed.length >= 1 && failed.length <= 2)
+    .map(({ f, failed }) => ({ name: f.name ?? familyName(f.family), family: f.family, generation: f.generation ?? 0, study: f.study, judged: f.judged, trials_ledger: f.trials_ledger, failed }))
+    .sort((a, b) => a.failed.length - b.failed.length || Date.parse(b.judged) - Date.parse(a.judged));
   const gens: Generations = {
     roots,
+    near,
+    handWritten: lab.families.length,
     proposed: proposed.length,
     verdicts,
     generations: events.reduce((m, e) => Math.max(m, e.generation), 0),
-    trials: events.reduce((n, e) => n + e.trials, 0),
+    trials: eraTrials,
+    era: era === null ? null : new Date(era).toISOString(),
     byStudy: [...studies].sort().map((study) => ({ study, loop: loopByStudy.get(study) ?? 0, ledger: ledger.get(study) ?? 0 })),
     names,
     reports: cycleReports(),
@@ -659,4 +758,106 @@ export function getGenerations(): Generations {
   };
   gensCached = { at: now, gens };
   return gens;
+}
+
+// ---- the rules page ----
+
+let rulesCached: { at: number; rules: Rules } | null = null;
+
+/** Every rule on the trial ledger, joined to its family's name, origin, verdict and distance to the goal. */
+export function getRules(): Rules {
+  const now = Date.now();
+  if (rulesCached && now - rulesCached.at < 5000) return rulesCached.rules;
+  const lab = getLab();
+  const statements = new Map(lab.hypotheses.map((h) => [h.id, h.statement]));
+  const families: Record<string, RuleFamily> = {};
+  const picks = new Set<string>();
+  const foldCount = new Map<string, number>();
+  const walkRaw = new Map<string, Map<string, WalkCell>>();
+  const windowEnds = new Map<string, string>();
+  const walkNone = new Set<string>();
+  let lockbox: string | null = null;
+  for (const f of [...lab.families, ...lab.generated]) {
+    const key = `${f.study}|${f.family}`;
+    const unjudged = f.checks.length === 0 || (f.verdict === "INSUFFICIENT_EVIDENCE" && f.checks.every((c) => c.name === "evidence" || c.pass));
+    families[key] = {
+      key, family: f.family, study: f.study, name: f.name ?? familyName(f.family), generation: f.generation ?? null, verdict: f.verdict,
+      short: unjudged ? null : f.checks.filter((c) => !c.pass).length, statement: statements.get(f.hypothesis) ?? "", specs: f.specs,
+    };
+    if (f.leaders[0]) picks.add(`${f.study}|${f.leaders[0].spec}`);
+  }
+  // Walk-forward picks per fold live only in the raw reports.
+  for (const study of lab.trialsByStudy.map((s) => s.study)) {
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(path.join(LAB, "reports", study)).filter((x) => x.endsWith(".json"));
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const d = readJson<any>(path.join(LAB, "reports", study, file));
+      const picked = strs(d?.fold_picks);
+      for (const spec of picked) foldCount.set(`${study}|${spec}`, (foldCount.get(`${study}|${spec}`) ?? 0) + 1);
+      if (!d || !Array.isArray(d.checks) || typeof d.family !== "string") continue;
+      const key = `${study}|${d.family}`;
+      const folds: { test?: { start?: number; end?: number }; test_mean?: number; test_sharpe?: number }[] = Array.isArray(d.walk?.folds) ? d.walk.folds : [];
+      const panelStart = String(d.panel ?? "").match(/(\d{4}-\d{2}-\d{2})\s*→/)?.[1];
+      if (!panelStart || folds.length === 0 || folds.length !== picked.length) {
+        walkNone.add(key);
+        continue;
+      }
+      const day = (n: number) => new Date(Date.parse(`${panelStart}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+      const byStart = new Map<string, WalkCell>();
+      folds.forEach((f, i) => {
+        if (typeof f.test?.start !== "number" || typeof f.test?.end !== "number") return;
+        const start = day(f.test.start);
+        windowEnds.set(start, day(f.test.end));
+        byStart.set(start, { spec: picked[i], bps: num(f.test_mean) * 1e4, sharpe: num(f.test_sharpe) * Math.sqrt(365) });
+      });
+      walkRaw.set(key, byStart);
+      if (typeof d.design_days === "number") {
+        const lb = day(d.design_days);
+        if (!lockbox || lb < lockbox) lockbox = lb;
+      }
+    }
+  }
+  // Every family on one calendar: windows line up by date, not by fold number, and a window a fold
+  // left out (it picked nothing) is flat for that family.
+  const windows = [...windowEnds.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([start, end]) => ({ start, end }));
+  const walkFamilies: WalkFamily[] = [...walkRaw.entries()].map(([key, byStart]) => {
+    const cells = windows.map((w) => byStart.get(w.start) ?? null);
+    return { key, cells, mean: cells.reduce((a, c) => a + (c?.bps ?? 0), 0) / Math.max(1, windows.length) };
+  });
+  walkFamilies.sort((a, b) => b.mean - a.mean);
+  const rows: RuleRow[] = [];
+  for (const r of readJsonl<Record<string, unknown>>(path.join(LAB, "trials.jsonl"))) {
+    if (!r || typeof r !== "object") continue;
+    const id = str(r.spec);
+    const study = str(r.study);
+    const family = str(r.family) || id.split(":")[0];
+    const params: Record<string, number> = {};
+    for (const kv of (id.split(":")[1] ?? "").split(",")) {
+      const [k, v] = kv.split("=");
+      if (k && v !== undefined && Number.isFinite(Number(v))) params[k] = Number(v);
+    }
+    const key = `${study}|${family}`;
+    if (!families[key]) {
+      families[key] = { key, family, study, name: familyName(family), generation: null, verdict: null, short: null, statement: "", specs: 0 };
+    }
+    rows.push({
+      id, study, family, params, trades: num(r.trades), days: num(r.days), sharpe: num(r.sharpe_daily) * Math.sqrt(365), bps: num(r.mean_bps_day),
+      at: str(r.at), pick: picks.has(`${study}|${id}`), folds: foldCount.get(`${study}|${id}`) ?? 0,
+    });
+  }
+  const rules: Rules = { rows, families, walk: { windows, lockbox, families: walkFamilies.filter((w) => families[w.key]), none: [...walkNone].filter((k) => families[k]) } };
+  rulesCached = { at: now, rules };
+  return rules;
+}
+
+/** Drop the 5-second caches, so the next read sees a file just written (after a promotion). */
+export function forgetCaches() {
+  labCached = null;
+  gensCached = null;
+  rulesCached = null;
 }

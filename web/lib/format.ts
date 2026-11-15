@@ -64,6 +64,24 @@ export function strategyLabel(name: string, card: { spec: { family: string; para
   return `${family}, ${name.replace(/_/g, " ")}`;
 }
 
+/**
+ * A strategy's tag: `G<generation>/<family>[·<variant>]`. Hand-written families are
+ * generation 0 and carry their lookback as the variant (`G0/trend·4d`), since two
+ * strategies can share one; a generated family is one rule (`G12/g0045`).
+ */
+export type StrategyTag = { generation: number; family: string; variant: string | null };
+
+export function strategyTag(family: string, generation: number, card: { spec: { params?: Record<string, number> }; interval: string } | null): StrategyTag {
+  const n = card?.spec.params?.n;
+  const barsPerDay = card?.interval === "15m" ? 96 : card?.interval === "1h" ? 24 : 0;
+  const variant = n && barsPerDay ? `${Math.round(n / barsPerDay)}d` : null;
+  return { generation, family, variant };
+}
+
+export function tagText(t: StrategyTag): string {
+  return `G${t.generation}/${t.family}${t.variant ? `·${t.variant}` : ""}`;
+}
+
 /** The settings that matter, in words, for a strategy's card. */
 export function specSentence(card: { spec: { params?: Record<string, number> }; interval: string }): string {
   const p = card.spec.params ?? {};
@@ -88,4 +106,22 @@ export function plural(n: number, one: string, many = `${one}s`): string {
 
 export function sentence(s: string): string {
   return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+/** A signed dollar amount with a real minus sign: +$2.41, −$0.80. */
+export function signedUsd(x: number, digits = 2): string {
+  const r = Number(x.toFixed(digits));
+  return `${r > 0 ? "+" : r < 0 ? MINUS : ""}${usd(Math.abs(r), digits)}`;
+}
+
+/** One unit only, for tight columns: 42m, 19h, 30d. */
+export function span(secs: number): string {
+  if (secs < 3600) return `${Math.max(0, Math.floor(secs / 60))}m`;
+  if (secs < 172_800) return `${Math.floor(secs / 3600)}h`;
+  return `${Math.round(secs / 86_400)}d`;
+}
+
+/** A UTC timestamp with its year, so no reader has to guess day or month first. */
+export function utcStamp(ms: number): string {
+  return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }

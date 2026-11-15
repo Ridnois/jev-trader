@@ -1,0 +1,60 @@
+{
+  "status": "candidate",
+  "hypothesis": "H-G0030",
+  "card": {
+    "spec": {
+      "family": "c35f4eddf644f",
+      "params": {
+        "b_cut": 0.6,
+        "b_look": 168.0,
+        "cut": 0.6,
+        "hold": 24.0,
+        "look": 1344.0
+      }
+    },
+    "interval": "1h",
+    "mu_daily": 0.00018698432357765277,
+    "sd_daily": 0.0029150831854368557,
+    "alpha": 0.05,
+    "beta": 0.2,
+    "days_if_real": 926.7126999563866,
+    "days_if_none": 652.1494444881823,
+    "dd99": [
+      0.033817630575464316,
+      0.047680988505445755,
+      0.05161583668082945
+    ],
+    "issued": "2026-11-14T06:37:09.611127353Z",
+    "study": "binance-1h"
+  },
+  "rule": {
+    "long": [
+      {
+        "feature": "xs_ret",
+        "n": "$look",
+        "op": ">=",
+        "level": "$cut"
+      },
+      {
+        "feature": "xs_funding",
+        "n": "$b_look",
+        "op": "<=",
+        "level": -0.5
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_look",
+        "op": ">=",
+        "level": "$b_cut"
+      }
+    ],
+    "short": "none",
+    "filter": [],
+    "exit": [],
+    "exit_opposite": false,
+    "every": "$hold",
+    "extend": true
+  },
+  "label": "g0030",
+  "parent": "c4a39d2abc465"
+}

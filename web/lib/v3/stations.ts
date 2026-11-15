@@ -1,5 +1,5 @@
 import type { Live, ProbeQuestion, StrategyView } from "./types";
-import { strategyLabel } from "@/lib/format";
+import { strategyLabel, type StrategyTag } from "@/lib/format";
 
 export const START_CMD = "./target/lab/jev-trader --env-file ../trading/.env.local trade run";
 
@@ -48,7 +48,15 @@ function fullDays(live: Live): number {
 }
 
 function labStation(live: Live): Station {
-  const { families: n, promoted, lastJudged: last, lockboxSealed, lockboxDays, generated, closest } = live.lab;
+  const { families: n, promoted, lastJudged: last, lockboxSealed, lockboxDays, generated, closest, prior, era } = live.lab;
+  if (n === 0 && era && prior > 0)
+    return {
+      id: "lab", name: "Lab", short: "Lab", question: "Is the rule real?", href: "/lab", tone: "neutral",
+      role: "Judges a family of rules on old days before any money is involved.",
+      state: "No verdict this era",
+      detail: `The ledger restarted ${new Date(era).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC. The ${prior} families judged before it faced the old bar; their verdicts are kept as a record and not ranked.`,
+      meta: "Waiting for the first verdict of the new era",
+    };
   if (n === 0)
     return {
       id: "lab", name: "Lab", short: "Lab", question: "Is the rule real?", href: "/lab", tone: "neutral",
@@ -228,6 +236,71 @@ export function totals(live: Live) {
     change: books.reduce((a, b) => a + b.equity_change, 0),
     atRisk: books.reduce((a, b) => a + b.at_risk, 0),
     positions: books.flatMap((b) => b.positions.map((p) => ({ ...p, strategy: b.strategy }))),
+  };
+}
+
+/** A quote older than this is not a mark; the row says so instead of pricing at a stale mid. */
+export const STALE_QUOTE_SECS = 120;
+/** Closer to the stop than this, in percent of the mark, and the row turns amber. */
+export const NEAR_STOP_PCT = 2;
+
+export type OpenRow = ReturnType<typeof totals>["positions"][number] & {
+  label: string;
+  /** The family that opened it (`Trend`, `g0045`), its hypothesis, and its entry rule in words. */
+  family: string;
+  tag: StrategyTag | null;
+  hypothesis: string | null;
+  rule: string | null;
+  /** The clause of the rule that opened this order, on its side. */
+  fired: string | null;
+  mark: number | null;
+  /** The price move in the position's favour, percent. */
+  move: number | null;
+  /** Paper P&L so far: price at mid, minus the entry fee, plus funding. Exit costs not taken. */
+  pnl: number | null;
+  /** How far the mark must travel to hit the stop, percent; null with no stop or no mark. */
+  toStop: number | null;
+};
+
+/**
+ * The open book valued at the recorder's latest mids, the way the engine's own
+ * equity line values it, so the rows add up to the paper equity figure.
+ */
+export function openBook(live: Live) {
+  const t = totals(live);
+  const nowSec = live.now / 1000;
+  const mids = new Map(live.quotes.filter((q) => nowSec - q.lastSec <= STALE_QUOTE_SECS).map((q) => [q.coin, q.mid]));
+  const labels = new Map(live.strategies.map((s) => [s.name, strategyLabel(s.name, s.card)]));
+  const byName = new Map(live.strategies.map((s) => [s.name, s]));
+  const rows: OpenRow[] = t.positions.map((p) => {
+    const mark = mids.get(p.coin) ?? null;
+    return {
+      ...p,
+      label: labels.get(p.strategy) ?? p.strategy.replace(/_/g, " "),
+      family: byName.get(p.strategy)?.family ?? p.strategy.replace(/_/g, " "),
+      tag: byName.get(p.strategy)?.tag ?? null,
+      hypothesis: byName.get(p.strategy)?.hypothesis ?? null,
+      rule: byName.get(p.strategy)?.rule ?? null,
+      fired: (p.side < 0 ? byName.get(p.strategy)?.entry?.short : byName.get(p.strategy)?.entry?.long) ?? null,
+      mark,
+      move: mark === null ? null : p.side * (mark / p.entry_px - 1) * 100,
+      pnl: mark === null ? null : p.side * (mark - p.entry_px) * p.qty - (p.entry_fee ?? 0) + p.funding,
+      toStop: mark === null || !p.stop_px ? null : (p.side * (mark - p.stop_px) / mark) * 100,
+    };
+  });
+  const marked = rows.filter((r) => r.pnl !== null);
+  const withStop = rows.filter((r) => r.toStop !== null).sort((a, b) => a.toStop! - b.toStop!);
+  return {
+    rows,
+    gross: rows.reduce((a, r) => a + r.notional, 0),
+    pnl: marked.length ? marked.reduce((a, r) => a + r.pnl!, 0) : null,
+    unmarked: rows.length - marked.length,
+    noStop: rows.filter((r) => !r.stop_px).length,
+    atRisk: t.atRisk,
+    nearest: withStop[0] ?? null,
+    longs: rows.filter((r) => r.side > 0).length,
+    shorts: rows.filter((r) => r.side < 0).length,
+    strategies: [...new Set(rows.map((r) => r.label))],
   };
 }
 

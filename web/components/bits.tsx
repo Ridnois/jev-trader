@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, Check, Minus, X } from "lucide-react";
+import { ArrowDownRight, ArrowRight, ArrowUpRight, Check, Minus, X } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { signed } from "@/lib/format";
@@ -65,6 +65,8 @@ const VERDICTS: Record<string, { label: string; cls: string }> = {
   REVISE: { label: "Revise", cls: "border-warn/30 bg-warn/10 text-warn" },
   REJECT: { label: "Rejected", cls: "border-neg/30 bg-neg/10 text-neg" },
   INSUFFICIENT_EVIDENCE: { label: "Not enough evidence", cls: "border-warn/30 bg-warn/10 text-warn" },
+  /** The operator's call, not the gate's: put on paper although the gate did not pass it. Neutral, never green. */
+  approved: { label: "Approved by you", cls: "border-foreground/25 bg-foreground/[0.06] text-foreground" },
   candidate: { label: "Unproven candidate", cls: "border-warn/30 bg-warn/10 text-warn" },
   validated: { label: "Validated", cls: "border-pos/30 bg-pos/10 text-pos" },
   rejected: { label: "Rejected", cls: "border-neg/30 bg-neg/10 text-neg" },
@@ -74,6 +76,8 @@ const VERDICTS: Record<string, { label: string; cls: string }> = {
   continue: { label: "No verdict yet", cls: "border-border bg-muted text-muted-foreground" },
   /** Not a state and not a near miss: the same bet under another name, so it is neutral, never amber. */
   duplicate: { label: "Duplicate", cls: "border-border bg-muted text-muted-foreground" },
+  /** A verdict from before the ledger restarted: a record, neutral. */
+  era1: { label: "Earlier era", cls: "border-border bg-muted text-muted-foreground" },
   PROMOTED: { label: "On paper", cls: "border-warn/30 bg-warn/10 text-warn" },
   KILLED: { label: "Killed on paper", cls: "border-neg/30 bg-neg/10 text-neg" },
   GRADUATED: { label: "Graduated on paper", cls: "border-pos/30 bg-pos/10 text-pos" },
@@ -199,8 +203,19 @@ export function Figures({ items }: { items: { label: string; value: React.ReactN
   );
 }
 
-export function Side({ side }: { side: number }) {
-  return <span className="text-foreground/80">{side > 0 ? "Long" : "Short"}</span>;
+/**
+ * A position's side: an arrow in the side's colour (long up, short down), with the
+ * word unless `bare`. The colour is direction, never result; result is pos/neg.
+ */
+export function Side({ side, bare, className }: { side: number; bare?: boolean; className?: string }) {
+  const long = side > 0;
+  const Icon = long ? ArrowUpRight : ArrowDownRight;
+  return (
+    <span className={cn("inline-flex items-center gap-1 whitespace-nowrap", long ? "text-long" : "text-short", className)}>
+      <Icon aria-hidden className="size-3.5 shrink-0" strokeWidth={2.25} />
+      {bare ? <span className="sr-only">{long ? "Long" : "Short"}</span> : long ? "Long" : "Short"}
+    </span>
+  );
 }
 
 export function Th({ className, ...rest }: React.ComponentProps<"th">) {
@@ -219,7 +234,7 @@ export function Td({ children, className, ...rest }: React.ComponentProps<"td">)
 
 export function DataTable({ children, className, minWidth, label }: { children: React.ReactNode; className?: string; minWidth?: number; label?: string }) {
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto focus-visible:outline-2 focus-visible:-outline-offset-2" tabIndex={0} role="region" aria-label={label}>
       <table className={cn("w-full border-collapse text-[13px] [&_tbody_tr]:border-t [&_tbody_tr:hover]:bg-muted/50 [&_thead_tr]:border-t", className)} style={{ minWidth }}>
         {label && <caption className="sr-only">{label}</caption>}
         {children}

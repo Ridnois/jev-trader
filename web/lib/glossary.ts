@@ -50,6 +50,31 @@ const RECORDS = {
     meaning: "A rule that was promoted, given a fixed forecast (its card), and is running on paper.",
     misreading: "Unproven means watched, not trusted. Paper is not live money.",
   },
+  tag: {
+    term: "Strategy tag",
+    meaning: "G, the generation, then the family, then the variant: G0/trend·4d is the hand-written trend family with a 4-day lookback; G12/g0045 is family g0045, proposed by the evolve loop in generation 12.",
+    misreading: "A higher generation is not a better strategy, only a later proposal.",
+  },
+  move: {
+    term: "Move",
+    meaning: "How far the price has moved in the position's favour since entry. A short whose price fell shows a positive move.",
+    misreading: "It is the price move, before fees and funding; Open P&L is the money.",
+  },
+  to_stop: {
+    term: "To stop",
+    meaning: "How far the price must still travel against the position to hit its stop, as a share of the latest price. Amber below 2%.",
+    misreading: "A stop is filled at the next price, which can be worse than the stop itself.",
+  },
+  held: {
+    term: "Held",
+    meaning: "Time since the position opened, out of its time limit. At the limit it closes whatever the price.",
+    misreading: "The limit is a maximum; the stop or the exit signal can close it sooner.",
+  },
+  open_pnl: {
+    term: "Open P&L",
+    meaning: "Paper profit or loss at the latest mid, after the entry fee and funding, before exit costs.",
+    misreading: "Not realised: closing would pay an exit fee and the spread.",
+  },
   card: {
     term: "Card",
     meaning: "The forecast fixed when a strategy was promoted: expected return per day, typical daily swing, and when the test can decide.",
@@ -228,7 +253,7 @@ const RECORDS = {
   },
   operator: {
     term: "Operator",
-    meaning: "How a generated family was made from its parent: restrict (long only or shorter holds), shrink (fix settings that made no difference), recombine (two entries must agree), condition (a market-state filter), invert (the opposite side) or explore (an untried pairing).",
+    meaning: "How a generated family was made from its parent: restrict (long only or shorter holds), shrink (fix settings that made no difference), recombine (two entries must agree), condition (a market-state filter), invert (the opposite side), repair (one block aimed at a gate check a near miss failed) or explore (an untried pairing).",
     misreading: "The operator names the change, not its effect. A child is judged from scratch, never on its parent's record.",
   },
   "generation-reality-check": {

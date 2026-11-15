@@ -1,22 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useTransition } from "react";
+import { ChevronRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { DataTable, Delta, Empty, Figures, Mark, PageHead, Panel, Verdict, Tag, Td, Th } from "@/components/bits";
-import { CalibrationChart, GateLineMap, MapLegend, OosChart, stopIndex } from "@/components/charts";
-import { Gloss, GlossList } from "@/components/gloss";
+import { CalibrationChart, OosAll, ReturnByGeneration, stopIndex } from "@/components/charts";
+import { Gloss } from "@/components/gloss";
 import { StationIndex } from "@/components/pipeline";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useLive } from "@/components/live";
 import { familyName, plural, sentence, signed } from "@/lib/format";
 import { stations } from "@/lib/v3/stations";
-import type { FamilyReport, Lab, LoopCalibration } from "@/lib/v3/types";
-
-/** The leading figure of a check's value: "+3.85 bps/day [..] over 600 days" → "+3.85 bps/day [..]". */
-function lead(f: FamilyReport, name: string): string {
-  const v = f.checks.find((c) => c.name === name)?.value ?? "";
-  return v.replace(/\s*\(.*$/, "").replace(/\s+over .*$/, "").replace(/^p = /, "").replace(/-/g, "−") || "–";
-}
+import type { FamilyReport, Lab, LoopCalibration, OnPaper } from "@/lib/v3/types";
+import { promoteFamily, type PromoteResult } from "./actions";
 
 /** The check names that have a glossary record, so the table can carry the definition. */
 const CHECK_GLOSS: Record<string, Parameters<typeof Gloss>[0]["id"]> = {
@@ -49,6 +45,33 @@ function byCloseness(a: FamilyReport, b: FamilyReport) {
 }
 
 const label = (f: FamilyReport) => f.name ?? familyName(f.family);
+
+/**
+ * On paper by the operator's decision although the gate did not pass it (`lab promote --candidate`).
+ * Matched by name first: two generated families can carry the same rule id (g0034 and g0043), and only the
+ * one promoted was approved. A strategy with no report under its own name (hand-written, or a rule whose
+ * report is filed under its twin) matches by rule id.
+ */
+const approvedBy = (paper: OnPaper[], reports: FamilyReport[]) => {
+  const names = new Set(reports.map((r) => r.name).filter(Boolean));
+  const ok = new Set<string>();
+  for (const p of paper.filter((p) => p.status !== "validated")) {
+    for (const r of reports) {
+      if (names.has(p.name) ? r.name === p.name : r.family === p.family) ok.add(`${r.study}|${r.family}|${r.name ?? ""}`);
+    }
+  }
+  return (f: FamilyReport) => f.verdict !== "PROMOTE_TO_PAPER" && ok.has(`${f.study}|${f.family}|${f.name ?? ""}`);
+};
+
+/** The gate's verdict, then the operator's approval when there is one: two separate calls, side by side. */
+function Verdicts({ f, approved }: { f: FamilyReport; approved: boolean }) {
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <Tag kind={f.verdict} />
+      {approved && <span title="You put it on paper as an unproven candidate. The gate's verdict is unchanged."><Tag kind="approved" /></span>}
+    </span>
+  );
+}
 
 const dayTime = (iso: string) =>
   `${new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC`;
@@ -110,10 +133,220 @@ function LoopCalibrationRows({ rows }: { rows: LoopCalibration[] }) {
   );
 }
 
+/**
+ * Hand the family to the paper trader. A family the gate passed goes in one click, as validated; any other
+ * asks first and goes in labelled as an unproven candidate. Either way the trader restarts to load it.
+ */
+function PromoteControl({ f, paper }: { f: FamilyReport; paper: OnPaper[] }) {
+  const [confirming, setConfirming] = useState(false);
+  const [result, setResult] = useState<PromoteResult | null>(null);
+  const [pending, start] = useTransition();
+  const on = paper.filter((p) => p.family === f.family);
+  const validated = f.verdict === "PROMOTE_TO_PAPER";
+  const go = () =>
+    start(async () => {
+      setResult(await promoteFamily(f.family, f.study));
+      setConfirming(false);
+    });
+  let body: React.ReactNode;
+  if (on.length > 0) {
+    body = (
+      <span className="text-muted-foreground">
+        On paper as {on.map((p) => <span key={p.name}><span className="font-mono text-foreground">{p.name}</span> ({p.status === "validated" ? "validated" : "unproven candidate"})</span>)}.{" "}
+        <Link href="/paper" className="text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground">Paper run</Link>
+      </span>
+    );
+  } else if (f.leaders.length === 0) {
+    body = <span className="text-faint">Nothing to promote: the gate picked no rule for this family.</span>;
+  } else if (pending) {
+    body = <span className="text-muted-foreground">Promoting {label(f)} and restarting the trader…</span>;
+  } else if (confirming) {
+    body = (
+      <>
+        <span className="max-w-[64ch] text-pretty">
+          {label(f)} did not pass the gate ({failed(f).map((c) => c.name).join(", ") || f.verdict.toLowerCase().replaceAll("_", " ")}). It will
+          paper-trade labelled as an unproven candidate, with paper money only, and the trader restarts.
+        </span>
+        <span className="ml-auto flex gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>Cancel</Button>
+          <Button size="sm" onClick={go}>Paper-trade it</Button>
+        </span>
+      </>
+    );
+  } else {
+    body = (
+      <>
+        <span className="text-muted-foreground">
+          {validated ? "It passed every check and the lockbox." : "Not validated: it would run as an unproven candidate."} Rule {f.leaders[0].spec}.
+        </span>
+        <Button size="sm" variant={validated ? "default" : "outline"} className="ml-auto" onClick={validated ? go : () => setConfirming(true)}>
+          {validated ? "Promote to paper" : "Promote as candidate"}
+        </Button>
+      </>
+    );
+  }
+  return (
+    <div className="border-t px-5 py-3 text-[13px]">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">{body}</div>
+      {result && (
+        <p role="status" className={`mt-2 text-xs leading-4 ${result.ok ? "text-pos" : "text-neg"}`}>{result.message}</p>
+      )}
+    </div>
+  );
+}
+
+/** The selected family, read check by check: what the gate measured, what it needed, and the best rules it searched. */
+function FamilyDetail({ f, place, total, paper, approved }: { f: FamilyReport; place: number; total: number; paper: OnPaper[]; approved: boolean }) {
+  const stop = stopIndex(f);
+  const insuff = f.verdict === "INSUFFICIENT_EVIDENCE";
+  const short = failed(f);
+  return (
+    <Panel
+      flush
+      title={
+        <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <span className={`text-[15px] font-medium tracking-tight ${f.name ? "font-mono" : ""}`}>{label(f)}</span>
+          <span className="text-[13px] font-normal text-muted-foreground">
+            {f.generation !== undefined ? `generation ${f.generation}` : "hand-written"} · {f.hypothesis} · {f.study.replace("-", " ")}
+          </span>
+        </span>
+      }
+      description={
+        f.prior
+          ? `Judged before the ledger restarted, against ${plural(f.trials_ledger, "trial")} on the old ledger. Kept as a record: its checks faced a different bar from this era's families, so it is not ranked against them.`
+          : scored(f)
+          ? `${place} of ${total} by distance to the goal. ${short.length === 0 ? "It failed no check." : `It failed ${short.map((c) => c.name).join(", ")}.`} A check passes when Measured meets Needs; the first fatal miss ends the run.`
+          : "The gate stopped it at evidence: too few days or trades to run the checks, so it has no distance yet."
+      }
+      action={
+        <span className="flex items-center gap-2">
+          {f.prior && <Tag kind="era1">Earlier era</Tag>}
+          <Verdicts f={f} approved={approved} />
+        </span>
+      }
+    >
+      <div className="flex flex-wrap gap-x-4 gap-y-1 border-t px-5 py-3 text-[13px] text-muted-foreground">
+        <span>{f.panel.replace(/ · /g, ", ").replace("→", "to")}</span>
+        <span>{f.design_days} design days, {f.lockbox_days} in the lockbox</span>
+        <span>{plural(f.specs, "rule")} searched</span>
+        {f.judged && <span className="ml-auto text-faint">Judged {dayTime(f.judged)}</span>}
+      </div>
+      <PromoteControl key={`${f.study}|${f.family}`} f={f} paper={paper} />
+      <DataTable minWidth={760} label={`Gate checks for ${label(f)}`}>
+        <thead>
+          <tr><Th className="w-10" /><Th>Check</Th><Th>Measured</Th><Th>Needs</Th></tr>
+        </thead>
+        <tbody>
+          {f.checks.map((c, i) => (
+            <tr key={c.name} className={i === stop ? (insuff ? "bg-warn/[0.04]" : "bg-neg/[0.04]") : undefined}>
+              <Td><Mark pass={c.pass} fatal={c.fatal} /></Td>
+              <Td className="font-medium whitespace-nowrap">
+                <CheckName name={c.name} />
+                {i === stop && <span className={`ml-2 text-xs font-normal ${insuff ? "text-warn" : "text-neg"}`}>{insuff ? "not enough evidence to judge" : "the run ends here"}</span>}
+              </Td>
+              <Td className="max-w-[520px] leading-5">{c.value.replace(/(^|[\s[(,])-(?=\d)/g, "$1−")}</Td>
+              <Td className="text-muted-foreground">{/^[a-z]{2}/i.test(c.need) ? sentence(c.need) : c.need}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </DataTable>
+      {f.notes.map((n) => (
+        <p key={n} className="border-t px-5 py-3 text-[13px] leading-5 text-muted-foreground">{sentence(n).replace(/\.*$/, ".")}</p>
+      ))}
+      {f.leaders.length > 0 && (
+        <details className="group border-t">
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3 text-[13px]">
+            <ChevronRight aria-hidden className="size-3.5 text-muted-foreground transition-transform group-open:rotate-90" />
+            <span className="font-medium">Best rules in sample</span>
+            <span className="text-muted-foreground">
+              {f.leaders[0].spec} · Sharpe {signed(f.leaders[0].sharpe_annual)} · {signed(f.leaders[0].mean_bps_day, 1)} bps a day, before the gate
+            </span>
+          </summary>
+          <DataTable minWidth={720} label={`Best rules in sample for ${label(f)}`}>
+            <thead>
+              <tr><Th>Rule</Th><Th className="text-right">Sharpe</Th><Th className="text-right">Per day</Th><Th className="text-right">Trades</Th><Th className="text-right">Wins</Th><Th className="text-right">Per trade</Th></tr>
+            </thead>
+            <tbody>
+              {f.leaders.slice(0, 5).map((l) => (
+                <tr key={l.spec}>
+                  <Td className="font-mono text-xs">{l.spec}</Td>
+                  <Td className="text-right"><span className="tabular-nums text-foreground/80">{signed(l.sharpe_annual)}</span></Td>
+                  <Td className="text-right"><Delta value={l.mean_bps_day} digits={1} unit=" bps" /></Td>
+                  <Td className="text-right">{l.trades.toLocaleString("en-US")}</Td>
+                  <Td className="text-right">{l.win_pct.toFixed(0)}%</Td>
+                  <Td className="text-right"><Delta value={l.mean_trade_bps} digits={1} unit=" bps" /></Td>
+                </tr>
+              ))}
+            </tbody>
+          </DataTable>
+          <p className="border-t px-5 py-3 text-xs leading-4 text-faint">
+            In sample, after costs, and chosen from the grid: these are the numbers the gate exists to discount.
+          </p>
+        </details>
+      )}
+    </Panel>
+  );
+}
+
+const EARLIER_SHOWN = 12;
+
+/** Verdicts from before the ledger restarted: a record, in the order they came closest, never mixed into this era's ranking. */
+function EarlierVerdicts({ families, era, selected, onSelect, approved }: { families: FamilyReport[]; era: string | null; selected: string; onSelect: (family: string) => void; approved: (f: FamilyReport) => boolean }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? families : families.slice(0, EARLIER_SHOWN);
+  return (
+    <Panel
+      flush
+      title="Earlier verdicts"
+      description={`Judged before the ledger restarted${era ? ` ${era}` : ""}, each against the trials on the old ledger at the time. The bar was higher than this era's, so "1 check short" here and in this era do not mean the same thing. Kept as a record; re-judging would charge every rule again.`}
+    >
+      <DataTable minWidth={640} label="Verdicts from before the ledger restarted">
+        <thead>
+          <tr><Th>Family</Th><Th>Verdict</Th><Th className="text-right">Checks short</Th><Th>First check short</Th><Th className="text-right">Ledger then</Th></tr>
+        </thead>
+        <tbody>
+          {shown.map((f) => {
+            const short = failed(f);
+            const on = f.family === selected;
+            return (
+              <tr key={`${f.study}|${f.family}`} onClick={() => onSelect(f.family)} className={`cursor-pointer ${on ? "bg-muted/40" : ""}`} aria-selected={on}>
+                <Td>
+                  <button type="button" onClick={(e) => { e.stopPropagation(); onSelect(f.family); }} className="flex items-baseline gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    <span className={f.name ? "font-mono" : "font-medium"}>{label(f)}</span>
+                    <span className="text-[11px] text-faint">{f.generation !== undefined ? `gen ${f.generation}` : "hand-written"} · {f.study.replace("binance-", "")}</span>
+                  </button>
+                </Td>
+                <Td><Verdicts f={f} approved={approved(f)} /></Td>
+                <Td className="text-right tabular-nums">{scored(f) ? short.length : <span className="text-faint">–</span>}</Td>
+                <Td className="text-muted-foreground">{scored(f) ? (short[0]?.name ?? "none") : "stopped at evidence"}</Td>
+                <Td className="text-right tabular-nums text-muted-foreground">{f.trials_ledger.toLocaleString("en-US")} trials</Td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </DataTable>
+      {families.length > EARLIER_SHOWN && (
+        <div className="flex items-center justify-between border-t px-5 py-3 text-[12px] text-muted-foreground">
+          <span>Showing {shown.length} of {families.length}</span>
+          <button type="button" onClick={() => setAll((v) => !v)} className="rounded-md border px-3 py-1.5 text-foreground transition-colors hover:bg-muted">
+            {all ? `Show the closest ${EARLIER_SHOWN}` : `Show all ${families.length}`}
+          </button>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 export function LabView({ lab }: { lab: Lab }) {
   const { live } = useLive();
-  const [selected, setSelected] = useState(lab.families.find((f) => f.family === "trend")?.family ?? lab.families[0]?.family ?? "");
-  if (lab.families.length === 0)
+  const every = [...lab.families, ...lab.generated];
+  // Only this era's verdicts are ranked: earlier ones faced the old ledger's bar and are kept as a record below.
+  const all = every.filter((f) => !f.prior);
+  const earlier = [...every.filter((f) => f.prior && scored(f)).sort(byCloseness), ...every.filter((f) => f.prior && !scored(f))];
+  // One ranking for every family: fewest checks failed first; families the gate could not judge last.
+  const ranked = [...all.filter(scored).sort(byCloseness), ...all.filter((f) => !scored(f))];
+  const [selected, setSelected] = useState(ranked[0]?.family ?? earlier[0]?.family ?? "");
+  if (every.length === 0)
     return (
       <Panel title="The lab has not judged anything yet">
         <Empty title="No reports on file">
@@ -121,35 +354,35 @@ export function LabView({ lab }: { lab: Lab }) {
         </Empty>
       </Panel>
     );
-  const all = [...lab.families, ...lab.generated];
   const promoted = all.filter((f) => f.verdict === "PROMOTE_TO_PAPER").length;
+  const isApproved = approvedBy(lab.onPaper, every);
+  const approved = every.filter(isApproved);
+  const approvedNote = approved.length
+    ? ` You approved ${promoted > 0 ? plural(approved.length, "other family", "other families") : plural(approved.length, "family", "families")} for paper anyway (${approved.map(label).join(", ")}); they run as unproven candidates.`
+    : "";
   const opened = all.filter((f) => f.lockbox_opened).length;
-  const lockDays = Math.max(...lab.families.map((f) => f.lockbox_days));
-  const lockMin = Math.min(...lab.families.map((f) => f.lockbox_days));
+  const lockDays = Math.max(...every.map((f) => f.lockbox_days));
   const judged = all.map((f) => f.judged).filter(Boolean).sort().at(-1);
-  const closest = all.filter(scored).sort(byCloseness)[0];
-  const nearest = lab.generated.filter(scored).sort(byCloseness).slice(0, 3);
-  const shown = [...lab.families, ...nearest];
-  const handTrials = lab.trials - lab.loopTrials;
+  const closest = ranked.find(scored);
+  const unjudged = all.length - all.filter(scored).length;
+  const sel = every.find((f) => f.family === selected) ?? ranked[0] ?? earlier[0];
+  const eraWhen = lab.era ? dayTime(lab.era) : null;
+  const dist = (f: FamilyReport) => failed(f).length;
+  const within = (k: number) => all.filter((f) => scored(f) && dist(f) <= k).length;
   const pick = (family: string) => {
     setSelected(family);
     document.getElementById("family-detail")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   };
-  const closeLine = closest
-    ? `Closest: ${label(closest)}${closest.generation !== undefined ? ` (generation ${closest.generation})` : ""}, which failed ${
-        failed(closest).length <= 2 ? failed(closest).map((c) => c.name).join(" and ") : plural(failed(closest).length, "check")
-      }.`
-    : "";
 
   return (
     <div className="flex flex-col gap-6">
       <PageHead
-        question="Has anything earned the paper run?"
+        question="How close is any family to the paper run?"
         lede={
           <>
-            The Lab is the gate. Every family, written by hand or generated by the hourly loop, is searched over old days and its
-            winner judged against what that much searching produces by luck: the more rules tried, the better the best one has to
-            be. Passing every check, then the sealed lockbox, is the only door to the{" "}
+            A family is one idea about the market, written by hand or bred by the hourly loop; the gate treats both the same. It
+            searches the family over old days, then judges the winner against what that much searching produces by luck. The goal
+            is a family that fails none of the checks and then holds up on the sealed lockbox: only that one reaches the{" "}
             <Link href="/paper" className="text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground">paper run</Link>.
           </>
         }
@@ -158,199 +391,82 @@ export function LabView({ lab }: { lab: Lab }) {
             rule={false}
             kind={promoted > 0 ? "good" : "calm"}
             label="Lab"
-            meta={judged ? `Last verdict ${dayTime(judged)}` : "Never judged"}
-            line={`${promoted} of ${plural(all.length, "family", "families")} passed`}
+            meta={judged ? `Last verdict ${dayTime(judged)}` : eraWhen ? `Ledger restarted ${eraWhen}` : "Never judged"}
+            line={
+              promoted > 0
+                ? `${promoted} of ${plural(all.length, "family", "families")} passed`
+                : closest
+                  ? `${plural(dist(closest), "check")} short`
+                  : all.length === 0 && eraWhen
+                    ? "No verdict this era"
+                    : `0 of ${plural(all.length, "family", "families")} judged`
+            }
             detail={
-              <>
-                {lab.families.length} written by hand, {lab.generated.length} generated by the loop. {promoted === 0 ? closeLine : `${promoted} passed and run on paper; promoting stays your decision.`}
-              </>
+              promoted > 0
+                ? `${promoted} passed the gate and the lockbox. Promoting stays your decision.${approvedNote}`
+                : closest
+                  ? `The closest of ${plural(all.length, "family", "families")} judged this era is ${label(closest)}, which failed only ${failed(closest).map((c) => c.name).join(" and ")}. None has passed.${approvedNote}`
+                  : all.length === 0 && eraWhen
+                    ? `The ledger restarted ${eraWhen}. The ${earlier.length} families judged before it faced the old ledger's bar; their verdicts are kept below as a record, not ranked. The next family the loop judges starts this era's ranking.`
+                    : "No family has been judged yet."
             }
             href="/generations"
-            link="What the loop is trying"
+            link="How the loop breeds them"
           />
         }
       />
 
       <Figures
         items={[
-          { label: "Families judged", value: all.length.toLocaleString("en-US"), sub: `${lab.families.length} by hand, ${lab.generated.length} by the loop` },
-          { label: "Trials on the ledger", value: lab.trials.toLocaleString("en-US"), sub: `${handTrials.toLocaleString("en-US")} from hand-written searches, ${lab.loopTrials.toLocaleString("en-US")} from the loop. Every one raises the bar.` },
+          {
+            label: lab.era ? "Families judged this era" : "Families judged",
+            value: all.length.toLocaleString("en-US"),
+            sub: [
+              all.length ? `${all.filter((f) => f.generation === undefined).length} written by hand` : "",
+              unjudged ? `${unjudged} stopped before the checks` : "",
+              earlier.length ? `${earlier.length} earlier, kept as a record` : "",
+              approved.length ? `${approved.length} approved by you for paper` : "",
+            ].filter(Boolean).join(", ") || "None yet",
+          },
+          { label: "Within 1 check", value: all.length ? within(1).toLocaleString("en-US") : "–", sub: all.length ? `${within(3)} within 3 checks of passing` : "Counted from this era's verdicts" },
+          { label: "Trials on the ledger", value: lab.trials.toLocaleString("en-US"), sub: "Every rule searched since the ledger last restarted. Each one raises the bar the next family must clear" },
           {
             label: "Lockbox",
             value: opened ? `Opened for ${plural(opened, "family", "families")}` : "Sealed",
-            sub: `The newest ${lockMin} to ${lockDays} days of each study, unseen by any search`,
+            sub: `The newest ${lockDays} days, unseen by any search until a family passes every check`,
             tone: opened > 1 ? "warn" : undefined,
-          },
-          {
-            label: "Last verdict",
-            value: judged ? new Date(judged).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "–",
-            sub: judged ? `${dayTime(judged)}; the loop judges new families every hour` : "",
           },
         ]}
       />
 
-      <Panel
-        title="How far each family got"
-        description={
-          <>
-            Every family meets the same checks in order, and the first fatal miss ends its run. The count lines say how many of each
-            group were still in when a check came up; the rows are the {lab.families.length} hand-written families and the{" "}
-            {plural(nearest.length, "generated family", "generated families")} that came closest. {promoted === 0 ? "None reached the lockbox." : `${promoted} reached the lockbox.`}{" "}
-            A generated family is built after its design window was seen, so its walk-forward is not truly out of sample: the
-            lockbox is its first clean test. Hover a check for its numbers; select a family to read them all.
-          </>
-        }
-      >
-        <div className="border-t pt-4">
-          <GateLineMap
-            families={shown}
-            selected={selected}
-            onSelect={pick}
-            cohorts={[
-              { label: `Hand-written, ${lab.families.length}`, families: lab.families },
-              ...(lab.generated.length ? [{ label: `Generated, ${lab.generated.length}`, families: lab.generated }] : []),
-            ]}
-          />
-        </div>
-        <div className="mt-4 border-t pt-3">
-          <MapLegend />
-        </div>
-      </Panel>
-
-      <Panel flush title="Hand-written families" description="The best rule of each family in sample, then what its walk-forward picks made out of sample. Rows are families, not a ranking: the best Sharpe can sit on a family that did not pass. Generated families are on Generations.">
-        <DataTable minWidth={820}>
-          <thead>
-            <tr>
-              <Th>Family</Th><Th className="text-right"><Gloss id="spec">Rules</Gloss></Th><Th className="text-right">Best <Gloss id="sharpe">Sharpe</Gloss></Th>
-              <Th className="text-right"><Gloss id="walk-forward">Walk-forward</Gloss></Th>
-              <Th className="text-right"><Gloss id="reality-check">Reality check p</Gloss></Th>
-              <Th className="text-right"><Gloss id="deflated-sharpe">Deflated Sharpe</Gloss></Th>
-              <Th>Stopped at</Th><Th>Verdict</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {lab.families.map((f) => {
-              const stop = stopIndex(f);
-              return (
-                <tr key={f.family} onClick={() => pick(f.family)} className={`cursor-pointer ${selected === f.family ? "bg-muted/60" : ""}`}>
-                  <Td>
-                    <button type="button" className="flex items-center gap-2 font-medium whitespace-nowrap" onClick={() => pick(f.family)}>
-                      {familyName(f.family)}
-                    </button>
-                    <div className="text-xs whitespace-nowrap text-faint">{f.hypothesis}, {f.study.replace("-", " ")}</div>
-                  </Td>
-                  <Td className="text-right">{f.specs}</Td>
-                  <Td className="text-right"><span className="tabular-nums text-foreground/80">{f.leaders[0] ? signed(f.leaders[0].sharpe_annual) : "–"}</span></Td>
-                  <Td className="text-right whitespace-nowrap">{f.oosCum.length ? lead(f, "walk-forward") : <span className="text-faint">Not run</span>}</Td>
-                  <Td className="text-right">{lead(f, "reality check")}</Td>
-                  <Td className="text-right">{lead(f, "deflated Sharpe")}</Td>
-                  <Td className="text-foreground">
-                    {stop < 0
-                      ? f.verdict === "REVISE" ? "Ran the gate, short of the bar" : "Ran the whole gate"
-                      : sentence(f.checks[stop]?.name ?? "")}
-                  </Td>
-                  <Td><Tag kind={f.verdict} /></Td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </DataTable>
-        <p className="border-t px-5 py-3 text-[13px] leading-5 text-muted-foreground">
-          A check passes when <span className="text-foreground">Measured</span> meets <span className="text-foreground">Needs</span>.
-          The first fatal miss ends the line; the verdict is the result of every check, not of the number that looks best.
-        </p>
-        <GlossList
-          ids={["family", "spec", "sharpe", "in-sample", "walk-forward", "reality-check", "deflated-sharpe", "trial", "lockbox"]}
-          intro="Hover an underlined term anywhere on the page for the same record."
-        />
-      </Panel>
-
       <div id="family-detail" className="scroll-mt-28">
-        <Tabs value={selected} onValueChange={setSelected}>
-          <Panel
-            flush
-            title="Check by check"
-            description="What the gate measured, and what it needed. The first fatal check is the one that ended the family. A family can stop at Evidence with good numbers: the gate needed more days, not a better result."
-          >
-            <div className="overflow-x-auto px-5 pb-3">
-              <TabsList className="h-8">
-                {shown.map((f, i) => (
-                  <span key={f.family} className="flex items-center">
-                    {f.name && !shown[i - 1]?.name && <span aria-hidden className="mx-1.5 h-4 w-px bg-border" />}
-                    <TabsTrigger value={f.family} className={`text-xs ${f.name ? "font-mono" : ""}`}>{label(f)}</TabsTrigger>
-                  </span>
-                ))}
-              </TabsList>
-            </div>
-            {shown.map((f) => {
-              const stop = stopIndex(f);
-              const insuff = f.verdict === "INSUFFICIENT_EVIDENCE";
-              return (
-                <TabsContent key={f.family} value={f.family} className="mt-0">
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-5 py-3 text-[13px] text-muted-foreground">
-                    <Tag kind={f.verdict} />
-                    <span>{f.panel.replace(/ · /g, ", ").replace("→", "to")}</span>
-                    <span>{f.design_days} design days, {f.lockbox_days} in the lockbox</span>
-                    {f.judged && <span className="ml-auto text-faint">Judged {new Date(f.judged).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}</span>}
-                  </div>
-                  <DataTable minWidth={760}>
-                    <thead>
-                      <tr><Th className="w-10" /><Th>Check</Th><Th>Measured</Th><Th>Needs</Th></tr>
-                    </thead>
-                    <tbody>
-                      {f.checks.map((c, i) => (
-                        <tr key={c.name} className={i === stop ? (insuff ? "bg-warn/[0.04]" : "bg-neg/[0.04]") : undefined}>
-                          <Td><Mark pass={c.pass} fatal={c.fatal} /></Td>
-                          <Td className="font-medium whitespace-nowrap">
-                            <CheckName name={c.name} />
-                            {i === stop && <span className={`ml-2 text-xs font-normal ${insuff ? "text-warn" : "text-neg"}`}>{insuff ? "not enough evidence to judge" : "the line ends here"}</span>}
-                          </Td>
-                          <Td className="max-w-[520px] leading-5">{c.value.replace(/(^|[\s[(,])-(?=\d)/g, "$1−")}</Td>
-                          <Td className="text-muted-foreground">{/^[a-z]{2}/i.test(c.need) ? sentence(c.need) : c.need}</Td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </DataTable>
-                  {f.notes.map((n) => (
-                    <p key={n} className="border-t px-5 py-3 text-[13px] leading-5 text-muted-foreground">{sentence(n)}.</p>
-                  ))}
-                  <div className="border-t px-5 pt-4 pb-2 text-sm font-medium">Best rules in sample</div>
-                  <DataTable minWidth={720}>
-                    <thead>
-                      <tr><Th>Rule</Th><Th className="text-right">Sharpe</Th><Th className="text-right">Per day</Th><Th className="text-right">Trades</Th><Th className="text-right">Wins</Th><Th className="text-right">Per trade</Th></tr>
-                    </thead>
-                    <tbody>
-                      {f.leaders.slice(0, 5).map((l) => (
-                        <tr key={l.spec}>
-                          <Td className="font-mono text-xs">{l.spec}</Td>
-                          <Td className="text-right"><span className="tabular-nums text-foreground/80">{signed(l.sharpe_annual)}</span></Td>
-                          <Td className="text-right"><Delta value={l.mean_bps_day} digits={1} unit=" bps" /></Td>
-                          <Td className="text-right">{l.trades.toLocaleString("en-US")}</Td>
-                          <Td className="text-right">{l.win_pct.toFixed(0)}%</Td>
-                          <Td className="text-right"><Delta value={l.mean_trade_bps} digits={1} unit=" bps" /></Td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </DataTable>
-                  <p className="border-t px-5 py-3 text-xs leading-4 text-faint">
-                    Each rule is one point on the family&apos;s grid, named after the parameters that define it. These figures are in
-                    sample, after costs, and the winner was chosen from the grid.
-                  </p>
-                </TabsContent>
-              );
-            })}
-          </Panel>
-        </Tabs>
+        {sel && <FamilyDetail f={sel} place={ranked.indexOf(sel) + 1} total={ranked.length} paper={lab.onPaper} approved={isApproved(sel)} />}
       </div>
+
+      {earlier.length > 0 && <EarlierVerdicts families={earlier} era={eraWhen} selected={sel?.family ?? ""} onSelect={pick} approved={isApproved} />}
 
       <Panel
         title="Out of sample, walk-forward"
-        description="Cumulative return of the rule each fold picked on 180 training days, traded on the next 60 it had not seen. Costs and funding included."
+        description="Cumulative return of the rule each fold picked on 180 training days, traded on the next 60 it had not seen, costs and funding included. Every family on one chart, coloured by final return: greenest highest, reddest lowest, the median dashed. Hover a line to name it; click it to read its checks."
       >
-        <OosChart families={lab.families} selected={selected} />
-        <p className="mt-3 border-t pt-3 text-xs leading-4 text-faint">
-          The line is a selection rule, not one fixed strategy: the pick can change per fold. A line that goes up left to
-          right is what an edge would look like; the gate decides whether it is more than the search could produce by luck.
+        <OosAll hand={[]} generated={every} selected={sel.family} onSelect={pick} />
+        <p className="mt-4 border-t pt-3 text-xs leading-4 text-faint">
+          Each line is a selection rule, not one fixed strategy: the pick can change per fold. A line that climbs is what an edge would
+          look like; the gate decides whether it is more than the search could produce by luck. A family bred by the loop was built after
+          the design window was seen, so its folds are not truly out of sample. The lines stop where the last full 60-day fold ends;
+          the shaded days after that are the lockbox, held back from every search until a family passes everything else.
+        </p>
+      </Panel>
+
+      <Panel
+        title="Return per generation"
+        description="Each dot is one family's final walk-forward return, placed on the generation that bred it; hand-written families come first. The solid line joins the best of each generation, the dashed line its median. Click a dot to read its checks."
+      >
+        <ReturnByGeneration families={every} selected={sel.family} onSelect={pick} />
+        <p className="mt-4 border-t pt-3 text-xs leading-4 text-faint">
+          A best line that climbs generation after generation is what learning would look like, but it is also what searching longer
+          produces by luck. Bred families were built after the design window was seen, so these returns are not clean out-of-sample
+          evidence; only the lockbox and paper days are.
         </p>
       </Panel>
 

@@ -1,0 +1,95 @@
+{
+  "status": "candidate",
+  "hypothesis": "H-G0223",
+  "card": {
+    "spec": {
+      "family": "c5963924203db",
+      "params": {
+        "b_b_b_look": 336.0,
+        "b_b_cut": 0.6,
+        "b_b_look": 1344.0,
+        "b_cut": 0.6,
+        "b_look": 336.0,
+        "hold_days": 3.0,
+        "n": 12.0,
+        "stop": 600.0,
+        "vol_mult": 2.5
+      }
+    },
+    "interval": "1h",
+    "mu_daily": 0.00014050714815144999,
+    "sd_daily": 0.002105202769013215,
+    "alpha": 0.05,
+    "beta": 0.2,
+    "days_if_real": 855.9425814853292,
+    "days_if_none": 602.3468536210938,
+    "dd99": [
+      0.023169286187538475,
+      0.032996930417875936,
+      0.03914315917999962
+    ],
+    "issued": "2026-11-15T01:10:04.684995529Z",
+    "study": "binance-1h"
+  },
+  "rule": {
+    "long": [
+      {
+        "feature": "channel",
+        "n": "$n",
+        "op": ">",
+        "level": 1.0
+      },
+      {
+        "feature": "vol_ratio",
+        "n": "$n",
+        "op": ">=",
+        "level": "$vol_mult"
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_look",
+        "op": ">=",
+        "level": "$b_cut"
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_b_look",
+        "op": ">=",
+        "level": 0.5
+      },
+      {
+        "feature": "xs_funding",
+        "n": "$b_b_b_look",
+        "op": "<=",
+        "level": -0.5
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_b_b_look",
+        "op": ">=",
+        "level": 0.5
+      },
+      {
+        "feature": "xs_ret",
+        "n": "$b_b_look",
+        "op": ">=",
+        "level": "$b_b_cut"
+      }
+    ],
+    "short": "none",
+    "filter": [
+      {
+        "feature": "mkt_rvol_pct",
+        "n": 24.0,
+        "op": "<",
+        "level": 0.9
+      }
+    ],
+    "exit": [],
+    "exit_opposite": false,
+    "every": null,
+    "extend": false
+  },
+  "label": "g0223",
+  "parent": "c30f60eee86f9"
+}

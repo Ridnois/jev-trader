@@ -1,0 +1,47 @@
+# g0103 — generation 28 — restrict
+# s15_active_breakout's shorts lost -83.6 bps per trade while its longs made +43.7 (L602).
+# The long side alone is the hypothesis.
+# Rule: long when channel(96) > 1 and vol_ratio(96) >= $vm; long only; only when mkt_rvol_pct(96) >= 0.7
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c19df3080cf04"
+interval = "15m"
+hypothesis = "H-G0103"
+name = "g0103"
+parent = "cc9fd926f5757"
+generation = 28
+operator = "restrict"
+lessons = ["L602"]
+reason = "s15_active_breakout's shorts lost -83.6 bps per trade while its longs made +43.7 (L602). The long side alone is the hypothesis."
+
+[grid]
+
+[fixed]
+hold = 48.0
+max_positions = 0.0
+stop = 0.0
+vm = 3.0
+
+[rule]
+short = "none"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = 96.0
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = 96.0
+op = ">="
+level = "$vm"
+
+[[rule.filter]]
+feature = "mkt_rvol_pct"
+n = 96.0
+op = ">="
+level = 0.7

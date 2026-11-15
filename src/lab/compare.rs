@@ -33,6 +33,26 @@ pub struct LockboxRead {
     pub spec: String,
     pub at: chrono::DateTime<chrono::Utc>,
     pub passed: bool,
+    /// The spec by what its rule does (`Rule::same_id`): two rules written differently
+    /// that trade the same bars are one strategy, and one strategy opens the lockbox once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same: Option<String>,
+}
+
+impl LockboxRead {
+    fn strategy(&self) -> &str {
+        self.same.as_deref().unwrap_or(&self.spec)
+    }
+}
+
+/// A spec's key for the lockbox: its rule's `same_id` with its parameters, or the spec id
+/// for a hand-written family.
+pub fn same_spec(fam: &Family, spec: &Spec) -> String {
+    let id = spec.id();
+    match (&fam.rule, id.split_once(':')) {
+        (Some(r), Some((_, params))) => format!("{}:{params}", r.same_id()),
+        _ => id,
+    }
 }
 
 /// The trial ledger and the lockbox log: the real files, or memory (calibration).
@@ -41,15 +61,18 @@ pub struct Books {
     lockbox_path: Option<PathBuf>,
     trials: Vec<TrialRecord>,
     lockbox: Vec<LockboxRead>,
+    /// Composed rule id → `Rule::same_id`, for lockbox records written before `same` existed.
+    same_ids: BTreeMap<String, String>,
 }
 
 impl Books {
     pub fn files(lab: &LabConfig) -> Self {
-        Self { trials_path: Some(lab.trials_path()), lockbox_path: Some(lab.lockbox_path()), trials: Vec::new(), lockbox: Vec::new() }
+        let same_ids = super::evolve::families(lab).into_iter().filter_map(|d| Some((d.family.family.clone(), d.family.rule.as_ref()?.same_id()))).collect();
+        Self { trials_path: Some(lab.trials_path()), lockbox_path: Some(lab.lockbox_path()), trials: Vec::new(), lockbox: Vec::new(), same_ids }
     }
 
     pub fn memory() -> Self {
-        Self { trials_path: None, lockbox_path: None, trials: Vec::new(), lockbox: Vec::new() }
+        Self { trials_path: None, lockbox_path: None, trials: Vec::new(), lockbox: Vec::new(), same_ids: BTreeMap::new() }
     }
 
     /// Charges new specs; returns (new, total on record for the study).
@@ -89,10 +112,16 @@ impl Books {
     }
 
     fn lock_reads(&self) -> Vec<LockboxRead> {
-        match &self.lockbox_path {
+        let mut reads: Vec<LockboxRead> = match &self.lockbox_path {
             Some(p) => crate::status::read_jsonl(p),
             None => self.lockbox.clone(),
+        };
+        for r in reads.iter_mut().filter(|r| r.same.is_none()) {
+            if let (Some(same), Some((_, params))) = (self.same_ids.get(&r.family), r.spec.split_once(':')) {
+                r.same = Some(format!("{same}:{params}"));
+            }
         }
+        reads
     }
 
     fn log_lock(&mut self, r: LockboxRead) {
@@ -102,8 +131,9 @@ impl Books {
         }
     }
 
+    /// Distinct strategies that have opened the lockbox, over all studies.
     pub fn lockbox_openings(&self) -> usize {
-        self.lock_reads().len()
+        self.lock_reads().iter().map(|r| (r.study.clone(), r.strategy().to_string())).collect::<HashSet<_>>().len()
     }
 }
 
@@ -129,19 +159,23 @@ pub fn validate_family(lab: &LabConfig, fam: &Family, full: &Panel, venue: Optio
     };
     let ledger_trials = books.total(&study);
     let reads = books.lock_reads();
-    let prior = |spec_id: &str| reads.iter().filter(|r| r.study == study && r.spec != spec_id).map(|r| r.spec.as_str()).collect::<HashSet<_>>().len();
+    // Openings count strategies, not file names: a second rule that trades the same bars
+    // re-reads the same days and adds no chance of a lucky pass.
+    let prior = |key: &str| reads.iter().filter(|r| r.study == study && r.strategy() != key).map(LockboxRead::strategy).collect::<HashSet<_>>().len();
     // The pick isn't known before the run; count every earlier opening, then correct below.
     let all_prior = prior("");
     let vaux = Aux::default();
     let inputs = |reads: usize, trials: Option<Vec<Trial>>| gate::Inputs { full, aux, venue: venue.map(|v| (v, &vaux)), fam, ledger_trials, lockbox_reads: reads + looks, force, design_trials: trials, generation };
     let mut ev = gate::evaluate(inputs(all_prior, Some(trials)), lab)?;
     if let (true, Some(p)) = (ev.lockbox_opened, ev.pick.clone()) {
-        let own = prior(&p.id());
+        let key = same_spec(fam, &p);
+        let own = prior(&key);
         if own != all_prior {
-            // This same spec opened the lockbox before: looking again is not a new look.
+            // This strategy opened the lockbox before (as this family or one with the same
+            // rule written differently): looking again is not a new look.
             ev = gate::evaluate(inputs(own, None), lab)?;
         } else {
-            books.log_lock(LockboxRead { study: study.clone(), family: fam.family.clone(), spec: p.id(), at: chrono::Utc::now(), passed: ev.verdict == Verdict::PromoteToPaper });
+            books.log_lock(LockboxRead { study: study.clone(), family: fam.family.clone(), spec: p.id(), at: chrono::Utc::now(), passed: ev.verdict == Verdict::PromoteToPaper, same: Some(key) });
         }
     }
     if looks > 0 {
@@ -293,6 +327,23 @@ mod tests {
 
     fn fam(text: &str) -> Family {
         Family::parse(text).unwrap()
+    }
+
+    #[test]
+    fn one_strategy_opens_the_lockbox_once_whatever_its_file_says() {
+        let read = |family: &str, spec: &str, same: Option<&str>| LockboxRead { study: "binance-1h".into(), family: family.into(), spec: spec.into(), at: chrono::Utc::now(), passed: false, same: same.map(str::to_string) };
+        let mut b = Books::memory();
+        b.log_lock(read("ca", "ca:n=12", Some("cs:n=12")));
+        b.log_lock(read("cb", "cb:n=12", Some("cs:n=12")));
+        assert_eq!(b.lockbox_openings(), 1, "two files, one strategy");
+        b.log_lock(read("cb", "cb:n=24", Some("cs:n=24")));
+        assert_eq!(b.lockbox_openings(), 2, "other parameters are another strategy");
+        // A record from before `same` existed is matched through its family's rule.
+        let mut old = Books::memory();
+        old.same_ids.insert("cold".into(), "cs".into());
+        old.log_lock(read("cold", "cold:n=12", None));
+        old.log_lock(read("ca", "ca:n=12", Some("cs:n=12")));
+        assert_eq!(old.lockbox_openings(), 1);
     }
 
     /// One proposal that can find the planted mean-reverting edge, three that can't.

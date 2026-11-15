@@ -1,0 +1,40 @@
+# s15_crowd_flush — hand-written seed for binance-15m (H-S15-CROWD), 2026-11-13.
+# A sharp drop in a coin whose funding is among the most negative of the universe means
+# shorts are crowded and paying to stay in; forced covering tends to snap the price back
+# (He, Manela, Ross & von Wachter, "Fundamentals of Perpetual Futures": perp deviations
+# revert). Buy the stretch down when shorts are crowded; mirrored when longs are.
+# Close when the stretch is gone.
+# Rule: long when z(96) <= -$z and xs_funding(96) <= -0.6; shorts mirrored; exit when z(96) >= 0
+
+name = "s15_crowd_flush"
+interval = "15m"
+hypothesis = "H-S15-CROWD"
+
+[grid]
+z = [2.0, 2.5]          # stretch below the 1-day mean, in standard deviations
+hold = [16, 48]         # time stop: 4h, 12h
+stop = [0.0, 400.0]     # hard stop, bps
+
+[fixed]
+max_positions = 0.0
+
+[rule]
+short = "mirror"
+
+[[rule.long]]
+feature = "z"
+n = 96.0
+op = "<="
+level = "$z*-1"
+
+[[rule.long]]
+feature = "xs_funding"
+n = 96.0
+op = "<="
+level = -0.6
+
+[[rule.exit]]
+feature = "z"
+n = 96.0
+op = ">="
+level = 0.0

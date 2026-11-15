@@ -1,0 +1,48 @@
+# g0104 — generation 28 — invert
+# s15_crowd_flush lost -5.8 bps/day with 2 of 20 coins positive (L802). A rule that loses
+# this broadly may be wrong-way: its opposite is tested as a separate hypothesis, with the
+# search charged again.
+# Rule: long when z(96) >= $z and xs_funding(96) >= 0.6; short on the mirror; close a long when z(96) <= -0
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "ca1f58d6ae1ed"
+interval = "15m"
+hypothesis = "H-G0104"
+name = "g0104"
+parent = "c64e3f04829ab"
+generation = 28
+operator = "invert"
+lessons = ["L802"]
+reason = "s15_crowd_flush lost -5.8 bps/day with 2 of 20 coins positive (L802). A rule that loses this broadly may be wrong-way: its opposite is tested as a separate hypothesis, with the search charged again."
+
+[grid]
+
+[fixed]
+hold = 48.0
+max_positions = 0.0
+stop = 0.0
+z = 2.5
+
+[rule]
+short = "mirror"
+filter = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "z"
+n = 96.0
+op = ">="
+level = "$z"
+
+[[rule.long]]
+feature = "xs_funding"
+n = 96.0
+op = ">="
+level = 0.6
+
+[[rule.exit]]
+feature = "z"
+n = 96.0
+op = "<="
+level = -0.0

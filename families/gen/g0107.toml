@@ -1,0 +1,40 @@
+# g0107 — generation 30 — explore
+# Budget was left after the lessons were used: a fade against the basket when the market
+# is calm, a pairing of blocks not yet in the lineage.
+# Rule: long when resid_z($n) <= $z*-1; short on the mirror; only when mkt_rvol_pct($vol_n) < 0.5
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "cb8c70426ed5e"
+interval = "15m"
+hypothesis = "H-G0107"
+name = "g0107"
+generation = 30
+operator = "explore"
+reason = "Budget was left after the lessons were used: a fade against the basket when the market is calm, a pairing of blocks not yet in the lineage."
+
+[grid]
+n = [96.0, 192.0]
+z = [2.0, 2.5]
+
+[fixed]
+hold = 24.0
+stop = 500.0
+vol_n = 96.0
+
+[rule]
+short = "mirror"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "resid_z"
+n = "$n"
+op = "<="
+level = "$z*-1"
+
+[[rule.filter]]
+feature = "mkt_rvol_pct"
+n = "$vol_n"
+op = "<"
+level = 0.5

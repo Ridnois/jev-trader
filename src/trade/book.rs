@@ -129,7 +129,12 @@ impl Book {
 
     /// The close of the panel's last bar: signal and time exits, then entries, coin by
     /// coin in panel order (as the simulator does). `quote(c)` is the live book now.
-    pub fn on_bar(&mut self, p: &Panel, plan: &Plan, cfg: &SimCfg, quote: &dyn Fn(usize) -> Option<Quote>, now_ms: i64) -> Vec<Event> {
+    ///
+    /// `last_ms` is the open of the last bar this book decided. Bars after it that were
+    /// never decided (their candles came too late) still get their exit signals honoured,
+    /// late, at today's price; their entries are not taken, since a late entry is not
+    /// the trade the simulator tested.
+    pub fn on_bar(&mut self, p: &Panel, plan: &Plan, cfg: &SimCfg, quote: &dyn Fn(usize) -> Option<Quote>, now_ms: i64, last_ms: Option<i64>) -> Vec<Event> {
         let mut out = Vec::new();
         if p.n == 0 {
             return out;
@@ -137,12 +142,16 @@ impl Book {
         let i = p.n - 1;
         let pol = plan.policy;
         let next_open = p.time(i) + p.interval_ms;
+        let missed: Vec<usize> = match last_ms {
+            Some(t) => (0..i).rev().take_while(|&j| p.time(j) > t).collect(),
+            None => Vec::new(),
+        };
         // Exits first, for every coin, then entries: the same order as the simulator.
         for c in 0..p.coins.len() {
             let coin = &p.coins[c];
             let Some(q) = quote(c).filter(Quote::ok) else { continue };
             if let Some((side, deadline)) = self.positions.get(coin).map(|x| (x.side, x.deadline_ms)) {
-                if !plan.exit.is_empty() && plan.exit[c][i] == side {
+                if !plan.exit.is_empty() && (plan.exit[c][i] == side || missed.iter().any(|&j| plan.exit[c][j] == side)) {
                     out.extend(self.close(coin, Self::touch(&q, side < 0), 0.0, cfg, now_ms, "signal", q.mid()).map(Event::Closed));
                 } else if next_open >= deadline {
                     if pol.extend && plan.entry[c][i] == side {
@@ -252,7 +261,7 @@ mod tests {
                 let o = full.open[c][i + 1];
                 o.is_finite().then(|| Quote { bid: o * (1.0 - half(&full.coins[c])), ask: o * (1.0 + half(&full.coins[c])) })
             };
-            for ev in book.on_bar(&head, &pl, cfg, &quote, now) {
+            for ev in book.on_bar(&head, &pl, cfg, &quote, now, None) {
                 if let Event::Closed(t) = ev {
                     closed.push(t);
                 }
@@ -291,6 +300,40 @@ mod tests {
             // Quotes compound half-spread and slippage instead of adding them: a 1e-8 difference.
             assert!((g.pnl - w.pnl).abs() < 1e-3, "{}: pnl {} vs {}", spec.id(), g.pnl, w.pnl);
         }
+    }
+
+    /// A bar whose candles never came is not decided, but an exit it signalled is still
+    /// taken at the next bar; an entry it signalled is not.
+    #[test]
+    fn a_missed_bar_still_closes_but_never_opens() {
+        use crate::lab::strategy::{Plan, Policy};
+        let full = random_panel(5, 2, 4, "1h");
+        let cfg = SimCfg::new(10_000.0, Costs::default(), Sizing::default());
+        let (nc, n) = (full.coins.len(), full.n);
+        let mut entry = vec![vec![0i8; n]; nc];
+        let mut exit = vec![vec![0i8; n]; nc];
+        entry[0][30] = 1; // coin 0: long at bar 30
+        exit[0][40] = 1; // its exit fires only at bar 40
+        entry[1][40] = -1; // coin 1: a short signalled only at bar 40
+        let plan = Plan { entry, exit, policy: Policy { hold_bars: 500, stop_bps: 0.0, extend: false, max_positions: 0 } };
+        let open = &full.open;
+        let quote = |i: usize| move |c: usize| { let o = open[c][i]; Some(Quote { bid: o * 0.9999, ask: o * 1.0001 }) };
+        let run = |skip: bool| {
+            let mut book = Book::new(cfg.capital);
+            let mut last = None;
+            for i in 30..=41 {
+                if skip && i == 40 {
+                    continue;
+                }
+                book.on_bar(&full.head(i + 1), &plan, &cfg, &quote(i + 1), full.time(i + 1), last);
+                last = Some(full.time(i));
+            }
+            book
+        };
+        let (on_time, late) = (run(false), run(true));
+        assert!(on_time.positions.get(&full.coins[0]).is_none() && on_time.positions.contains_key(&full.coins[1]));
+        assert!(late.positions.get(&full.coins[0]).is_none(), "the exit of the missed bar is still taken");
+        assert!(!late.positions.contains_key(&full.coins[1]), "the entry of the missed bar is not taken late");
     }
 
     #[test]

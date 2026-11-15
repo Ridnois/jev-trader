@@ -9,6 +9,8 @@
   --color-neg: var(--neg);
   --color-warn: var(--warn);
   --color-info: var(--info);
+  --color-long: var(--long);
+  --color-short: var(--short);
   --color-panel: var(--panel);
   --color-faint: var(--faint);
   --color-background: var(--background);
@@ -91,6 +93,9 @@
   --neg: #ff6369;
   --warn: #f5b041;
   --info: #52a8ff;
+  /* Position side: direction, not result, so neither green nor red. */
+  --long: #4cc2ff;
+  --short: #c792ff;
   /* Family identity, used on the Lab charts only. Validated for colour-blind separation on #111. */
   --chart-1: #3987e5;
   --chart-2: #d95926;

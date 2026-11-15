@@ -272,6 +272,21 @@ impl Rule {
         format!("c{:012x}", fnv(&self.canonical()) & 0xffff_ffff_ffff)
     }
 
+    /// Id of what the rule does rather than how it is written: entry and filter
+    /// conditions are all required and exit conditions any-of, so their order and
+    /// repeats change nothing. Two rules with the same `same_id` trade on the same bars;
+    /// `id()` stays the written form's hash so file names and the ledger don't move.
+    pub fn same_id(&self) -> String {
+        let mut r = self.clone();
+        for block in [&mut r.long, &mut r.filter, &mut r.exit] {
+            let mut keyed: Vec<(String, Cond)> = block.drain(..).map(|c| (serde_json::to_string(&c).expect("a condition always serialises"), c)).collect();
+            keyed.sort_by(|x, y| x.0.cmp(&y.0));
+            keyed.dedup_by(|x, y| x.0 == y.0);
+            *block = keyed.into_iter().map(|(_, c)| c).collect();
+        }
+        r.id()
+    }
+
     pub fn conds(&self) -> impl Iterator<Item = &Cond> {
         self.long.iter().chain(&self.filter).chain(&self.exit)
     }
@@ -663,6 +678,21 @@ mod tests {
         // Pinned: an id that changes silently would make old trials look new.
         assert_eq!(a.id(), "c4628412b4bd4");
         assert_eq!(a.refs(), vec!["n".to_string(), "out_frac".to_string()]);
+    }
+
+    #[test]
+    fn order_and_repeats_do_not_make_a_new_strategy() {
+        let c = |f: &str, l: f64| Cond { feature: serde_json::from_value(serde_json::json!(f)).unwrap(), n: Param::Ref("$n".into()), op: Op::Gt, level: Param::Num(l) };
+        let base = Rule { long: vec![c("channel", 1.0), c("xs_ret", 0.6)], short: Short::None, filter: Vec::new(), exit: Vec::new(), exit_opposite: false, every: None, extend: false };
+        let repeated = Rule { long: vec![c("channel", 1.0), c("xs_ret", 0.6), c("xs_ret", 0.6)], ..base.clone() };
+        let swapped = Rule { long: vec![c("xs_ret", 0.6), c("channel", 1.0)], ..base.clone() };
+        let other = Rule { long: vec![c("channel", 1.0), c("xs_ret", 0.7)], ..base.clone() };
+        assert_ne!(base.id(), repeated.id(), "the written form keeps its own id");
+        assert_eq!(base.same_id(), repeated.same_id());
+        assert_eq!(base.same_id(), swapped.same_id());
+        assert_ne!(base.same_id(), other.same_id());
+        let as_filter = Rule { long: vec![c("channel", 1.0)], filter: vec![c("xs_ret", 0.6)], ..base.clone() };
+        assert_ne!(base.same_id(), as_filter.same_id(), "a filter also gates shorts, so it is not the same as an entry condition");
     }
 
     #[test]

@@ -1,0 +1,51 @@
+# g0102 — generation 27 — repair
+# g0003 failed only walk-forward, deflated Sharpe, best days removed (L105); best days
+# removed says its profit leans on a few days. Outsized days cluster in market-wide
+# volatility spikes: skipping the most volatile tenth of days tests whether the edge is
+# there without them.
+# Rule: long when z($vol_look) >= $z and vol_ratio($vol_look) >= $vol_mult; long only; only when mkt_rvol_pct(96) < 0.9
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c317337f223f3"
+interval = "15m"
+hypothesis = "H-G0102"
+name = "g0102"
+parent = "cf814300a8476"
+generation = 27
+operator = "repair"
+lessons = ["L105"]
+reason = "g0003 failed only walk-forward, deflated Sharpe, best days removed (L105); best days removed says its profit leans on a few days. Outsized days cluster in market-wide volatility spikes: skipping the most volatile tenth of days tests whether the edge is there without them."
+
+[grid]
+vol_look = [192.0, 384.0, 768.0]
+
+[fixed]
+hold = 24.0
+max_positions = 0.0
+stop = 0.0
+vol_mult = 3.0
+z = 2.5
+
+[rule]
+short = "none"
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "z"
+n = "$vol_look"
+op = ">="
+level = "$z"
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$vol_look"
+op = ">="
+level = "$vol_mult"
+
+[[rule.filter]]
+feature = "mkt_rvol_pct"
+n = 96.0
+op = "<"
+level = 0.9

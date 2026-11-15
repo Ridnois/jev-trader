@@ -1,3 +1,4 @@
+import type { StrategyTag } from "@/lib/format";
 export type Gate = { gate: string; passed: boolean; detail: string };
 
 export type Position = {
@@ -10,7 +11,11 @@ export type Position = {
   entry_bar_ms: number;
   deadline_ms: number;
   opened_ms: number;
+  /** Funding paid (negative) or received (positive) so far, dollars. */
   funding: number;
+  /** Fee paid on entry, dollars. Older status files may lack it. */
+  entry_fee?: number;
+  entry_mid?: number;
 };
 
 export type BookStatus = {
@@ -59,6 +64,14 @@ export type StrategyView = {
   status: string;
   hypothesis: string;
   card: Card;
+  /** Screen name of the family: `Trend`, or `g0045` for a generated one. */
+  family: string;
+  /** `G<generation>/<family>·<variant>`, the compact name on tables. */
+  tag: StrategyTag;
+  /** The entry rule in words with the spec's settings filled in; null when the family has no composed form. */
+  rule: string | null;
+  /** The entry clause per side, the part of the rule that opens one order. */
+  entry: { long: string; short: string | null } | null;
   book: BookStatus | null;
   /** Sequential test: log-likelihood ratio after each full paper day. */
   days: DayRow[];
@@ -154,6 +167,9 @@ export type LabSummary = {
   families: number;
   /** Of `families`, how many the evolve loop generated. */
   generated: number;
+  /** Families judged before the ledger's current era, kept as a record and not counted above. */
+  prior: number;
+  era: string | null;
   /** The family that failed the fewest checks, and the first check it fell short on. */
   closest: { name: string; generation: number | null; failed: number; check: string; value: string; need: string } | null;
   promoted: number;
@@ -228,8 +244,15 @@ export type FamilyReport = {
   notes: string[];
   /** When the verdict file was written, ISO. */
   judged: string;
+  /** UTC date (YYYY-MM-DD) of the first out-of-sample day, the first point of `oosCum`. */
+  oosStart: string | null;
+  /** First lockbox day (panel start + design days) and the panel's last day, YYYY-MM-DD. */
+  lockboxStart: string | null;
+  panelEnd: string | null;
   /** Screen name for a generated family (`g0045`); hand-written families use their family name. */
   name?: string;
+  /** Judged before the ledger's current era: its verdict faced the old ledger's bar, so it is a record, not ranked. */
+  prior: boolean;
   /** Generation number, for a family the evolve loop proposed. */
   generation?: number;
 };
@@ -294,7 +317,13 @@ export type Lab = {
   calibrations: Calibration[];
   trials: number;
   trialsByStudy: { study: string; n: number }[];
+  /** What `strategies/` hands the paper trader: one row per file, keyed to the family its spec belongs to. */
+  onPaper: OnPaper[];
+  /** Start of the ledger's current era, or null when it never restarted. */
+  era: string | null;
 };
+
+export type OnPaper = { family: string; name: string; status: "validated" | "candidate" | string };
 
 // ---- the evolve loop: `lab-data/lineage.jsonl` and `lab-data/reports/evolve/*.json` ----
 
@@ -331,6 +360,8 @@ export type GenNode = {
   /** Failed checks from the `tested` row, comma separated. */
   failed: string;
   trials: number;
+  /** Judged before the ledger's current era (see `FamilyReport.prior`). */
+  prior: boolean;
   children: GenNode[];
 };
 
@@ -415,6 +446,8 @@ export type EvolveCfg = {
   auto_trial_budget: number;
   /** Per-study overrides (`[evolve.auto_trial_budgets]`). */
   auto_trial_budgets: Record<string, number>;
+  /** Cap on new trials per study per `--auto` run; when set, the lifetime budget is unused. */
+  auto_trials_per_run: number | null;
   auto_stall: number;
   auto_max_generations: number;
 };
@@ -439,16 +472,36 @@ export type CycleReport = {
   lockbox_openings: number;
 };
 
+/** A family judged this era that failed only one or two checks: the measured value of each check it missed. */
+export type NearMiss = {
+  name: string;
+  family: string;
+  /** 0 for a hand-written family. */
+  generation: number;
+  study: string;
+  /** When the gate judged it (report time). */
+  judged: string;
+  /** Trials on its study's ledger when it was judged: the bar the deflated Sharpe check measured it against. */
+  trials_ledger: number;
+  failed: Check[];
+};
+
 export type Generations = {
   roots: GenRoot[];
+  /** This era's families one or two checks short, closest first. */
+  near: NearMiss[];
+  /** Hand-written families on the Lab: not bred by the loop, so not on this page's chart. */
+  handWritten: number;
   /** Proposed families in the lineage. */
   proposed: number;
   /** Judged families by their gate verdict (the newest `tested` row of each). */
   verdicts: Record<string, number>;
   /** The highest generation in the lineage. */
   generations: number;
-  /** Trials charged by the loop (every lineage row). */
+  /** Trials charged by the loop in the ledger's current era. */
   trials: number;
+  /** Start of the ledger's current era (`era_start`), or null when the ledger never restarted. */
+  era: string | null;
   /** Per study: trials the loop charged, and every trial on the ledger. */
   byStudy: { study: string; loop: number; ledger: number }[];
   /** Family id or root name to its readable name (`c…` → `g0001`). */
@@ -464,3 +517,65 @@ export type Generations = {
   /** The caps the loop runs under, read from `lab.toml`. */
   cfg: EvolveCfg;
 };
+
+// ---- the rules page: every rule on `lab-data/trials.jsonl` ----
+
+/** One rule the lab simulated: a point on a family's grid, with its in-sample numbers. */
+export type RuleRow = {
+  /** Spec id, `family:k=v,...`. */
+  id: string;
+  study: string;
+  /** Family id (rule hash for a generated family). */
+  family: string;
+  /** Settings parsed from the spec id. */
+  params: Record<string, number>;
+  trades: number;
+  days: number;
+  /** Annualised Sharpe (daily × √365) and mean bps per day, in sample after costs. */
+  sharpe: number;
+  bps: number;
+  at: string;
+  /** The family's in-sample pick, and how many walk-forward folds picked this rule. */
+  pick: boolean;
+  folds: number;
+};
+
+/** A family as the rules page needs it. */
+export type RuleFamily = {
+  key: string;
+  family: string;
+  study: string;
+  name: string;
+  generation: number | null;
+  verdict: string | null;
+  /** Checks failed; null when the gate never ran its checks. */
+  short: number | null;
+  /** Readable statement of the family's rule, from its hypothesis. */
+  statement: string;
+  specs: number;
+};
+
+/** One walk-forward test window: the rule a family's fold picked and how it did out of sample. */
+export type WalkCell = {
+  /** Spec id of the picked rule. */
+  spec: string;
+  /** Mean bps a day over the window, out of sample, after costs. */
+  bps: number;
+  /** Annualised Sharpe over the window. */
+  sharpe: number;
+};
+
+/** A family's walk-forward, aligned to `RuleWalk.windows`; null where its fold picked nothing (flat). */
+export type WalkFamily = { key: string; cells: (WalkCell | null)[]; mean: number };
+
+export type RuleWalk = {
+  /** Test windows on the calendar, oldest first: first day and the day after the last. */
+  windows: { start: string; end: string }[];
+  /** First sealed day, the earliest across studies. */
+  lockbox: string | null;
+  families: WalkFamily[];
+  /** Families with a report but no walk-forward folds (stopped before the checks). */
+  none: string[];
+};
+
+export type Rules = { rows: RuleRow[]; families: Record<string, RuleFamily>; walk: RuleWalk };

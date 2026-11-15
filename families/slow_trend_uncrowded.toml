@@ -1,0 +1,45 @@
+# Slow trend, long only, skipping coins whose longs are crowded: no entry, and an
+# exit, while the coin's own funding over the last 7 days is above a multiple of the
+# resting rate (Binance rests at 0.01% per 8h, so 0.0021 over 7 days). Tests whether
+# extreme funding marks trends that are about to unwind (H-L06), on top of H-L05.
+interval = "1h"
+hypothesis = "H-L06"
+
+[grid]
+n = [480.0, 1440.0, 2880.0]   # 20, 60, 120 days of 1h bars
+fcap = [0.0042, 0.0084]       # 2x and 4x the resting rate over 7 days
+
+[fixed]
+hold_days = 30.0
+stop = 0.0
+flook = 168.0                 # hours of funding summed
+
+[rule]
+short = "none"
+every = 24.0
+exit_opposite = false
+extend = true
+
+[[rule.long]]
+feature = "ret"
+n = "$n"
+op = ">"
+level = 0.0
+
+[[rule.filter]]
+feature = "funding"
+n = "$flook"
+op = "<"
+level = "$fcap"
+
+[[rule.exit]]
+feature = "channel"
+n = "$n"
+op = "<"
+level = 0.0
+
+[[rule.exit]]
+feature = "funding"
+n = "$flook"
+op = ">="
+level = "$fcap"

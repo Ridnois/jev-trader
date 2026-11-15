@@ -1,0 +1,40 @@
+# s15_active_breakout — hand-written seed for binance-15m (H-S15-SURGE), 2026-11-13.
+# Intraday time-series momentum in Bitcoin is strongest in the sessions with the most
+# volume and volatility (Shen, Urquhart & Wang, "Bitcoin intraday time-series momentum",
+# Financial Review 2022). Enter a break of the last day's range on a volume surge, only
+# while the market's own volatility is in the top 30% of the last 30 days; mirrored
+# for breaks down. Long holds keep the trade count low against 15 bps per round trip.
+# Rule: long when channel(96) > 1 and vol_ratio(96) >= $vm; only when mkt_rvol_pct(96) >= 0.7; shorts mirrored
+
+name = "s15_active_breakout"
+interval = "15m"
+hypothesis = "H-S15-SURGE"
+
+[grid]
+vm = [2.0, 3.0]         # bar volume vs its 1-day mean
+hold = [16, 48]         # time stop: 4h, 12h
+stop = [0.0, 300.0]     # hard stop, bps
+
+[fixed]
+max_positions = 0.0
+
+[rule]
+short = "mirror"
+
+[[rule.long]]
+feature = "channel"
+n = 96.0
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = 96.0
+op = ">="
+level = "$vm"
+
+[[rule.filter]]
+feature = "mkt_rvol_pct"
+n = 96.0
+op = ">="
+level = 0.7

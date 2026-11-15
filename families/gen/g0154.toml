@@ -1,0 +1,72 @@
+# g0154 — generation 46 — recombine
+# g0147 and g0036 both made money on the design window with a daily correlation of +0.01
+# (L7992). Entering only when both agree tests whether each confirms the other.
+# Rule: long when xs_ret($look) >= $cut and channel($b_b_n) > 1 and xs_funding($b_look) <= -0.5 and channel($b_n) > 1 and vol_ratio($b_n) >= $b_vol_mult and xs_ret($b_b_look) >= $b_b_cut; long only; entries every $hold bars
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c33314147b50b"
+interval = "1h"
+hypothesis = "H-G0154"
+name = "g0154"
+parent = "c5e23b5bf89ac"
+generation = 46
+operator = "recombine"
+lessons = ["L7992"]
+reason = "g0147 and g0036 both made money on the design window with a daily correlation of +0.01 (L7992). Entering only when both agree tests whether each confirms the other."
+
+[grid]
+look = [672.0, 1344.0, 2688.0]
+
+[fixed]
+b_b_cut = 0.6
+b_b_look = 336.0
+b_b_n = 384.0
+b_look = 72.0
+b_n = 24.0
+b_vol_mult = 2.5
+cut = 0.6
+hold = 24.0
+
+[rule]
+short = "none"
+filter = []
+exit = []
+exit_opposite = false
+every = "$hold"
+extend = true
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$look"
+op = ">="
+level = "$cut"
+
+[[rule.long]]
+feature = "channel"
+n = "$b_b_n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_look"
+op = "<="
+level = -0.5
+
+[[rule.long]]
+feature = "channel"
+n = "$b_n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$b_n"
+op = ">="
+level = "$b_vol_mult"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_b_look"
+op = ">="
+level = "$b_b_cut"

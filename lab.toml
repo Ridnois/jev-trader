@@ -5,9 +5,15 @@ data_dir = "lab-data"
 research_venue = "binance"    # long history, prices only; costs are always Hyperliquid's
 base_interval = "15m"         # coarser bars are built from these
 hl_intervals = ["15m", "1h"]  # Hyperliquid serves only its latest 5000 candles per interval
-start = "2024-01-01"
+start = "2021-01-01"          # was 2024-01-01 until 2026-11-13: older bars are fetched and put in front (H-HISTORY)
 capital = 10000.0
 lockbox_frac = 0.20           # newest 20% of days: no search may see them
+# Searches up to 2026-11-13 saw every day before 2026-04-18. A longer history makes the 20%
+# start earlier, so the lockbox is held at or after this day: it only ever holds unseen days.
+lockbox_not_before = "2026-04-19"
+# New ledger era, 2026-11-13 at the user's request: trials, lockbox openings and loop spend before this
+# time were archived to lab-data/archive/era-before-2026-11-13/ and no longer raise the bar (H-ERA-2).
+era_start = "2026-11-13T23:43:56Z"
 threads = 4
 seed = 20261111
 
@@ -92,8 +98,11 @@ min_catalyst = 30
 families_dir = "families/gen"
 hypotheses = "hypotheses.toml"
 auto_trial_budget = 200       # `--auto`: most trials the loop may charge on one study, over all its cycles
+auto_trials_per_run = 20      # set: `--auto` charges at most this many new trials per study per run instead of the
+                              # lifetime budget above (the hourly tick runs once, so 20 per hour). 2026-11-13, at the user's request
 auto_stall = 3                # `--auto` stops after this many generations with nothing better than REJECT
 auto_max_generations = 20
+repair_max_failed = 3         # `repair` acts on families at most this many failed checks from passing
 
 [evolve.auto_trial_budgets]   # per-study overrides of auto_trial_budget
-binance-1h = 300              # raised 2026-11-13 at the user's request, after 198 of 200 were spent
+binance-1h = 300              # raised 2026-11-13 at the user's request, after 198 of 200 were spent. Unused while auto_trials_per_run is set

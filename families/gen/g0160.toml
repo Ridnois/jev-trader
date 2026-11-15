@@ -1,0 +1,84 @@
+# g0160 — generation 48 — recombine
+# g0155 and g0123 both made money on the design window with a daily correlation of +0.04
+# (L8735). Entering only when both agree tests whether each confirms the other.
+# Rule: long when channel($n) > 1 and vol_ratio($n) >= $vol_mult and xs_ret($b_look) >= $b_cut and channel($b_b_b_n) > 1 and xs_funding($b_b_look) <= -0.5 and xs_ret($b_look) >= 0.5 and channel($b_b_n) > 1 and vol_ratio($b_b_n) >= $b_b_vol_mult; short on the mirror
+# Written by `lab propose`. The family name is the rule's id: editing the rule makes a new family.
+
+family = "c65732ec69424"
+interval = "1h"
+hypothesis = "H-G0160"
+name = "g0160"
+parent = "c784a0264c92c"
+generation = 48
+operator = "recombine"
+lessons = ["L8735"]
+reason = "g0155 and g0123 both made money on the design window with a daily correlation of +0.04 (L8735). Entering only when both agree tests whether each confirms the other."
+
+[grid]
+n = [12.0, 24.0, 48.0]
+
+[fixed]
+b_b_b_n = 384.0
+b_b_look = 336.0
+b_b_n = 96.0
+b_b_vol_mult = 2.5
+b_cut = 0.6
+b_look = 2688.0
+hold_days = 3.0
+stop = 600.0
+vol_mult = 2.5
+
+[rule]
+short = "mirror"
+filter = []
+exit = []
+exit_opposite = false
+extend = false
+
+[[rule.long]]
+feature = "channel"
+n = "$n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$n"
+op = ">="
+level = "$vol_mult"
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = "$b_cut"
+
+[[rule.long]]
+feature = "channel"
+n = "$b_b_b_n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "xs_funding"
+n = "$b_b_look"
+op = "<="
+level = -0.5
+
+[[rule.long]]
+feature = "xs_ret"
+n = "$b_look"
+op = ">="
+level = 0.5
+
+[[rule.long]]
+feature = "channel"
+n = "$b_b_n"
+op = ">"
+level = 1.0
+
+[[rule.long]]
+feature = "vol_ratio"
+n = "$b_b_n"
+op = ">="
+level = "$b_b_vol_mult"
